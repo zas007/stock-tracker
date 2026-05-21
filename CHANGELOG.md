@@ -5,6 +5,60 @@ Google Sheets ID：`1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g`
 
 ---
 
+## v10.2 — 2026/05/20
+
+### 修正
+
+- **T86 API 欄位結構修正（重大）**
+  * 實際回傳 19 欄，非原本預期的 18 欄
+  * 外資被拆為「外陸資（不含外資自營商）」`[2][3][4]` + 「外資自營商」`[5][6][7]` 兩組
+  * 投信：`[8][9][10]`（原本抓的是 `[5][6][7]` 即外資自營商，完全抓錯）
+  * 自營商合計買超：`[11]`（原本用 `[14][15][16]` 是自行買賣欄，非合計）
+  * 三大法人合計：`[18]`
+  * 修正後各法人數字還原正確，外資 = `[4]+[7]`，自營商買進/賣出顯示 = 自行`[12][13]` + 避險`[15][16]`
+- **買超張數單位錯誤（重大）**
+  * T86 所有數量欄位單位為「股」，原本直接寫入未換算
+  * 全部加上 `// 1000` 換算為張
+  * 注意：歷史紀錄中 v10.2 之前的資料仍為股數，需手動修正或清除重跑
+- **`_build_sector_triggered()` 變數名稱錯誤**
+  * set comprehension 中 `SECTOR_MAP[s]` 在 `for s in triggered` 之前使用，`NameError: name 's' is not defined`
+  * 改為 `{c for sector in triggered for c in SECTOR_MAP.get(sector, [])}`
+- **gspread `ws.update()` 參數順序**
+  * 新版 gspread 要求 named arguments
+  * `ws.update("A1", data)` → `ws.update(range_name="A1", values=data)`
+- **欄位數檢查門檻**
+  * 從 `≥17` 改為 `≥19`，符合實際 API 結構
+
+### 新增
+
+- **`calc_position_fifo(buy_entries, sell_entries)`**
+  * 以**價格升序** FIFO 扣減賣超，優先出清低成本部位（符合實際出場行為）
+  * 回傳 `(remaining_lots, weighted_avg_price)`
+  * `avg_price = 0` 的 entry 仍參與張數扣減，但不列入均價計算
+  * 取代原本的 `weighted_avg()`（純買超加權，忽略賣超）
+- **`sell_hist` 拆分為各法人獨立紀錄**
+  * 原：`sell_hist[code] = [(date, net), ...]`（三法人混合）
+  * 新：`sell_hist[code] = {"f": [...], "t": [...], "d": [...]}` 各自獨立
+  * 各法人 FIFO 扣減只扣自己的賣超，不互相影響
+- **`fetch_industry_map()`**
+  * 從 `isin.twse.com.tw` 抓 Big5 編碼的上市股票官方產業別
+  * 回傳 `{代號: 產業別名稱}`，失敗時回傳空 dict 不中斷執行
+- **`auto_update_sector_map()`**
+  * 買超榜出現不在 `SECTOR_MAP` 的新股票時，查官方產業別自動歸類
+  * 即時更新記憶體中的 `SECTOR_MAP` 與 `CODE_TO_SECTOR`（本次執行生效）
+  * 同步寫回 `config.py`（下次執行不需重查）
+  * 族群已存在時插入列表末尾；族群不存在時新增整個族群區塊
+- **`CODE_TO_SECTOR` 反查表**
+  * 啟動時從 `SECTOR_MAP` 自動建立 `{代號: 族群名}` 反查表
+  * `_build_sector_triggered()` 改為從買超榜出發查反查表，邏輯更快且新補入代號即時生效
+
+### 調整
+
+- **`fetch_institutional()` 重構為具名函式**
+  * `foreign_buy/sell()`、`trust_buy/sell()`、`dealer_buy/sell()` 各自獨立，欄位對應清晰可讀
+
+---
+
 ## v10.1 — 2026/05/20
 
 ### 修正
@@ -212,7 +266,7 @@ Google Sheets ID：`1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g`
 
 ---
 
-## 設定參數一覽（v10.1 現況）
+## 設定參數一覽（v10.2 現況）
 > 所有參數統一在 `config.py` 調整
 
 | 參數              | 預設值   | 說明                     |
@@ -229,7 +283,7 @@ Google Sheets ID：`1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g`
 
 ---
 
-## 檔案結構（v10.1 現況）
+## 檔案結構（v10.2 現況）
 
 ```
 ~/Documents/Z/study/stock/
@@ -243,4 +297,4 @@ Google Sheets ID：`1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g`
 
 ---
 
-*最後更新：2026/05/20*
+*最後更新：2026/05/20（v10.2）*

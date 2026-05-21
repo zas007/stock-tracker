@@ -8,7 +8,7 @@
 5. update_analysis 拆分為 _build_history_maps / _build_analysis_rows / update_analysis
 """
 
-import subprocess, json, gspread, sys, os, time
+import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
@@ -36,6 +36,15 @@ except ImportError:
 # ★ 固定系統設定
 # ═══════════════════════════════════════════════
 COOKIE_FILE = "/tmp/twse_cookie.txt"
+
+# 啟動時從 SECTOR_MAP 建立「代號 → 族群」反查表（程式內自動維護，不需手動）
+def _build_code_to_sector():
+    return {
+        code: sector
+        for sector, members in SECTOR_MAP.items()
+        for code in members
+    }
+CODE_TO_SECTOR = {}   # 在 main() 初始化後重建
 
 
 # ═══════════════════════════════════════════════
@@ -86,27 +95,95 @@ def fetch_institutional(date_str):
     if data.get("stat") != "OK":
         raise ValueError(f"無資料：{data.get('stat','')}")
 
-    def top10_buy(buy_col, sell_col, net_col):
+    # 診斷：印出實際欄位數，方便日後排查
+    sample_len = len(data["data"][0]) if data.get("data") else 0
+    print(f"  T86 欄位數：{sample_len}，資料筆數：{len(data.get('data', []))}")
+    if sample_len < 19:
+        raise ValueError(
+            f"T86 欄位數不足（{sample_len} 欄，需要 ≥19）。"
+            "可能尚未收盤，三大法人資料通常 16:30 後才有。"
+        )
+
+    # 實際欄位（19欄）：
+    # [2][3][4]   外陸資(不含外資自營商) 買進/賣出/買超
+    # [5][6][7]   外資自營商             買進/賣出/買超
+    # [8][9][10]  投信                   買進/賣出/買超
+    # [11]        自營商合計買超（直接用）
+    # [12][13][14] 自營商自行買賣        買進/賣出/買超
+    # [15][16][17] 自營商避險            買進/賣出/買超
+    # [18]        三大法人合計買超
+
+    def make_stock(r, buy, sell, net):
+        """單位：股 → 張（//1000）"""
+        return {
+            "code": r[0].strip(), "name": r[1].strip(),
+            "buy":  buy  // 1000,
+            "sell": sell // 1000,
+            "net":  net  // 1000,
+            "avg_price": 0.0
+        }
+
+    def foreign_buy():
+        # 外資 = 外陸資 + 外資自營商
         result = [
-            {"code": r[0].strip(), "name": r[1].strip(),
-             "buy": to_int(r[buy_col]), "sell": to_int(r[sell_col]),
-             "net": to_int(r[net_col]), "avg_price": 0.0}
-            for r in data["data"] if to_int(r[net_col]) > 0
+            make_stock(r,
+                to_int(r[2]) + to_int(r[5]),
+                to_int(r[3]) + to_int(r[6]),
+                to_int(r[4]) + to_int(r[7]))
+            for r in data["data"]
+            if (to_int(r[4]) + to_int(r[7])) > 0
         ]
         return sorted(result, key=lambda x: x["net"], reverse=True)[:10]
 
-    def top10_sell(buy_col, sell_col, net_col):
+    def foreign_sell():
         result = [
-            {"code": r[0].strip(), "name": r[1].strip(),
-             "buy": to_int(r[buy_col]), "sell": to_int(r[sell_col]),
-             "net": to_int(r[net_col]), "avg_price": 0.0}
-            for r in data["data"] if to_int(r[net_col]) < 0
+            make_stock(r,
+                to_int(r[2]) + to_int(r[5]),
+                to_int(r[3]) + to_int(r[6]),
+                to_int(r[4]) + to_int(r[7]))
+            for r in data["data"]
+            if (to_int(r[4]) + to_int(r[7])) < 0
+        ]
+        return sorted(result, key=lambda x: x["net"])[:10]
+
+    def trust_buy():
+        result = [
+            make_stock(r, to_int(r[8]), to_int(r[9]), to_int(r[10]))
+            for r in data["data"] if to_int(r[10]) > 0
+        ]
+        return sorted(result, key=lambda x: x["net"], reverse=True)[:10]
+
+    def trust_sell():
+        result = [
+            make_stock(r, to_int(r[8]), to_int(r[9]), to_int(r[10]))
+            for r in data["data"] if to_int(r[10]) < 0
+        ]
+        return sorted(result, key=lambda x: x["net"])[:10]
+
+    def dealer_buy():
+        # 自營商合計買超 = [11]，買進/賣出用自行+避險
+        result = [
+            make_stock(r,
+                to_int(r[12]) + to_int(r[15]),
+                to_int(r[13]) + to_int(r[16]),
+                to_int(r[11]))
+            for r in data["data"] if to_int(r[11]) > 0
+        ]
+        return sorted(result, key=lambda x: x["net"], reverse=True)[:10]
+
+    def dealer_sell():
+        result = [
+            make_stock(r,
+                to_int(r[12]) + to_int(r[15]),
+                to_int(r[13]) + to_int(r[16]),
+                to_int(r[11]))
+            for r in data["data"] if to_int(r[11]) < 0
         ]
         return sorted(result, key=lambda x: x["net"])[:10]
 
     return (
-        top10_buy(2,3,4),   top10_buy(5,6,7),   top10_buy(14,15,16),
-        top10_sell(2,3,4),  top10_sell(5,6,7),  top10_sell(14,15,16)
+        foreign_buy(), trust_buy(), dealer_buy(),
+        foreign_sell(), trust_sell(), dealer_sell()
     )
 
 
@@ -236,9 +313,43 @@ def enrich_with_margin(groups, date_str):
 # ═══════════════════════════════════════════════
 
 def weighted_avg(entries):
+    """純買超加權均價（向下相容，不含賣超扣減）"""
     total_net  = sum(e[1] for e in entries if e[2] > 0)
     total_cost = sum(e[1] * e[2] for e in entries if e[2] > 0)
     return round(total_cost / total_net, 2) if total_net > 0 else 0.0
+
+def calc_position_fifo(buy_entries, sell_entries):
+    """
+    以價格升序 FIFO 扣減賣超，計算剩餘持倉加權均價。
+    - buy_entries : [(date, net張數, avg_price), ...]
+    - sell_entries: [(date, net張數), ...]
+    - 優先扣掉成本最低的買入批次（模擬實際出場行為）
+    - avg_price = 0 的 entry：張數仍參與扣減，但不列入成本計算
+    回傳 (remaining_lots, weighted_avg_price)
+    """
+    # 按價格升序建立 queue，price=0 排最後（先扣有價格的低價部位）
+    queue = sorted(
+        [[net, price] for _, net, price in buy_entries if net > 0],
+        key=lambda x: (x[1] == 0, x[1])   # price=0 排最後
+    )
+
+    total_sell = sum(net for _, net in sell_entries)
+    remaining_sell = total_sell
+    while remaining_sell > 0 and queue:
+        if queue[0][0] <= remaining_sell:
+            remaining_sell -= queue[0][0]
+            queue.pop(0)
+        else:
+            queue[0][0] -= remaining_sell
+            remaining_sell = 0
+
+    # 剩餘持倉（排除 price=0 的部位只算張數，不算入成本）
+    remaining_lots = sum(q[0] for q in queue)
+    priced         = [(q[0], q[1]) for q in queue if q[1] > 0]
+    total_cost     = sum(lots * price for lots, price in priced)
+    total_priced   = sum(lots for lots, _ in priced)
+    w_avg = round(total_cost / total_priced, 2) if total_priced > 0 else 0.0
+    return remaining_lots, w_avg
 
 def unique_days(entries):
     return len(set(e[0] for e in entries))
@@ -352,7 +463,7 @@ def prepend_block(ws, new_block, disp, date_marker_prefix, sep_cols):
     ws.clear()
     if ws.row_count < len(full_data) + 10:
         ws.add_rows(len(full_data) + 10 - ws.row_count)
-    ws.update("A1", full_data)
+    ws.update(range_name="A1", values=full_data)
 
 
 # ═══════════════════════════════════════════════
@@ -465,7 +576,13 @@ def _build_history_maps(rows):
             if date > buy_map[k]["last"]:
                 buy_map[k]["last"] = date
         else:
-            sell_hist.setdefault(k, []).append((date, net))
+            # 各法人分開記錄賣超，方便 FIFO 各自扣減
+            if k not in sell_hist:
+                sell_hist[k] = {"f": [], "t": [], "d": []}
+            entry_s = (date, net)
+            if type_ == "外資":   sell_hist[k]["f"].append(entry_s)
+            if type_ == "投信":   sell_hist[k]["t"].append(entry_s)
+            if type_ == "自營商": sell_hist[k]["d"].append(entry_s)
 
     all_dates = sorted(set(row[0] for row in rows if row and row[0]))
     return buy_map, sell_hist, net_by_date, all_dates
@@ -508,19 +625,28 @@ def build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net
     t_consec = _consecutive_days(s["t"], code, all_dates, net_by_date)
     d_consec = _consecutive_days(s["d"], code, all_dates, net_by_date)
 
-    f_net  = sum(e[1] for e in s["f"])
-    t_net  = sum(e[1] for e in s["t"])
-    d_net  = sum(e[1] for e in s["d"])
-    f_wavg = weighted_avg(s["f"])
-    t_wavg = weighted_avg(s["t"])
-    d_wavg = weighted_avg(s["d"])
+    # 各法人分別取自己的賣超紀錄
+    sells     = sell_hist.get(code, {"f": [], "t": [], "d": []})
+    f_sells   = sells.get("f", [])
+    t_sells   = sells.get("t", [])
+    d_sells   = sells.get("d", [])
+    all_sells = f_sells + t_sells + d_sells
+
+    # FIFO 扣減：各法人各自優先出清低價部位
+    f_remaining, f_wavg = calc_position_fifo(s["f"], f_sells)
+    t_remaining, t_wavg = calc_position_fifo(s["t"], t_sells)
+    d_remaining, d_wavg = calc_position_fifo(s["d"], d_sells)
+
+    f_net   = f_remaining
+    t_net   = t_remaining
+    d_net   = d_remaining
     f_trend = calc_trend(s["f"])
     t_trend = calc_trend(s["t"])
     d_trend = calc_trend(s["d"])
 
     _, close, volume, _ = current_prices.get(code, (0.0, 0.0, 0, "N/A"))
     all_entries = s["f"] + s["t"] + s["d"]
-    all_wavg    = weighted_avg(all_entries)
+    all_remaining, all_wavg = calc_position_fifo(all_entries, all_sells)
     pct_str, risk = calc_risk(close, all_wavg)
     signal        = calc_signal(code, all_entries, sell_hist, disp)
     trust_label   = calc_trust_label(t_consec)
@@ -586,7 +712,7 @@ def update_analysis(ss, date_str, current_prices, current_margin):
     ws_ana.clear()
     if ws_ana.row_count < len(ana_data) + 5:
         ws_ana.add_rows(len(ana_data) + 5 - ws_ana.row_count)
-    ws_ana.update("A1", ana_data)
+    ws_ana.update(range_name="A1", values=ana_data)
     print(f"  ✅ 對照分析 更新完成（{len(ana_data)-2} 支，完整累積統計）")
 
     # ── 每日快照（prepend 累積）──
@@ -605,13 +731,112 @@ def update_analysis(ss, date_str, current_prices, current_margin):
 # ★ v8 族群聯動工作表
 # ═══════════════════════════════════════════════
 
+
+def fetch_industry_map():
+    """
+    從 TWSE 抓所有上市股票的官方產業別。
+    回傳 {代號: 產業別名稱}，失敗時回傳空 dict。
+    """
+    url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
+    result = subprocess.run([
+        "curl", "-s", "--max-time", "20",
+        "-H", "User-Agent: Mozilla/5.0",
+        "-H", "Accept-Charset: Big5",
+        url
+    ], capture_output=True)
+    try:
+        # TWSE 這頁是 Big5 編碼
+        html = result.stdout.decode("big5", errors="replace")
+        rows = re.findall(r"<tr[^>]*>(.*?)</tr>", html, re.DOTALL)
+        industry_map = {}
+        current_industry = ""
+        for row in rows:
+            cells = re.findall(r"<td[^>]*>(.*?)</td>", row, re.DOTALL)
+            cells = [re.sub(r"<[^>]+>", "", c).strip() for c in cells]
+            if not cells:
+                continue
+            # 產業別標題列：只有一格且不含空格（無代號）
+            if len(cells) == 1 and cells[0]:
+                current_industry = cells[0]
+                continue
+            # 股票列：第一格是「代號　名稱」（全形空格分隔）
+            if cells and "　" in cells[0]:
+                parts = cells[0].split("　")
+                code  = parts[0].strip()
+                if code.isdigit() and len(code) == 4:
+                    industry_map[code] = current_industry
+        print(f"  ✅ 官方產業別 載入 {len(industry_map)} 支")
+        return industry_map
+    except Exception as e:
+        print(f"  ⚠️ 官方產業別載入失敗：{e}")
+        return {}
+
+
+def auto_update_sector_map(new_codes, all_buy_names, industry_map):
+    """
+    把買超榜上不在 SECTOR_MAP 的股票，依官方產業別自動補入 config.py。
+    回傳補入的 {代號: 族群名} dict。
+    """
+    if not new_codes:
+        return {}
+
+    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.py")
+    if not os.path.exists(config_path):
+        print("  ⚠️ 找不到 config.py，無法自動補入族群")
+        return {}
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        config_text = f.read()
+
+    added = {}
+    for code in sorted(new_codes):
+        name   = all_buy_names.get(code, code)
+        sector = industry_map.get(code, "其他")
+        SECTOR_MAP.setdefault(sector, [])
+        if code not in SECTOR_MAP[sector]:
+            SECTOR_MAP[sector].append(code)
+            added[code] = sector
+
+    if not added:
+        return {}
+
+    for code, sector in added.items():
+        name = all_buy_names.get(code, code)
+        # 若族群已存在，插入到該列表末尾
+        def replacer_existing(m):
+            inner = m.group(2).rstrip()
+            sep   = ",\n        " if inner.strip() else "\n        "
+            return m.group(1) + inner + sep + '"' + code + '",  # ' + name + "\n    " + m.group(3)
+        pattern_existing = r'("' + re.escape(sector) + r'"\s*:\s*\[)([^\]]*?)(\])'
+        new_text, n = re.subn(pattern_existing, replacer_existing, config_text, flags=re.DOTALL)
+        if n:
+            config_text = new_text
+        else:
+            # 族群不存在，在 SECTOR_MAP 最後一個 } 前插入
+            new_entry = '\n    "' + sector + '": [\n        "' + code + '",  # ' + name + '\n    ],'
+            pattern_map = r"(SECTOR_MAP\s*=\s*\{)(.*?)(\n\})"
+            def replacer_map(m):
+                return m.group(1) + m.group(2) + new_entry + m.group(3)
+            config_text = re.sub(pattern_map, replacer_map, config_text, flags=re.DOTALL)
+
+    with open(config_path, "w", encoding="utf-8") as f:
+        f.write(config_text)
+
+    print(f"  ✅ 自動補入 SECTOR_MAP：{added}")
+    return added
+
 def _build_sector_triggered(all_buy_codes):
-    """回傳當日買超榜觸發的族群 {族群名: [觸發代號, ...]}"""
-    return {
-        sector: [c for c in members if c in all_buy_codes]
-        for sector, members in SECTOR_MAP.items()
-        if any(c in all_buy_codes for c in members)
-    }
+    """
+    從買超榜出發查 CODE_TO_SECTOR 反查表，
+    找出觸發的族群 {族群名: [觸發代號, ...]}。
+    比原本從 SECTOR_MAP 遍歷更快，且新補入的代號即時生效。
+    """
+    triggered = {}
+    for code in all_buy_codes:
+        sector = CODE_TO_SECTOR.get(code)
+        if sector:
+            triggered.setdefault(sector, []).append(code)
+    return triggered
 
 
 def update_sector_sheet(ss, date_str, all_buy_codes, all_buy_names, current_prices):
@@ -623,6 +848,19 @@ def update_sector_sheet(ss, date_str, all_buy_codes, all_buy_names, current_pric
     """
     disp      = fmt_date(date_str)
     ws        = get_or_create(ss, "族群聯動", 8)
+    # 找出買超榜中不在 SECTOR_MAP 的新股票
+    unknown_codes = {c for c in all_buy_codes if c not in CODE_TO_SECTOR}
+    if unknown_codes:
+        print(f"  發現 {len(unknown_codes)} 支新股票不在族群表：{sorted(unknown_codes)}")
+        print("  正在查詢官方產業別...")
+        industry_map = fetch_industry_map()
+        newly_added  = auto_update_sector_map(unknown_codes, all_buy_names, industry_map)
+        if newly_added:
+            # 重建反查表讓本次執行即時生效
+            CODE_TO_SECTOR.update({c: s for c, s in newly_added.items()})
+    else:
+        print(f"  所有買超股票均已在族群表中")
+
     triggered = _build_sector_triggered(all_buy_codes)
 
     if not triggered:
@@ -636,7 +874,7 @@ def update_sector_sheet(ss, date_str, all_buy_codes, all_buy_names, current_pric
         return
 
     # 收集所有觸發族群成員
-    all_member_codes = {c for members in SECTOR_MAP[s] for s in triggered for c in members}
+    all_member_codes = {c for sector in triggered for c in SECTOR_MAP.get(sector, [])}
     # ★ 只補抓快取中沒有的股票
     missing = [c for c in all_member_codes if c not in current_prices]
 
@@ -715,11 +953,65 @@ def find_trading_day():
 # 主程式
 # ═══════════════════════════════════════════════
 
+# ═══════════════════════════════════════════════
+# 待處理事項（有項目時啟動優先回報）
+# ═══════════════════════════════════════════════
+PENDING_ITEMS = [
+    {
+        "id": 1,
+        "priority": "🔴 高",
+        "title": "歷史紀錄舊資料單位錯誤",
+        "desc": "v10.2 前寫入的買超/賣出欄位單位為「股」而非「張」，需除以 1000 修正，或清除歷史紀錄從今天重新累積。"
+    },
+    {
+        "id": 2,
+        "priority": "🟡 中",
+        "title": "fetch_industry_map Big5 解析驗證",
+        "desc": "官方產業別 API 使用 Big5 編碼，需在真實環境執行一次確認解析正確，自動補族群功能才可靠。"
+    },
+    {
+        "id": 3,
+        "priority": "🟡 中",
+        "title": "族群熱度排行",
+        "desc": "統計各族群近 N 天被買超的成員數與天數，輸出輪動熱度排行，協助判斷現在輪到哪個族群。"
+    },
+]
+
+
+def check_pending():
+    """啟動時若有待處理事項，優先回報並詢問是否繼續。"""
+    if not PENDING_ITEMS:
+        return
+    print()
+    print("╔" + "═" * 48 + "╗")
+    print("║  ⚠️  有待處理事項，請確認                      ║")
+    print("╠" + "═" * 48 + "╣")
+    for item in PENDING_ITEMS:
+        print(f"║  [{item['id']}] {item['priority']}  {item['title']}")
+        # 說明超過 40 字換行
+        desc = item["desc"]
+        while desc:
+            print(f"║      {desc[:42]}")
+            desc = desc[42:]
+    print("╚" + "═" * 48 + "╝")
+    ans = input("\n是否繼續執行？(Y/n): ").strip().lower()
+    if ans == "n":
+        print("已中止，請先處理待處理事項。")
+        sys.exit(0)
+
+
 def main():
+    global CODE_TO_SECTOR
+    CODE_TO_SECTOR = _build_code_to_sector()
+
     print("=" * 50)
-    print("  台灣股市三大法人買超/賣超追蹤 v10")
+    print("  台灣股市三大法人買超/賣超追蹤 v10.2")
     print("  config.py 獨立設定 ｜ 族群聯動累積")
     print("=" * 50)
+    print(f"  族群反查表：{len(CODE_TO_SECTOR)} 支股票已對應族群")
+
+    # 優先回報待處理事項
+    check_pending()
 
     if not os.path.exists(CREDENTIALS_FILE):
         print(f"\n❌ 找不到 credentials.json")
