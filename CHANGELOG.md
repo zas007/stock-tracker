@@ -5,6 +5,115 @@ Google Sheets ID：`1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g`
 
 ---
 
+## v10.3 — 2026/05/22
+
+### 修正
+
+- **T86 買超/賣超張數單位錯誤**
+  * 舊問題：`top10_buy` / `top10_sell` 直接用 `to_int()` 存原始數值，未除以 1000 換算為張
+  * 修法：buy / sell / net 全部加 `//1000`，源頭修正後籌碼集中度、加權均價、歷史紀錄張數均受益
+
+- **ETF 籌碼集中度異常（數千%）**
+  * 舊問題：含字母代號的 ETF（如 00631L、00403A）與一般股票單位不同，導致集中度爆表
+  * 修法：新增 `is_etf_code()`，代號含字母者直接跳過集中度計算，回傳空字串
+
+- **融資融券三欄空白**
+  * 舊問題1：`selectType=STOCK` 為無效參數，API 回傳 0 筆
+  * 舊問題2：資料位置錯誤，應為 `tables[1]["data"]` 而非 `data[]`
+  * 舊問題3：欄位對應錯誤，融資餘額應為 `row[6]`（今日）而非 `row[5]`（前日），融券應為 `row[12]`
+  * 修法：`selectType=ALL`，解析改用 `tables[1]`，欄位全部修正
+  * 新增 `parse_margin_map()` 內部函數統一解析邏輯
+
+- **融資融券查詢日期錯誤（MI_MARGN 為 T+1）**
+  * 舊問題：用當日日期查詢，TWSE 尚未釋出，回傳空資料
+  * 修法：新增 `prev_trading_date()`，所有融資融券查詢改用前一個交易日，並往前最多找 7 天，找到第一個有效日期即使用
+
+- **融資增減顯示 bug**
+  * 舊問題：`mc if mb else ""` 導致融資增減為負數（散戶還券）或融資餘額為 0 時不顯示
+  * 修法：改為 `mc if (mb or mc) else ""`
+
+### 新增
+
+- **分模式執行**
+  * `--fetch-only`：只抓資料（法人 + 個股價格 + 融資券），存雲端快取，不寫 Sheets
+  * `--sheet-only`：讀雲端快取，比對日期通過後直接寫 Sheets，完全不打 TWSE API
+  * `--debug-margin`：往前找最近有效日期並印出融資券 API 原始欄位，用於 debug
+
+- **雲端快取（Google Sheets「快取」工作表）**
+  * 完整執行後自動將法人資料、個股現價、融資融券序列化存入 Sheets「快取」工作表
+  * `--sheet-only` 時比對日期，命中直接使用，不符合則報錯提示重新抓
+  * 不依賴本機檔案，換電腦或重新安裝均可使用
+
+- **`prefetch_history_codes()`**
+  * 完整執行時預先從歷史紀錄收集所有曾出現的股票代號
+  * 補抓 `current_prices` 和 `current_margin` 裡缺少的部分後存入雲端快取
+  * `update_analysis` 不再需要在寫入時補抓，`--sheet-only` 模式真正零 API 請求
+
+- **每日更新.sh 選單模式**
+  * 改為互動選單，選 1~4 對應四種執行模式（完整執行、只抓資料、只寫 Sheets、Debug 融資券）
+
+### 調整
+
+- `save_cache` / `load_cache` 改為讀寫 Google Sheets，移除本機 `cache.json` 依賴
+- `update_analysis` 加入保底補抓：先查 `current_prices` / `current_margin` 快取，缺少才打 API，確保 sheet-only 模式下歷史股票欄位不空白
+- 程式 docstring 版本號更新為 v10.3
+
+---
+
+## v10.2 — 2026/05/20
+
+### 修正
+
+- **T86 API 欄位結構修正（重大）**
+  * 實際回傳 19 欄，非原本預期的 18 欄
+  * 外資被拆為「外陸資（不含外資自營商）」`[2][3][4]` + 「外資自營商」`[5][6][7]` 兩組
+  * 投信：`[8][9][10]`（原本抓的是 `[5][6][7]` 即外資自營商，完全抓錯）
+  * 自營商合計買超：`[11]`（原本用 `[14][15][16]` 是自行買賣欄，非合計）
+  * 三大法人合計：`[18]`
+  * 修正後各法人數字還原正確，外資 = `[4]+[7]`，自營商買進/賣出顯示 = 自行`[12][13]` + 避險`[15][16]`
+- **買超張數單位錯誤（重大）**
+  * T86 所有數量欄位單位為「股」，原本直接寫入未換算
+  * 全部加上 `// 1000` 換算為張
+  * 注意：歷史紀錄中 v10.2 之前的資料仍為股數，需手動修正或清除重跑
+- **`_build_sector_triggered()` 變數名稱錯誤**
+  * set comprehension 中 `SECTOR_MAP[s]` 在 `for s in triggered` 之前使用，`NameError: name 's' is not defined`
+  * 改為 `{c for sector in triggered for c in SECTOR_MAP.get(sector, [])}`
+- **gspread `ws.update()` 參數順序**
+  * 新版 gspread 要求 named arguments
+  * `ws.update("A1", data)` → `ws.update(range_name="A1", values=data)`
+- **欄位數檢查門檻**
+  * 從 `≥17` 改為 `≥19`，符合實際 API 結構
+
+### 新增
+
+- **`calc_position_fifo(buy_entries, sell_entries)`**
+  * 以**價格升序** FIFO 扣減賣超，優先出清低成本部位（符合實際出場行為）
+  * 回傳 `(remaining_lots, weighted_avg_price)`
+  * `avg_price = 0` 的 entry 仍參與張數扣減，但不列入均價計算
+  * 取代原本的 `weighted_avg()`（純買超加權，忽略賣超）
+- **`sell_hist` 拆分為各法人獨立紀錄**
+  * 原：`sell_hist[code] = [(date, net), ...]`（三法人混合）
+  * 新：`sell_hist[code] = {"f": [...], "t": [...], "d": [...]}` 各自獨立
+  * 各法人 FIFO 扣減只扣自己的賣超，不互相影響
+- **`fetch_industry_map()`**
+  * 從 `isin.twse.com.tw` 抓 Big5 編碼的上市股票官方產業別
+  * 回傳 `{代號: 產業別名稱}`，失敗時回傳空 dict 不中斷執行
+- **`auto_update_sector_map()`**
+  * 買超榜出現不在 `SECTOR_MAP` 的新股票時，查官方產業別自動歸類
+  * 即時更新記憶體中的 `SECTOR_MAP` 與 `CODE_TO_SECTOR`（本次執行生效）
+  * 同步寫回 `config.py`（下次執行不需重查）
+  * 族群已存在時插入列表末尾；族群不存在時新增整個族群區塊
+- **`CODE_TO_SECTOR` 反查表**
+  * 啟動時從 `SECTOR_MAP` 自動建立 `{代號: 族群名}` 反查表
+  * `_build_sector_triggered()` 改為從買超榜出發查反查表，邏輯更快且新補入代號即時生效
+
+### 調整
+
+- **`fetch_institutional()` 重構為具名函式**
+  * `foreign_buy/sell()`、`trust_buy/sell()`、`dealer_buy/sell()` 各自獨立，欄位對應清晰可讀
+
+---
+
 ## v10.1 — 2026/05/21
 
 ### 修正
@@ -204,7 +313,7 @@ Google Sheets ID：`1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g`
 
 ---
 
-## 設定參數一覽（v10.1 現況）
+## 設定參數一覽（v10.3 現況）
 > 所有參數統一在 `config.py` 調整
 
 | 參數              | 預設值    | 說明                          |
@@ -221,18 +330,21 @@ Google Sheets ID：`1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g`
 
 ---
 
-## 檔案結構（v10.1 現況）
+## 檔案結構（v10.3 現況）
 
 ```
 ~/Documents/Z/study/stock/
 ├── fetch_and_update.py   ← 主程式（每次更新換這個）
 ├── config.py             ← 設定檔（族群、門檻、名稱對照，日常調整改這個）
 ├── CHANGELOG.md          ← 版本修改紀錄
-├── 每日更新.sh            ← 手動執行用
-├── credentials.json      ← Google API 金鑰（勿外洩）
-└── log.txt               ← 自動執行記錄
+├── 專案備忘錄.md          ← 環境、欄位結構、已知問題
+├── WORKFLOW.md           ← 開發流程規範
+├── README.md             ← 專案說明
+├── 每日更新.sh            ← 手動執行用（選單模式）
+├── credentials.json      ← Google API 金鑰（勿外洩，不推 git）
+└── log.txt               ← 自動執行記錄（不推 git）
 ```
 
 ---
 
-*最後更新：2026/05/21*
+*最後更新：2026/05/22*
