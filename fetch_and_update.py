@@ -1,5 +1,5 @@
 """
-台灣股市三大法人買超/賣超追蹤 v10.3
+台灣股市三大法人買超/賣超追蹤 v10.4
 優化重點：
 1. 修正版本標題（v8 → v10）
 2. 合併 fetch_stock_quote / fetch_stock_day → fetch_stock_day_full
@@ -757,36 +757,37 @@ def update_analysis(ss, date_str, current_prices, current_margin):
 
     buy_map, sell_hist, net_by_date, all_dates = _build_history_maps(rows)
 
-    sorted_stocks = sorted(
-        buy_map.values(),
-        key=lambda x: x["last"],
-        reverse=True
-    )
-
     n_cols = len(ANALYSIS_HEADERS)
+
+    # ── 先 build 所有 rows，再依合計累計天數由低至高排序 ──
+    all_rows = [
+        build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net_by_date)
+        for s in buy_map.values()
+    ]
+    # 最近出現日由新到舊（第一排序），合計累計天數由低至高（第二排序）
+    # r[-1] = 最近出現日（YYYY/MM/DD 字串可直接比大小），r[18] = 合計累計天數
+    # Python stable sort：先按第二鍵升冪，再按第一鍵降冪
+    all_rows.sort(key=lambda r: r[18])                                      # 第二鍵：天數升冪
+    all_rows.sort(key=lambda r: r[-1] if r[-1] else "", reverse=True)       # 第一鍵：日期降冪
 
     # ── 對照分析（每次覆蓋）──
     ws_ana   = get_or_create(ss, "對照分析", n_cols)
     ana_data = [
         [f"統計截至：{disp}（每次執行自動更新至最新）"] + [""] * (n_cols - 1),
         ANALYSIS_HEADERS
-    ]
-    for s in sorted_stocks:
-        ana_data.append(build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net_by_date))
+    ] + all_rows
     ws_ana.clear()
     if ws_ana.row_count < len(ana_data) + 5:
         ws_ana.add_rows(len(ana_data) + 5 - ws_ana.row_count)
     ws_ana.update(range_name="A1", values=ana_data)
-    print(f"  ✅ 對照分析 更新完成（{len(ana_data)-2} 支，完整累積統計）")
+    print(f"  ✅ 對照分析 更新完成（{len(ana_data)-2} 支，合計累計天數由低至高）")
 
     # ── 每日快照（prepend 累積）──
     ws_snap    = get_or_create(ss, "每日快照", n_cols)
     snap_block = [
         [f"統計截至：{disp}"] + [""] * (n_cols - 1),
         ANALYSIS_HEADERS
-    ]
-    for s in sorted_stocks:
-        snap_block.append(build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net_by_date))
+    ] + all_rows
     prepend_block(ws_snap, snap_block, disp, "統計截至：", n_cols)
     print(f"  ✅ 每日快照 更新完成（最新快照插入最上方）")
 
@@ -903,18 +904,19 @@ def _build_sector_triggered(all_buy_codes):
     return triggered
 
 
-def update_sector_sheet(ss, date_str, all_buy_codes, all_buy_names, current_prices):
+def update_sector_sheet(ss, date_str, all_buy_codes, all_buy_names, current_prices, sheet_only=False, cache_ref=None):
     """
     ★ v10 優化：族群成員行情優先從 current_prices 快取取得，
     只對快取中沒有的股票才呼叫 API，大幅減少重複請求。
+    sheet_only=True 時完全不打 API，快取沒有的股票留空。
 
     current_prices: {code: (avg, close, volume, change_pct)}
     """
     disp      = fmt_date(date_str)
     ws        = get_or_create(ss, "族群聯動", 8)
-    # 找出買超榜中不在 SECTOR_MAP 的新股票
+    # 找出買超榜中不在 SECTOR_MAP 的新股票（sheet-only 時跳過 API 查詢）
     unknown_codes = {c for c in all_buy_codes if c not in CODE_TO_SECTOR}
-    if unknown_codes:
+    if unknown_codes and not sheet_only:
         print(f"  發現 {len(unknown_codes)} 支新股票不在族群表：{sorted(unknown_codes)}")
         print("  正在查詢官方產業別...")
         industry_map = fetch_industry_map()
@@ -922,6 +924,8 @@ def update_sector_sheet(ss, date_str, all_buy_codes, all_buy_names, current_pric
         if newly_added:
             # 重建反查表讓本次執行即時生效
             CODE_TO_SECTOR.update({c: s for c, s in newly_added.items()})
+    elif unknown_codes and sheet_only:
+        print(f"  ⚠️ {len(unknown_codes)} 支新股票不在族群表（sheet-only 模式，略過 API 查詢）")
     else:
         print(f"  所有買超股票均已在族群表中")
 
@@ -939,25 +943,35 @@ def update_sector_sheet(ss, date_str, all_buy_codes, all_buy_names, current_pric
 
     # 收集所有觸發族群成員
     all_member_codes = {c for sector in triggered for c in SECTOR_MAP.get(sector, [])}
-    # ★ 只補抓快取中沒有的股票
     missing = [c for c in all_member_codes if c not in current_prices]
 
-    member_extra = {}
-    if missing:
+    if missing and not sheet_only:
         print(f"  補抓族群成員行情（{len(missing)} 支不在快取中）...")
         for i, code in enumerate(missing):
             avg, close, vol, chg = fetch_stock_day_full(code, date_str)
-            member_extra[code] = (avg, close, vol, chg)
+            current_prices[code] = (avg, close, vol, chg)   # ★ 直接合併進快取
             print(f"  [{i+1}/{len(missing)}] {code}: 收盤={close:.2f} {chg}")
             if i < len(missing) - 1:
                 time.sleep(0.4)
+        # ★ 補抓完後更新雲端快取
+        if cache_ref:
+            try:
+                save_cache(ss, date_str,
+                           cache_ref["foreign"], cache_ref["trust"], cache_ref["dealer"],
+                           cache_ref["f_sell"],  cache_ref["t_sell"], cache_ref["d_sell"],
+                           current_prices=current_prices)
+                print(f"  💾 快取已更新（補入 {len(missing)} 支族群成員行情）")
+            except Exception as e:
+                print(f"  ⚠️ 快取更新失敗（不影響本次寫入）：{e}")
+    elif missing and sheet_only:
+        print(f"  ℹ️ {len(missing)} 支族群成員不在快取中，行情留空（sheet-only 模式）")
 
     def get_quote(code):
-        """從快取或補抓結果取得 (close, change_pct, volume)"""
+        """從 current_prices 取得行情（補抓結果已合併）"""
         if code in current_prices:
             _, close, vol, chg = current_prices[code]
         else:
-            _, close, vol, chg = member_extra.get(code, (0.0, 0.0, 0, "N/A"))
+            close, vol, chg = 0.0, 0, "N/A"
         name = CODE_NAME_MAP.get(code) or all_buy_names.get(code, "")
         return name, close, chg, vol
 
@@ -1040,16 +1054,15 @@ def save_cache(ss, date_str, foreign, trust, dealer, f_sell, t_sell, d_sell,
     print(f"  💾 快取已寫入 Sheets（日期：{date_str}）")
 
 def load_cache(ss, date_str):
-    """從 Sheets「快取」工作表讀取，若日期不符回傳 None"""
+    """從 Sheets「快取」工作表讀取，快取不為空即可使用（不檢查日期）"""
     try:
         ws = ss.worksheet("快取")
         rows = ws.get_all_values()
         if len(rows) < 2:
             return None
         cached_date = rows[0][1] if len(rows[0]) > 1 else ""
-        if cached_date != date_str:
-            print(f"  ⚠️ 快取日期 {cached_date} 與今日 {date_str} 不符，需重新抓取")
-            return None
+        if cached_date:
+            print(f"  ℹ️ 快取日期：{cached_date}")
         payload_str = rows[1][1] if len(rows[1]) > 1 else ""
         data = json.loads(payload_str)
         current_prices = {k: tuple(v) for k, v in data.get("current_prices", {}).items()}
@@ -1198,7 +1211,7 @@ def main():
     args = parser.parse_args()
 
     print("=" * 50)
-    print("  台灣股市三大法人買超/賣超追蹤 v10.3")
+    print("  台灣股市三大法人買超/賣超追蹤 v10.4")
     print("  config.py 獨立設定 ｜ 族群聯動累積 ｜ 分模式執行")
     print("=" * 50)
     print(f"  族群反查表：{len(CODE_TO_SECTOR)} 支股票已對應族群")
@@ -1255,6 +1268,11 @@ def main():
             for stock in group:
                 all_buy_codes.add(stock["code"])
                 all_buy_names[stock["code"]] = stock["name"]
+        # ★ sheet-only 也需要 _CACHE_REF，供族群聯動補抓後重存快取
+        _CACHE_REF = {
+            "foreign": foreign, "trust": trust, "dealer": dealer,
+            "f_sell":  f_sell,  "t_sell": t_sell, "d_sell": d_sell,
+        }
     else:
         # Step 1: 抓法人資料
         print("\n📡 Step 1/5 抓取三大法人資料...")
@@ -1323,6 +1341,12 @@ def main():
         save_cache(ss, date_str, foreign, trust, dealer, f_sell, t_sell, d_sell,
                    current_prices, current_margin)
 
+    # ★ 供 update_sector_sheet 補抓後重存快取用
+    _CACHE_REF = {
+        "foreign": foreign, "trust": trust, "dealer": dealer,
+        "f_sell":  f_sell,  "t_sell": t_sell, "d_sell": d_sell,
+    }
+
     disp = fmt_date(date_str)
 
     # ── fetch-only：存完就結束 ──
@@ -1332,23 +1356,59 @@ def main():
         input("按 Enter 關閉...")
         return
 
+    # ── 選擇要寫入的工作表 ──
+    SHEET_OPTIONS = [
+        ("1", "今日買超排行",  lambda: update_buy_sheet(ss, date_str, foreign, trust, dealer)),
+        ("2", "今日賣超排行",  lambda: update_sell_sheet(ss, date_str, f_sell, t_sell, d_sell)),
+        ("3", "歷史紀錄",      lambda: append_history(ss, date_str, foreign, trust, dealer, f_sell, t_sell, d_sell)),
+        ("4", "對照分析+快照", lambda: update_analysis(ss, date_str, current_prices, current_margin)),
+        ("5", "族群聯動",      lambda: update_sector_sheet(ss, date_str, all_buy_codes, all_buy_names, current_prices, sheet_only=args.sheet_only, cache_ref=_CACHE_REF)),
+    ]
+
+    if args.sheet_only:
+        print()
+        print("┌─────────────────────────────────────┐")
+        print("│  選擇要寫入的工作表（可複選）         │")
+        print("│  輸入編號，以逗號分隔，Enter 全選     │")
+        print("├─────────────────────────────────────┤")
+        for key, name, _ in SHEET_OPTIONS:
+            print(f"│  {key}) {name:<30}│")
+        print("└─────────────────────────────────────┘")
+        choice = input("請輸入（例如 1,3,4）：").strip()
+        if not choice:
+            selected_keys = {o[0] for o in SHEET_OPTIONS}
+        else:
+            selected_keys = {k.strip() for k in choice.split(",")}
+    else:
+        selected_keys = {o[0] for o in SHEET_OPTIONS}
+
+    def write_with_retry(name, fn, max_retries=3):
+        """寫入 Sheets，遇到 429 自動等待後重試"""
+        for attempt in range(1, max_retries + 1):
+            try:
+                fn()
+                time.sleep(3)   # 每張工作表寫完後固定等 3 秒
+                return True
+            except Exception as e:
+                err = str(e)
+                if "429" in err and attempt < max_retries:
+                    wait = 30 * attempt
+                    print(f"  ⏳ 429 Quota，等待 {wait} 秒後重試（{attempt}/{max_retries}）...")
+                    time.sleep(wait)
+                else:
+                    print(f"\n❌ 寫入失敗（{name}）：{e}")
+                    return False
+        return False
+
     # Step 4: 寫入 Sheets
     print("\n📊 Step 4/5 寫入 Google Sheets...")
-    try:
-        update_buy_sheet(ss, date_str, foreign, trust, dealer)
-        update_sell_sheet(ss, date_str, f_sell, t_sell, d_sell)
-        append_history(ss, date_str, foreign, trust, dealer, f_sell, t_sell, d_sell)
-        update_analysis(ss, date_str, current_prices, current_margin)
-    except Exception as e:
-        print(f"\n❌ 寫入失敗：{e}")
-        input("按 Enter 關閉..."); sys.exit(1)
-
-    # Step 5: 族群聯動
-    print("\n🔗 Step 5/5 更新族群聯動...")
-    try:
-        update_sector_sheet(ss, date_str, all_buy_codes, all_buy_names, current_prices)
-    except Exception as e:
-        print(f"  ⚠️ 族群聯動更新失敗：{e}")
+    for key, name, fn in SHEET_OPTIONS:
+        if key not in selected_keys:
+            continue
+        if not write_with_retry(name, fn):
+            ans = input("繼續其他工作表？(Y/n): ").strip().lower()
+            if ans == "n":
+                input("按 Enter 關閉..."); sys.exit(1)
 
     print(f"\n🎉 完成！")
     print(f"  https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}")

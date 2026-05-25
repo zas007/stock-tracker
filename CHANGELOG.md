@@ -5,6 +5,52 @@ Google Sheets ID：`1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g`
 
 ---
 
+## v10.4 — 2026/05/25
+
+### 修正
+
+- **對照分析排序錯誤**
+  * 舊邏輯：`sorted_stocks` 依 `x["last"]`（最近出現日）單鍵排序，合計天數未參與
+  * 新邏輯：先按合計累計天數升冪排，再按最近出現日降冪排（Python stable sort 兩步驟）
+  * 效果：同一天出現的股票，天數少的排前面；最新日期的整組排最上方
+
+- **族群聯動股票名稱空白**
+  * `CODE_NAME_MAP` 未涵蓋「股票」族群所有成員（23 支）
+  * 補齊大成鋼、旺宏、華邦電、長榮、凱基金、台新新光金、中信金、群創、國巨、英業達、彰銀、第一金、文曄、神達、臻鼎-KY、統一、台玻、華通、友達、長榮航、華南金、兆豐金、力積電
+
+- **`--sheet-only` 快取日期檢查過嚴**
+  * 舊邏輯：快取日期與今日不符即拒絕執行
+  * 新邏輯：快取不為空即可使用，印出快取日期供參考（允許跨日重跑）
+
+- **`--sheet-only` 族群聯動補抓 API**
+  * 舊問題：`update_sector_sheet()` 對不在快取中的族群成員仍打 TWSE API
+  * 修法：新增 `sheet_only` 參數，`True` 時跳過所有補抓，快取沒有的成員行情留空
+
+- **族群聯動補抓結果未存回快取**
+  * 舊問題：`member_extra` 補抓後只存在記憶體，下次 `--sheet-only` 仍需重打 API
+  * 修法：補抓結果直接 merge 進 `current_prices`，補抓完立即呼叫 `save_cache` 更新雲端快取
+
+- **`_CACHE_REF` NameError**
+  * `update_sector_sheet()` 直接引用 `main()` 區域變數 `_CACHE_REF`，導致 `NameError`
+  * 修法：改為函式參數 `cache_ref=None`，呼叫時明確傳入
+
+- **429 Write Quota 錯誤**
+  * 舊問題：各工作表間只等 2 秒，寫入頻率超過 Google Sheets API 限制
+  * 修法：新增 `write_with_retry()`，每張寫完等 3 秒；遇 429 自動等待後重試（30s / 60s / 90s），最多 3 次
+
+### 新增
+
+- **`--sheet-only` 工作表選單**
+  * 執行 `--sheet-only` 時顯示互動選單，可選擇只寫入特定工作表
+  * 輸入編號（如 `1,4,5`）或直接 Enter 全選
+  * 選項：1) 今日買超排行  2) 今日賣超排行  3) 歷史紀錄  4) 對照分析+快照  5) 族群聯動
+
+### 調整
+
+- 程式 docstring 版本號更新為 v10.4
+
+---
+
 ## v10.3 — 2026/05/22
 
 ### 修正
@@ -347,4 +393,4 @@ Google Sheets ID：`1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g`
 
 ---
 
-*最後更新：2026/05/22*
+*最後更新：2026/05/25（v10.4）*
