@@ -1,5 +1,5 @@
 """
-台灣股市三大法人買超/賣超追蹤 v10.5
+台灣股市三大法人買超/賣超追蹤 v10.6
 優化重點：
 1. 修正版本標題（v8 → v10）
 2. 合併 fetch_stock_quote / fetch_stock_day → fetch_stock_day_full
@@ -418,8 +418,17 @@ def calc_signal(code, buy_entries, sell_hist, disp):
     return " ".join(signals) if signals else "✅ 持續買入"
 
 def is_etf_code(code):
-    """ETF 代號通常含字母（如 00631L、00403A），單位與一般股票不同，跳過集中度計算"""
-    return any(c.isalpha() for c in str(code))
+    """
+    ETF 判斷：
+    1. 代號含字母（如 00631L、00403A）
+    2. 純數字但以 '00' 開頭（如 00891、009819、00919）
+    """
+    s = str(code).strip()
+    if any(c.isalpha() for c in s):
+        return True
+    if s.startswith("00"):
+        return True
+    return False
 
 def calc_chip_concentration(total_net_lots, volume_lots, code=""):
     if is_etf_code(code):
@@ -716,18 +725,16 @@ ANALYSIS_HEADERS = [
 ]
 
 
-def update_analysis(ss, date_str, current_prices, current_margin):
+def _calc_analysis_rows(ss, date_str, current_prices, current_margin):
     """
-    更新「對照分析」與「每日快照」工作表。
-    current_prices : {code: (avg, close, volume, change_pct)}  已含今日買超榜股票
-    current_margin : {code: (margin_balance, margin_change, short_balance)}
-
-    保底補抓：歷史紀錄裡出現過但快取缺少的股票，
-    先查快取（sheet-only 時快取已含歷史股票），沒有才打 API。
+    從歷史紀錄計算 all_rows（純計算，不寫 Sheets）。
+    選4（對照分析）和選6（明日關注）共用此函式。
     """
     hist = get_or_create(ss, "歷史紀錄")
     disp = fmt_date(date_str)
     rows = hist.get_all_values()[1:]
+    if not rows:
+        return []
 
     all_hist_codes = set(row[2] for row in rows if len(row) > 2 and row[2])
 
@@ -757,18 +764,27 @@ def update_analysis(ss, date_str, current_prices, current_margin):
 
     buy_map, sell_hist, net_by_date, all_dates = _build_history_maps(rows)
 
-    n_cols = len(ANALYSIS_HEADERS)
-
-    # ── 先 build 所有 rows，再依合計累計天數由低至高排序 ──
     all_rows = [
         build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net_by_date)
         for s in buy_map.values()
     ]
-    # 最近出現日由新到舊（第一排序），合計累計天數由低至高（第二排序）
-    # r[-1] = 最近出現日（YYYY/MM/DD 字串可直接比大小），r[18] = 合計累計天數
-    # Python stable sort：先按第二鍵升冪，再按第一鍵降冪
-    all_rows.sort(key=lambda r: r[18])                                      # 第二鍵：天數升冪
-    all_rows.sort(key=lambda r: r[-1] if r[-1] else "", reverse=True)       # 第一鍵：日期降冪
+    all_rows.sort(key=lambda r: r[18])
+    all_rows.sort(key=lambda r: r[-1] if r[-1] else "", reverse=True)
+    return all_rows
+
+
+def update_analysis(ss, date_str, current_prices, current_margin):
+    """
+    更新「對照分析」與「每日快照」工作表。
+    計算部分委由 _calc_analysis_rows()，本函式只負責寫入 Sheets。
+    """
+    disp     = fmt_date(date_str)
+    all_rows = _calc_analysis_rows(ss, date_str, current_prices, current_margin)
+    if not all_rows:
+        print("  ⚠️ 歷史紀錄無資料，跳過對照分析")
+        return []
+
+    n_cols = len(ANALYSIS_HEADERS)
 
     # ── 對照分析（每次覆蓋）──
     ws_ana   = get_or_create(ss, "對照分析", n_cols)
@@ -790,6 +806,146 @@ def update_analysis(ss, date_str, current_prices, current_margin):
     ] + all_rows
     prepend_block(ws_snap, snap_block, disp, "統計截至：", n_cols)
     print(f"  ✅ 每日快照 更新完成（最新快照插入最上方）")
+    return all_rows
+
+
+# ═══════════════════════════════════════════════
+# ★ v10.6 明日關注推薦
+# ═══════════════════════════════════════════════
+
+RECOMMEND_HEADERS = [
+    "排名", "代號", "股票名稱", "評分",
+    "連續天數", "籌碼集中度%", "籌碼集中度評級",
+    "出貨風險", "融資健康度",
+    "現價", "漲幅%", "自營商標記",
+]
+
+
+def _score_matrix(consec, chip_lbl):
+    """
+    連續天數 × 籌碼集中度 矩陣評分（35分）
+    """
+    if chip_lbl == "🔵 高度集中":
+        if consec <= 3:   return 35   # 剛啟動 + 強力買進 → 最佳
+        elif consec <= 7: return 28   # 持續強勢
+        else:             return 20   # 長期高集中，注意漲幅
+    elif chip_lbl == "🟦 中度集中":
+        if consec <= 3:   return 20
+        elif consec <= 7: return 18
+        else:             return 12
+    else:  # 偏低
+        if consec <= 3:   return 5
+        elif consec <= 7: return 8
+        else:             return 3
+
+
+def _score_margin(health):
+    """融資健康度評分（25分）"""
+    return {"✅ 籌碼乾淨": 25, "🟡 小幅跟進": 15,
+            "⚠️ 散戶大量跟進": 5, "🔴 法人不買散戶買": 0}.get(health, 0)
+
+
+def _score_risk(risk):
+    """出貨風險評分（25分）"""
+    return {"🟢 低": 25, "🟡 中": 12, "🔴 高": 0}.get(risk, 0)
+
+
+def _dealer_label(d_consec):
+    """自營商連續買超標記"""
+    if d_consec >= 5:  return f"🔥 自營{d_consec}天"
+    elif d_consec >= 3: return f"⭐ 自營{d_consec}天"
+    elif d_consec > 0:  return f"自營{d_consec}天"
+    return ""
+
+
+def score_stock(row):
+    """
+    輸入 build_row 產出的 row，回傳綜合評分（0~100）。
+    row index 對照 ANALYSIS_HEADERS：
+      [3]=外資連續, [8]=投信連續, [13]=自營連續
+      [19]=現價, [20]=漲幅%, [21]=出貨風險, [22]=訊號
+      [23]=籌碼集中度%, [24]=籌碼集中度評級
+      [27]=融資健康度
+    """
+    code     = row[0]
+    signal   = row[22]
+    risk     = row[21]
+    chip_lbl = row[24]
+    health   = row[27]
+
+    # 過濾條件：ETF、今日賣超、連續天數=0、無集中度資料
+    if is_etf_code(code):                    return None
+    if "🔴 今日賣超" in str(signal):          return None
+    if not chip_lbl:                          return None
+
+    # 取三法人最大連續天數作為代表
+    consec = max(
+        int(row[3])  if str(row[3]).isdigit()  else 0,
+        int(row[8])  if str(row[8]).isdigit()  else 0,
+        int(row[13]) if str(row[13]).isdigit() else 0,
+    )
+    if consec == 0: return None
+
+    score = (
+        _score_matrix(consec, chip_lbl) +   # 35分
+        _score_margin(health) +              # 25分
+        _score_risk(risk)                    # 25分
+        # 量比 15分 待補
+    )
+    return min(score, 100)
+
+
+def update_recommendation(ss, date_str, all_rows):
+    """
+    從 all_rows（build_row 產出）計算評分，
+    取前5名寫入「明日關注」工作表（prepend 累積）。
+    """
+    disp = fmt_date(date_str)
+
+    # 計算評分，過濾不合格
+    scored = []
+    for row in all_rows:
+        s = score_stock(row)
+        if s is None:
+            continue
+        code     = row[0]
+        name     = row[1]
+        consec   = max(
+            int(row[3])  if str(row[3]).isdigit()  else 0,
+            int(row[8])  if str(row[8]).isdigit()  else 0,
+            int(row[13]) if str(row[13]).isdigit() else 0,
+        )
+        d_consec = int(row[13]) if str(row[13]).isdigit() else 0
+        chip_pct = row[23]
+        chip_lbl = row[24]
+        risk     = row[21]
+        health   = row[27]
+        close    = row[19]
+        chg_pct  = row[20]
+        dealer   = _dealer_label(d_consec)
+        # 出貨風險高時加標記
+        risk_disp = f"{risk} ⚠️" if risk == "🔴 高" else risk
+        scored.append((s, [code, name, s, consec, chip_pct, chip_lbl,
+                           risk_disp, health, close, chg_pct, dealer]))
+
+    # 依評分降冪，取前5
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top5 = scored[:5]
+
+    n_cols = len(RECOMMEND_HEADERS)
+    ws = get_or_create(ss, "明日關注", n_cols)
+
+    rec_rows = []
+    for rank, (score, r) in enumerate(top5, 1):
+        rec_rows.append([rank] + r)
+
+    block = [
+        [f"資料日期：{disp} ｜ 明日關注推薦（綜合評分前5名）"] + [""] * (n_cols - 1),
+        RECOMMEND_HEADERS,
+    ] + rec_rows
+
+    prepend_block(ws, block, disp, "資料日期：", n_cols)
+    print(f"  ✅ 明日關注 更新完成（Top5：{', '.join(r[1] for _, r in top5)}）")
 
 
 # ═══════════════════════════════════════════════
@@ -1165,7 +1321,7 @@ def main():
     args = parser.parse_args()
 
     print("=" * 50)
-    print("  台灣股市三大法人買超/賣超追蹤 v10.5")
+    print("  台灣股市三大法人買超/賣超追蹤 v10.6")
     print("  config.py 獨立設定 ｜ 族群聯動累積 ｜ 分模式執行")
     print("=" * 50)
     print(f"  族群反查表：{len(CODE_TO_SECTOR)} 支股票已對應族群")
@@ -1308,12 +1464,30 @@ def main():
         return
 
     # ── 選擇要寫入的工作表 ──
+    _analysis_rows = []   # 暫存 update_analysis 回傳的 all_rows
+
+    def _run_analysis():
+        nonlocal _analysis_rows
+        _analysis_rows = update_analysis(ss, date_str, current_prices, current_margin)
+
+    def _run_recommendation():
+        nonlocal _analysis_rows
+        if not _analysis_rows:
+            # 只做計算，不寫對照分析/快照工作表
+            print("  ℹ️ 自動計算分析資料（不更新對照分析工作表）...")
+            _analysis_rows = _calc_analysis_rows(ss, date_str, current_prices, current_margin)
+        if not _analysis_rows:
+            print("  ⚠️ 歷史紀錄無資料，無法計算推薦")
+            return
+        update_recommendation(ss, date_str, _analysis_rows)
+
     SHEET_OPTIONS = [
         ("1", "今日買超排行",  lambda: update_buy_sheet(ss, date_str, foreign, trust, dealer)),
         ("2", "今日賣超排行",  lambda: update_sell_sheet(ss, date_str, f_sell, t_sell, d_sell)),
         ("3", "歷史紀錄",      lambda: append_history(ss, date_str, foreign, trust, dealer, f_sell, t_sell, d_sell)),
-        ("4", "對照分析+快照", lambda: update_analysis(ss, date_str, current_prices, current_margin)),
+        ("4", "對照分析+快照", _run_analysis),
         ("5", "族群聯動",      lambda: update_sector_sheet(ss, date_str, all_buy_codes, all_buy_names, current_prices, sheet_only=args.sheet_only, cache_ref=_CACHE_REF)),
+        ("6", "明日關注推薦",  _run_recommendation),
     ]
 
     if args.sheet_only:

@@ -65,4 +65,4 @@ https://raw.githubusercontent.com/zas007/stock-tracker/main/專案備忘錄.md
 
 `https://github.com/zas007/stock-tracker`（private）
 
-*最後更新：2026/05/25（v10.5）*
+*最後更新：2026/05/26（v10.6）*
