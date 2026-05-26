@@ -1,5 +1,5 @@
 """
-台灣股市三大法人買超/賣超追蹤 v10.4
+台灣股市三大法人買超/賣超追蹤 v10.5
 優化重點：
 1. 修正版本標題（v8 → v10）
 2. 合併 fetch_stock_quote / fetch_stock_day → fetch_stock_day_full
@@ -1149,52 +1149,6 @@ def debug_margin(date_str):
     print("⚠️ 往前 7 天都找不到融資融券資料")
 
 # ═══════════════════════════════════════════════
-# 待處理事項（有項目時啟動優先回報）
-# ═══════════════════════════════════════════════
-PENDING_ITEMS = [
-    {
-        "id": 1,
-        "priority": "🔴 高",
-        "title": "歷史紀錄舊資料單位錯誤",
-        "desc": "v10.2 前寫入的買超/賣出欄位單位為「股」而非「張」，需除以 1000 修正，或清除歷史紀錄從今天重新累積。"
-    },
-    {
-        "id": 2,
-        "priority": "🟡 中",
-        "title": "fetch_industry_map Big5 解析驗證",
-        "desc": "官方產業別 API 使用 Big5 編碼，需在真實環境執行一次確認解析正確，自動補族群功能才可靠。"
-    },
-    {
-        "id": 3,
-        "priority": "🟡 中",
-        "title": "族群熱度排行",
-        "desc": "統計各族群近 N 天被買超的成員數與天數，輸出輪動熱度排行，協助判斷現在輪到哪個族群。"
-    },
-]
-
-
-def check_pending():
-    """啟動時若有待處理事項，優先回報並詢問是否繼續。"""
-    if not PENDING_ITEMS:
-        return
-    print()
-    print("╔" + "═" * 48 + "╗")
-    print("║  ⚠️  有待處理事項，請確認                      ║")
-    print("╠" + "═" * 48 + "╣")
-    for item in PENDING_ITEMS:
-        print(f"║  [{item['id']}] {item['priority']}  {item['title']}")
-        # 說明超過 40 字換行
-        desc = item["desc"]
-        while desc:
-            print(f"║      {desc[:42]}")
-            desc = desc[42:]
-    print("╚" + "═" * 48 + "╝")
-    ans = input("\n是否繼續執行？(Y/n): ").strip().lower()
-    if ans == "n":
-        print("已中止，請先處理待處理事項。")
-        sys.exit(0)
-
-
 # ═══════════════════════════════════════════════
 # 主程式
 # ═══════════════════════════════════════════════
@@ -1211,7 +1165,7 @@ def main():
     args = parser.parse_args()
 
     print("=" * 50)
-    print("  台灣股市三大法人買超/賣超追蹤 v10.4")
+    print("  台灣股市三大法人買超/賣超追蹤 v10.5")
     print("  config.py 獨立設定 ｜ 族群聯動累積 ｜ 分模式執行")
     print("=" * 50)
     print(f"  族群反查表：{len(CODE_TO_SECTOR)} 支股票已對應族群")
@@ -1240,9 +1194,6 @@ def main():
     except Exception as e:
         print(f"\n❌ 連接失敗：{e}")
         input("按 Enter 關閉..."); sys.exit(1)
-
-    # 優先回報待處理事項
-    check_pending()
 
     # ── 找今日交易日字串（用來比對快取） ──
     warm_up_cookie()

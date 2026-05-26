@@ -19,15 +19,17 @@ git add -A && git commit -m "v11 新增XX族群、調整籌碼集中度門檻" &
 
 ---
 
-## 下次開新對話時
+## 每次開工（含開新對話）
 
-貼以下 raw 連結給 Claude，讓 Claude 讀取最新版本後再開始開發：
+1. 打開 `專案備忘錄.md`，確認「⚠️ 待處理事項」區塊，有高優先度項目先處理
+2. 開新對話時貼以下 raw 連結，讓 Claude 讀取最新版本後再開始開發：
 
 ```
 https://raw.githubusercontent.com/zas007/stock-tracker/main/fetch_and_update.py
 https://raw.githubusercontent.com/zas007/stock-tracker/main/config.py
 https://raw.githubusercontent.com/zas007/stock-tracker/main/CHANGELOG.md
 https://raw.githubusercontent.com/zas007/stock-tracker/main/WORKFLOW.md
+https://raw.githubusercontent.com/zas007/stock-tracker/main/專案備忘錄.md
 ```
 
 ---
@@ -50,6 +52,7 @@ https://raw.githubusercontent.com/zas007/stock-tracker/main/WORKFLOW.md
 ├── config.py             ← 設定檔（族群、門檻、名稱對照）
 ├── CHANGELOG.md          ← 版本修改紀錄
 ├── WORKFLOW.md           ← 本檔案，開發流程規範
+├── 專案備忘錄.md         ← 待處理事項、欄位說明、執行流程
 ├── README.md             ← 專案說明
 ├── 每日更新.sh            ← 手動執行腳本
 ├── credentials.json      ← ⛔ Google API 金鑰（不推 git）
@@ -62,4 +65,4 @@ https://raw.githubusercontent.com/zas007/stock-tracker/main/WORKFLOW.md
 
 `https://github.com/zas007/stock-tracker`（private）
 
-*最後更新：2026/05/19*
+*最後更新：2026/05/25（v10.5）*
