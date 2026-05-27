@@ -1,5 +1,5 @@
 """
-台灣股市三大法人買超/賣超追蹤 v10.6
+台灣股市三大法人買超/賣超追蹤 v10.7
 優化重點：
 1. 修正版本標題（v8 → v10）
 2. 合併 fetch_stock_quote / fetch_stock_day → fetch_stock_day_full
@@ -202,16 +202,17 @@ def fetch_stock_day_full(code, date_str):
     - close        : 收盤價
     - volume_lots  : 成交量（張）
     - change_pct   : 漲跌幅字串，如 "+3.52%" / "N/A"
+    - volume_ratio : 今日量 ÷ 前10日均量（無法計算時為 None）
     """
     url = (f"https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY"
            f"?date={date_str}&stockNo={code}&response=json")
     text = curl_get(url)
     if not text or text.startswith("<"):
-        return 0.0, 0.0, 0, "N/A"
+        return 0.0, 0.0, 0, "N/A", None
     try:
         data = json.loads(text)
         if data.get("stat") != "OK" or not data.get("data"):
-            return 0.0, 0.0, 0, "N/A"
+            return 0.0, 0.0, 0, "N/A", None
         year   = int(date_str[:4]) - 1911
         target = f"{year}/{date_str[4:6]}/{date_str[6:]}"
         rows   = data["data"]
@@ -230,10 +231,23 @@ def fetch_stock_day_full(code, date_str):
                 change_pct = f"{sign}{pct:.2f}%"
             else:
                 change_pct = "N/A"
-            return avg, close, volume_lots, change_pct
+            # ★ v10.7 量比：今日量 ÷ 前10日均量
+            prev_rows = rows[max(0, idx-10):idx]
+            if prev_rows:
+                prev_vols = []
+                for pr in prev_rows:
+                    try:
+                        prev_vols.append(int(float(str(pr[1]).replace(",", "")) / 1000))
+                    except Exception:
+                        pass
+                avg_vol = sum(prev_vols) / len(prev_vols) if prev_vols else 0
+                volume_ratio = round(volume_lots / avg_vol, 2) if avg_vol > 0 else None
+            else:
+                volume_ratio = None
+            return avg, close, volume_lots, change_pct, volume_ratio
     except Exception:
         pass
-    return 0.0, 0.0, 0, "N/A"
+    return 0.0, 0.0, 0, "N/A", None
 
 
 # ═══════════════════════════════════════════════
@@ -250,19 +264,20 @@ def enrich_with_prices(groups, date_str):
     total = len(all_codes)
     print(f"  抓取 {total} 支股票價格（每支間隔 0.5 秒）...")
     for i, code in enumerate(all_codes):
-        avg, close, vol, chg = fetch_stock_day_full(code, date_str)
-        all_codes[code] = (avg, close, vol, chg)
-        print(f"  [{i+1}/{total}] {code}: 均價={avg:.2f} 收盤={close:.2f} 成交={vol:,}張 漲跌={chg}")
+        avg, close, vol, chg, vr = fetch_stock_day_full(code, date_str)
+        all_codes[code] = (avg, close, vol, chg, vr)
+        print(f"  [{i+1}/{total}] {code}: 均價={avg:.2f} 收盤={close:.2f} 成交={vol:,}張 漲跌={chg} 量比={vr}")
         if i < total - 1:
             time.sleep(0.5)
 
     for group in groups:
         for stock in group:
-            avg, close, vol, chg = all_codes.get(stock["code"], (0.0, 0.0, 0, "N/A"))
-            stock["avg_price"]  = avg
-            stock["close"]      = close
-            stock["volume"]     = vol
-            stock["change_pct"] = chg
+            avg, close, vol, chg, vr = all_codes.get(stock["code"], (0.0, 0.0, 0, "N/A", None))
+            stock["avg_price"]     = avg
+            stock["close"]         = close
+            stock["volume"]        = vol
+            stock["change_pct"]    = chg
+            stock["volume_ratio"]  = vr
 
     # 回傳快取供族群聯動直接使用（含漲跌幅）
     return all_codes
@@ -688,7 +703,7 @@ def build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net
     t_trend = calc_trend(s["t"])
     d_trend = calc_trend(s["d"])
 
-    _, close, volume, _ = current_prices.get(code, (0.0, 0.0, 0, "N/A"))
+    _, close, volume, change_pct, volume_ratio = current_prices.get(code, (0.0, 0.0, 0, "N/A", None))
     all_entries = s["f"] + s["t"] + s["d"]
     all_remaining, all_wavg = calc_position_fifo(all_entries, all_sells)
     pct_str, risk = calc_risk(close, all_wavg)
@@ -706,9 +721,10 @@ def build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net
         t_total, t_consec, t_net, t_wavg or "", t_trend, trust_label,
         d_total, d_consec, d_net, d_wavg or "", d_trend,
         f_total + t_total + d_total,
-        close or "", pct_str, risk, signal,
+        close or "", change_pct or "", pct_str, risk, signal,
         chip_pct, chip_lbl,
         mb or "", mc if (mb or mc) else "", sb or "", margin_health,
+        volume_ratio,
         s["last"]
     ]
 
@@ -718,9 +734,10 @@ ANALYSIS_HEADERS = [
     "外資累計天數","外資連續天數","外資買超(張)","外資加權均價","外資趨勢",
     "投信累計天數","投信連續天數","投信買超(張)","投信加權均價","投信趨勢","投信標記",
     "自營商累計天數","自營商連續天數","自營商買超(張)","自營商加權均價","自營商趨勢",
-    "合計累計天數","現價","漲幅%","出貨風險","訊號",
+    "合計累計天數","現價","當日漲跌%","漲幅%","出貨風險","訊號",
     "籌碼集中度%","籌碼集中度評級",
     "融資餘額(張)","融資增減(張)","融券餘額(張)","融資健康度",
+    "量比",
     "最近出現日"
 ]
 
@@ -743,8 +760,8 @@ def _calc_analysis_rows(ss, date_str, current_prices, current_margin):
     if missing_price:
         print(f"  📡 保底補抓現價（{len(missing_price)} 支，快取未涵蓋）...")
         for i, code in enumerate(missing_price):
-            avg, close, vol, pct_str = fetch_stock_day_full(code, date_str)
-            current_prices[code] = (avg, close, vol, pct_str)
+            avg, close, vol, pct_str, vr = fetch_stock_day_full(code, date_str)
+            current_prices[code] = (avg, close, vol, pct_str, vr)
             if close > 0:
                 print(f"    [{i+1}/{len(missing_price)}] {code}: 收盤={close:.2f}")
             if i < len(missing_price) - 1:
@@ -768,6 +785,29 @@ def _calc_analysis_rows(ss, date_str, current_prices, current_margin):
         build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net_by_date)
         for s in buy_map.values()
     ]
+
+    # ★ v10.7 過濾：最近出現日距今超過 5 個交易日的股票不列入
+    def _trading_days_diff(disp_a, disp_b):
+        """計算兩個 YYYY/MM/DD 之間的交易日天數差（跳週末）"""
+        from datetime import datetime, timedelta
+        try:
+            d = datetime.strptime(disp_a, "%Y/%m/%d")
+            end = datetime.strptime(disp_b, "%Y/%m/%d")
+        except Exception:
+            return 999
+        count = 0
+        step = timedelta(days=1)
+        while d < end:
+            d += step
+            if d.weekday() < 5:
+                count += 1
+        return count
+
+    all_rows = [
+        r for r in all_rows
+        if r[-1] and _trading_days_diff(r[-1], disp) <= 5
+    ]
+
     all_rows.sort(key=lambda r: r[18])
     all_rows.sort(key=lambda r: r[-1] if r[-1] else "", reverse=True)
     return all_rows
@@ -820,6 +860,11 @@ RECOMMEND_HEADERS = [
     "現價", "漲幅%", "自營商標記",
 ]
 
+PERFORMANCE_HEADERS = [
+    "推薦日", "代號", "股票名稱", "推薦評分",
+    "推薦收盤", "T+1收盤", "T+2收盤", "T+3收盤",
+]
+
 
 def _score_matrix(consec, chip_lbl):
     """
@@ -850,6 +895,19 @@ def _score_risk(risk):
     return {"🟢 低": 25, "🟡 中": 12, "🔴 高": 0}.get(risk, 0)
 
 
+def _score_volume_ratio(vr):
+    """量比評分（15分）：今日量 ÷ 近10日均量"""
+    if vr is None or vr == "": return 0
+    try:
+        vr = float(vr)
+    except (ValueError, TypeError):
+        return 0
+    if vr >= 2.0:   return 15   # 爆量，法人積極進場
+    if vr >= 1.5:   return 12   # 明顯放量
+    if vr >= 1.0:   return 8    # 正常量
+    return 3                    # 縮量
+
+
 def _dealer_label(d_consec):
     """自營商連續買超標記"""
     if d_consec >= 5:  return f"🔥 自營{d_consec}天"
@@ -865,18 +923,28 @@ def score_stock(row):
       [3]=外資連續, [8]=投信連續, [13]=自營連續
       [19]=現價, [20]=漲幅%, [21]=出貨風險, [22]=訊號
       [23]=籌碼集中度%, [24]=籌碼集中度評級
-      [27]=融資健康度
+      [28]=融資健康度, [29]=量比
     """
-    code     = row[0]
-    signal   = row[22]
-    risk     = row[21]
-    chip_lbl = row[24]
-    health   = row[27]
+    code         = row[0]
+    signal       = row[23]
+    risk         = row[22]
+    chip_lbl     = row[25]
+    health       = row[28]
+    vr_raw = row[29] if len(row) > 29 else None
+    try:
+        volume_ratio = float(vr_raw) if (vr_raw is not None and vr_raw != "") else None
+    except (ValueError, TypeError):
+        volume_ratio = None
 
-    # 過濾條件：ETF、今日賣超、連續天數=0、無集中度資料
+    # 過濾條件：ETF、今日賣超、連續天數=0、無集中度資料、當日漲幅 ≤ 2%
     if is_etf_code(code):                    return None
     if "🔴 今日賣超" in str(signal):          return None
     if not chip_lbl:                          return None
+    chg_str = str(row[20]).replace("%", "").replace("+", "").strip()
+    try:
+        if float(chg_str) <= 2.0:            return None
+    except (ValueError, TypeError):
+        return None   # N/A 或無法解析一律過濾
 
     # 取三法人最大連續天數作為代表
     consec = max(
@@ -887,10 +955,10 @@ def score_stock(row):
     if consec == 0: return None
 
     score = (
-        _score_matrix(consec, chip_lbl) +   # 35分
-        _score_margin(health) +              # 25分
-        _score_risk(risk)                    # 25分
-        # 量比 15分 待補
+        _score_matrix(consec, chip_lbl) +      # 35分
+        _score_margin(health) +                # 25分
+        _score_risk(risk) +                    # 25分
+        _score_volume_ratio(volume_ratio)      # 15分
     )
     return min(score, 100)
 
@@ -916,12 +984,12 @@ def update_recommendation(ss, date_str, all_rows):
             int(row[13]) if str(row[13]).isdigit() else 0,
         )
         d_consec = int(row[13]) if str(row[13]).isdigit() else 0
-        chip_pct = row[23]
-        chip_lbl = row[24]
-        risk     = row[21]
-        health   = row[27]
+        chip_pct = row[24]
+        chip_lbl = row[25]
+        risk     = row[22]
+        health   = row[28]
         close    = row[19]
-        chg_pct  = row[20]
+        chg_pct  = row[21]
         dealer   = _dealer_label(d_consec)
         # 出貨風險高時加標記
         risk_disp = f"{risk} ⚠️" if risk == "🔴 高" else risk
@@ -946,6 +1014,194 @@ def update_recommendation(ss, date_str, all_rows):
 
     prepend_block(ws, block, disp, "資料日期：", n_cols)
     print(f"  ✅ 明日關注 更新完成（Top5：{', '.join(r[1] for _, r in top5)}）")
+
+
+# ═══════════════════════════════════════════════
+# ★ v10.7 推薦成效追蹤
+# ═══════════════════════════════════════════════
+
+def _parse_rec_sheet(all_vals, disp_today):
+    """
+    解析「明日關注」工作表，回傳所有 block：
+    { disp: [(代號, 名稱, 評分, 推薦收盤), ...] }
+    跳過今日 block。
+    """
+    result = {}
+    i = 0
+    while i < len(all_vals):
+        cell = all_vals[i][0] if all_vals[i] else ""
+        if cell.startswith("資料日期：") and disp_today not in cell:
+            disp = cell.replace("資料日期：", "").split("｜")[0].strip()
+            stocks = []
+            i += 1
+            if i < len(all_vals) and all_vals[i] and all_vals[i][0] == "排名":
+                i += 1
+            while i < len(all_vals):
+                row = all_vals[i]
+                c0  = row[0] if row else ""
+                if c0.startswith("─") or c0.startswith("資料日期："):
+                    break
+                if len(row) >= 4 and row[1] and row[1].strip().isdigit():
+                    try:
+                        close = float(row[9].strip()) if len(row) > 9 and row[9].strip() else 0.0
+                    except ValueError:
+                        close = 0.0
+                    stocks.append((row[1].strip(), row[2].strip(), row[3].strip(), close))
+                i += 1
+            if stocks:
+                result[disp] = stocks
+        else:
+            i += 1
+    return result
+
+
+def _n_trading_days_after(base_disp, n):
+    """
+    回傳 base_disp（YYYY/MM/DD）之後第 n 個交易日的 disp 字串（跳週末）。
+    """
+    from datetime import datetime, timedelta
+    d = datetime.strptime(base_disp, "%Y/%m/%d")
+    count = 0
+    while count < n:
+        d += timedelta(days=1)
+        if d.weekday() < 5:
+            count += 1
+    return d.strftime("%Y/%m/%d")
+
+
+def _fmt_close(today_close, base_close):
+    """今日收盤加上漲跌符號（對比推薦收盤）。"""
+    if today_close <= 0:
+        return ""
+    if base_close <= 0:
+        return str(today_close)
+    if today_close > base_close:
+        return f"▲{today_close}"
+    elif today_close < base_close:
+        return f"▼{today_close}"
+    else:
+        return f"－{today_close}"
+
+
+def update_performance(ss, date_str, current_prices):
+    """
+    推薦成效追蹤（v10.7 重寫）：
+    1. 從「明日關注」解析各日推薦
+    2. 讀取「推薦成效」現有列表（最多保留推薦日距今 ≤ T+3 的筆數）
+    3. 新增今日5筆（T+1/T+2/T+3 留空）
+    4. 對所有現存筆，若今日是其 T+1/T+2/T+3，填入今日收盤
+    5. 移除推薦日距今超過 T+3 的筆
+    6. 整表寫回（最新在最上面）
+    """
+    disp_today = fmt_date(date_str)
+    N_COLS     = len(PERFORMANCE_HEADERS)   # 8
+
+    # ── 讀取「明日關注」工作表 ──
+    try:
+        ws_rec   = ss.worksheet("明日關注")
+        rec_vals = ws_rec.get_all_values()
+    except Exception:
+        print("  ⚠️ 推薦成效：找不到「明日關注」工作表，略過")
+        return
+
+    rec_map = _parse_rec_sheet(rec_vals, disp_today)
+
+    # ── 讀取「推薦成效」現有資料 ──
+    ws_perf = get_or_create(ss, "推薦成效", N_COLS)
+    try:
+        existing = ws_perf.get_all_values()
+    except Exception:
+        existing = []
+
+    # 解析現有列表（只保留資料行：col[0] 是 YYYY/MM/DD 格式）
+    import re
+    date_pat = re.compile(r"^\d{4}/\d{2}/\d{2}$")
+
+    rows = []   # list of list，長度 N_COLS，col[0]=推薦日
+    for row in existing:
+        if row and date_pat.match(str(row[0]).strip()):
+            # 補齊欄位至 N_COLS
+            r = list(row) + [""] * N_COLS
+            rows.append(r[:N_COLS])
+
+    # ── 步驟1：新增今日5筆（若今日推薦不在列表中）──
+    today_codes_in_rows = {r[1] for r in rows if r[0] == disp_today}
+    today_recs = rec_map.get(disp_today, [])
+
+    # 今日推薦在 rec_map 裡的 key 是 disp_today，
+    # 但 _parse_rec_sheet 跳過今日，所以改從「明日關注」直接解析今日 block
+    today_stocks = []
+    for i, row in enumerate(rec_vals):
+        cell = row[0] if row else ""
+        if cell.startswith("資料日期：") and disp_today in cell:
+            j = i + 1
+            if j < len(rec_vals) and rec_vals[j] and rec_vals[j][0] == "排名":
+                j += 1
+            while j < len(rec_vals):
+                r = rec_vals[j]
+                c0 = r[0] if r else ""
+                if c0.startswith("─") or c0.startswith("資料日期："):
+                    break
+                if len(r) >= 4 and r[1] and r[1].strip().isdigit():
+                    try:
+                        close = float(r[9].strip()) if len(r) > 9 and r[9].strip() else 0.0
+                    except ValueError:
+                        close = 0.0
+                    today_stocks.append((r[1].strip(), r[2].strip(), r[3].strip(), close))
+                j += 1
+            break
+
+    new_rows = []
+    for code, name, score, base_close in today_stocks:
+        if code not in today_codes_in_rows:
+            new_rows.append([disp_today, code, name, score,
+                             base_close if base_close > 0 else "",
+                             "", "", ""])
+
+    rows = new_rows + rows
+
+    # ── 步驟2：填入今日收盤到 T+1 / T+2 / T+3 欄 ──
+    # col index: 推薦日[0] 代號[1] 名稱[2] 評分[3]
+    #            推薦收盤[4] T+1[5] T+2[6] T+3[7]
+    for r in rows:
+        rec_disp   = r[0]
+        code       = r[1]
+        base_close_raw = r[4]
+        try:
+            base_close = float(str(base_close_raw)) if base_close_raw != "" else 0.0
+        except ValueError:
+            base_close = 0.0
+
+        _, today_close, _, _, _ = current_prices.get(code, (0.0, 0.0, 0, "N/A", None))
+
+        for slot, col_idx in [(1, 5), (2, 6), (3, 7)]:
+            if _n_trading_days_after(rec_disp, slot) == disp_today:
+                if r[col_idx] == "":   # 尚未填入才寫
+                    r[col_idx] = _fmt_close(today_close, base_close)
+                break
+
+    # ── 步驟3：移除推薦日距今超過 T+3 的筆 ──
+    # 若推薦日的 T+3 < today，表示已超過，直接清除
+    from datetime import datetime
+    today_dt = datetime.strptime(disp_today, "%Y/%m/%d")
+    def _is_expired(rec_disp):
+        try:
+            t3 = datetime.strptime(_n_trading_days_after(rec_disp, 3), "%Y/%m/%d")
+            return t3 < today_dt
+        except Exception:
+            return False
+
+    rows = [r for r in rows if not _is_expired(r[0])]
+
+    # ── 步驟4：整表寫回 ──
+    header_row = [PERFORMANCE_HEADERS]
+    full_data  = header_row + rows
+
+    ws_perf.clear()
+    if ws_perf.row_count < len(full_data) + 10:
+        ws_perf.add_rows(len(full_data) + 10 - ws_perf.row_count)
+    ws_perf.update(range_name="A1", values=full_data)
+    print(f"  ✅ 推薦成效 更新完成（追蹤中：{len(rows)} 筆）")
 
 
 # ═══════════════════════════════════════════════
@@ -1104,8 +1360,8 @@ def update_sector_sheet(ss, date_str, all_buy_codes, all_buy_names, current_pric
     if missing and not sheet_only:
         print(f"  補抓族群成員行情（{len(missing)} 支不在快取中）...")
         for i, code in enumerate(missing):
-            avg, close, vol, chg = fetch_stock_day_full(code, date_str)
-            current_prices[code] = (avg, close, vol, chg)   # ★ 直接合併進快取
+            avg, close, vol, chg, vr = fetch_stock_day_full(code, date_str)
+            current_prices[code] = (avg, close, vol, chg, vr)   # ★ 直接合併進快取
             print(f"  [{i+1}/{len(missing)}] {code}: 收盤={close:.2f} {chg}")
             if i < len(missing) - 1:
                 time.sleep(0.4)
@@ -1125,7 +1381,7 @@ def update_sector_sheet(ss, date_str, all_buy_codes, all_buy_names, current_pric
     def get_quote(code):
         """從 current_prices 取得行情（補抓結果已合併）"""
         if code in current_prices:
-            _, close, vol, chg = current_prices[code]
+            _, close, vol, chg, *_ = current_prices[code]
         else:
             close, vol, chg = 0.0, 0, "N/A"
         name = CODE_NAME_MAP.get(code) or all_buy_names.get(code, "")
@@ -1249,8 +1505,8 @@ def prefetch_history_codes(ss, date_str, current_prices, current_margin):
     if missing:
         print(f"  📡 補抓歷史股票現價（{len(missing)} 支）...")
         for i, code in enumerate(missing):
-            avg, close, vol, pct_str = fetch_stock_day_full(code, date_str)
-            current_prices[code] = (avg, close, vol, pct_str)
+            avg, close, vol, pct_str, vr = fetch_stock_day_full(code, date_str)
+            current_prices[code] = (avg, close, vol, pct_str, vr)
             if close > 0:
                 print(f"    [{i+1}/{len(missing)}] {code}: 收盤={close:.2f} 成交={vol:,}張")
             if i < len(missing) - 1:
@@ -1420,10 +1676,11 @@ def main():
         for group in all_groups:
             for stock in group:
                 current_prices[stock["code"]] = (
-                    stock.get("avg_price",  0.0),
-                    stock.get("close",      0.0),
-                    stock.get("volume",     0),
-                    stock.get("change_pct", "N/A"),
+                    stock.get("avg_price",     0.0),
+                    stock.get("close",         0.0),
+                    stock.get("volume",        0),
+                    stock.get("change_pct",    "N/A"),
+                    stock.get("volume_ratio",  None),
                 )
         for group in buy_groups:
             for stock in group:
@@ -1439,10 +1696,6 @@ def main():
             for stock in group:
                 all_buy_codes.add(stock["code"])
                 all_buy_names[stock["code"]] = stock["name"]
-
-        # 補抓歷史股票（確保快取完整，sheet-only 零 API）
-        print(f"\n📡 補抓歷史股票資料...")
-        prefetch_history_codes(ss, date_str, current_prices, current_margin)
 
         # 存完整快取到 Sheets
         save_cache(ss, date_str, foreign, trust, dealer, f_sell, t_sell, d_sell,
@@ -1488,6 +1741,7 @@ def main():
         ("4", "對照分析+快照", _run_analysis),
         ("5", "族群聯動",      lambda: update_sector_sheet(ss, date_str, all_buy_codes, all_buy_names, current_prices, sheet_only=args.sheet_only, cache_ref=_CACHE_REF)),
         ("6", "明日關注推薦",  _run_recommendation),
+        ("7", "推薦成效追蹤",  lambda: update_performance(ss, date_str, current_prices)),
     ]
 
     if args.sheet_only:
