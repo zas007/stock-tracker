@@ -1,5 +1,5 @@
 """
-台灣股市三大法人買超/賣超追蹤 v10.7
+台灣股市三大法人買超/賣超追蹤 v10.8
 優化重點：
 1. 修正版本標題（v8 → v10）
 2. 合併 fetch_stock_quote / fetch_stock_day → fetch_stock_day_full
@@ -8,6 +8,7 @@
 5. update_analysis 拆分為 _build_history_maps / _build_analysis_rows / update_analysis
 6. 分模式執行（--fetch-only / --sheet-only / --debug-margin）
 7. 雲端快取（Google Sheets「快取」工作表）
+8. 買超/賣超榜上限從 10 改 50，enrich_with_prices 改兩段式（STOCK_DAY_ALL batch 查表 → 查不到才逐支補抓）
 """
 
 import subprocess, json, gspread, sys, os, time, re
@@ -135,7 +136,7 @@ def fetch_institutional(date_str):
             for r in data["data"]
             if (to_int(r[4]) + to_int(r[7])) > 0
         ]
-        return sorted(result, key=lambda x: x["net"], reverse=True)[:10]
+        return sorted(result, key=lambda x: x["net"], reverse=True)[:50]
 
     def foreign_sell():
         result = [
@@ -146,21 +147,21 @@ def fetch_institutional(date_str):
             for r in data["data"]
             if (to_int(r[4]) + to_int(r[7])) < 0
         ]
-        return sorted(result, key=lambda x: x["net"])[:10]
+        return sorted(result, key=lambda x: x["net"])[:50]
 
     def trust_buy():
         result = [
             make_stock(r, to_int(r[8]), to_int(r[9]), to_int(r[10]))
             for r in data["data"] if to_int(r[10]) > 0
         ]
-        return sorted(result, key=lambda x: x["net"], reverse=True)[:10]
+        return sorted(result, key=lambda x: x["net"], reverse=True)[:50]
 
     def trust_sell():
         result = [
             make_stock(r, to_int(r[8]), to_int(r[9]), to_int(r[10]))
             for r in data["data"] if to_int(r[10]) < 0
         ]
-        return sorted(result, key=lambda x: x["net"])[:10]
+        return sorted(result, key=lambda x: x["net"])[:50]
 
     def dealer_buy():
         # 自營商合計買超 = [11]，買進/賣出用自行+避險
@@ -171,7 +172,7 @@ def fetch_institutional(date_str):
                 to_int(r[11]))
             for r in data["data"] if to_int(r[11]) > 0
         ]
-        return sorted(result, key=lambda x: x["net"], reverse=True)[:10]
+        return sorted(result, key=lambda x: x["net"], reverse=True)[:50]
 
     def dealer_sell():
         result = [
@@ -181,7 +182,7 @@ def fetch_institutional(date_str):
                 to_int(r[11]))
             for r in data["data"] if to_int(r[11]) < 0
         ]
-        return sorted(result, key=lambda x: x["net"])[:10]
+        return sorted(result, key=lambda x: x["net"])[:50]
 
     return (
         foreign_buy(), trust_buy(), dealer_buy(),
@@ -251,23 +252,95 @@ def fetch_stock_day_full(code, date_str):
 
 
 # ═══════════════════════════════════════════════
+# ★ v10.8 STOCK_DAY_ALL 一次抓全市場行情
+# ═══════════════════════════════════════════════
+
+def fetch_price_map_batch(date_str):
+    """
+    用 STOCK_DAY_ALL 一次抓全市場當日行情，回傳查表：
+    { code: (avg_price, close, volume_lots, change_pct_str, None) }
+    量比固定回傳 None（無前10日資料，只有當日）。
+    失敗時回傳空 dict，由 enrich_with_prices 回退逐支補抓。
+    """
+    url = (f"https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY_ALL"
+           f"?date={date_str}&response=json")
+    print(f"  [batch] STOCK_DAY_ALL {date_str}...")
+    text = curl_get(url)
+    if not text or text.startswith("<"):
+        print("  [batch] ❌ 無回應，改逐支抓取")
+        return {}
+    try:
+        data = json.loads(text)
+    except Exception as e:
+        print(f"  [batch] ❌ JSON 解析失敗：{e}，改逐支抓取")
+        return {}
+
+    if data.get("stat") != "OK":
+        print(f"  [batch] ❌ stat={data.get('stat')}，改逐支抓取")
+        return {}
+
+    rows = data.get("data", [])
+    price_map = {}
+    for row in rows:
+        try:
+            code   = str(row[0]).strip()
+            shares = float(str(row[2]).replace(",", ""))
+            amount = float(str(row[3]).replace(",", ""))
+            close  = float(str(row[7]).replace(",", ""))
+            diff_str = str(row[8]).replace(",", "").strip()
+            diff = float(diff_str) if diff_str not in ("", "--", "X0.00") else 0.0
+            vol    = int(shares / 1000)
+            avg    = round(amount / shares, 2) if shares > 0 else 0.0
+            prev_close = close - diff
+            pct = (close - prev_close) / prev_close * 100 if prev_close > 0 else 0.0
+            sign = "+" if pct >= 0 else ""
+            pct_str = f"{sign}{pct:.2f}%"
+            price_map[code] = (avg, close, vol, pct_str, None)  # 量比 None
+        except Exception:
+            continue
+
+    print(f"  [batch] ✅ {len(price_map)} 支")
+    return price_map
+
+
+# ═══════════════════════════════════════════════
 # 批次抓均價、收盤、成交量（寫入 stock dict）
 # ═══════════════════════════════════════════════
 
 def enrich_with_prices(groups, date_str):
-    """批次抓均價、收盤價、成交量，去重複"""
+    """
+    ★ v10.8 兩段式：
+    1. STOCK_DAY_ALL batch 查表（0.3 秒抓全市場）
+    2. batch 查不到的代號才逐支打 STOCK_DAY（保留量比計算）
+    """
     all_codes = {}
     for group in groups:
         for stock in group:
-            all_codes[stock["code"]] = (0.0, 0.0, 0, "N/A")
+            all_codes[stock["code"]] = (0.0, 0.0, 0, "N/A", None)
 
     total = len(all_codes)
-    print(f"  抓取 {total} 支股票價格（每支間隔 0.5 秒）...")
-    for i, code in enumerate(all_codes):
+
+    # 第一段：batch
+    batch_map = fetch_price_map_batch(date_str)
+    hit, miss_codes = 0, []
+    for code in all_codes:
+        if code in batch_map:
+            all_codes[code] = batch_map[code]
+            hit += 1
+        else:
+            miss_codes.append(code)
+
+    print(f"  [batch] 命中 {hit}/{total}，補抓 {len(miss_codes)} 支...")
+
+    # 第二段：逐支補抓（未命中者，保留量比計算）
+    for i, code in enumerate(miss_codes):
         avg, close, vol, chg, vr = fetch_stock_day_full(code, date_str)
-        all_codes[code] = (avg, close, vol, chg, vr)
-        print(f"  [{i+1}/{total}] {code}: 均價={avg:.2f} 收盤={close:.2f} 成交={vol:,}張 漲跌={chg} 量比={vr}")
-        if i < total - 1:
+        if close > 0:
+            all_codes[code] = (avg, close, vol, chg, vr)
+            print(f"  [補抓 {i+1}/{len(miss_codes)}] {code}: 均價={avg:.2f} 收盤={close:.2f} 量比={vr}")
+        else:
+            print(f"  [補抓 {i+1}/{len(miss_codes)}] {code}: 收盤=0，跳過（資料未就緒）")
+        if i < len(miss_codes) - 1:
             time.sleep(0.5)
 
     for group in groups:
@@ -535,9 +608,9 @@ def update_buy_sheet(ss, date_str, foreign, trust, dealer):
     hdrs = ["名次","代號","股票名稱","買進(張)","賣出(張)","買超(張)",
             "當日均價(元)","收盤價(元)","成交量(張)","籌碼集中度"]
     block = [[f"資料日期：{disp}"] + [""]*9]
-    for label, data in [("外資及陸資買超前十名", foreign),
-                        ("投信買超前十名",       trust),
-                        ("自營商買超前十名",     dealer)]:
+    for label, data in [("外資及陸資買超前五十名", foreign),
+                        ("投信買超前五十名",       trust),
+                        ("自營商買超前五十名",     dealer)]:
         block += [[f"【{label}】"]+[""]*9, hdrs]
         for i, r in enumerate(data):
             vol = r.get("volume", 0)
@@ -556,9 +629,9 @@ def update_sell_sheet(ss, date_str, f_sell, t_sell, d_sell):
     disp = fmt_date(date_str)
     hdrs = ["名次","代號","股票名稱","買進(張)","賣出(張)","賣超(張)","當日均價(元)","收盤價(元)"]
     block = [[f"資料日期：{disp}"] + [""]*7]
-    for label, data in [("外資及陸資賣超前十名", f_sell),
-                        ("投信賣超前十名",       t_sell),
-                        ("自營商賣超前十名",     d_sell)]:
+    for label, data in [("外資及陸資賣超前五十名", f_sell),
+                        ("投信賣超前五十名",       t_sell),
+                        ("自營商賣超前五十名",     d_sell)]:
         block += [[f"【{label}】"]+[""]*7, hdrs]
         for i, r in enumerate(data):
             block.append([i+1, r["code"], r["name"], r["buy"], r["sell"],
@@ -761,8 +834,8 @@ def _calc_analysis_rows(ss, date_str, current_prices, current_margin):
         print(f"  📡 保底補抓現價（{len(missing_price)} 支，快取未涵蓋）...")
         for i, code in enumerate(missing_price):
             avg, close, vol, pct_str, vr = fetch_stock_day_full(code, date_str)
-            current_prices[code] = (avg, close, vol, pct_str, vr)
             if close > 0:
+                current_prices[code] = (avg, close, vol, pct_str, vr)
                 print(f"    [{i+1}/{len(missing_price)}] {code}: 收盤={close:.2f}")
             if i < len(missing_price) - 1:
                 time.sleep(0.5)
@@ -857,7 +930,7 @@ RECOMMEND_HEADERS = [
     "排名", "代號", "股票名稱", "評分",
     "連續天數", "籌碼集中度%", "籌碼集中度評級",
     "出貨風險", "融資健康度",
-    "現價", "漲幅%", "自營商標記",
+    "現價", "當日漲跌%", "自營商標記",
 ]
 
 PERFORMANCE_HEADERS = [
@@ -989,7 +1062,7 @@ def update_recommendation(ss, date_str, all_rows):
         risk     = row[22]
         health   = row[28]
         close    = row[19]
-        chg_pct  = row[21]
+        chg_pct  = row[20]
         dealer   = _dealer_label(d_consec)
         # 出貨風險高時加標記
         risk_disp = f"{risk} ⚠️" if risk == "🔴 高" else risk
@@ -1361,8 +1434,11 @@ def update_sector_sheet(ss, date_str, all_buy_codes, all_buy_names, current_pric
         print(f"  補抓族群成員行情（{len(missing)} 支不在快取中）...")
         for i, code in enumerate(missing):
             avg, close, vol, chg, vr = fetch_stock_day_full(code, date_str)
-            current_prices[code] = (avg, close, vol, chg, vr)   # ★ 直接合併進快取
-            print(f"  [{i+1}/{len(missing)}] {code}: 收盤={close:.2f} {chg}")
+            if close > 0:
+                current_prices[code] = (avg, close, vol, chg, vr)   # ★ 直接合併進快取
+                print(f"  [{i+1}/{len(missing)}] {code}: 收盤={close:.2f} {chg}")
+            else:
+                print(f"  [{i+1}/{len(missing)}] {code}: 收盤=0，跳過（資料未就緒）")
             if i < len(missing) - 1:
                 time.sleep(0.4)
         # ★ 補抓完後更新雲端快取
@@ -1424,8 +1500,16 @@ def update_sector_sheet(ss, date_str, all_buy_codes, all_buy_names, current_pric
 # ═══════════════════════════════════════════════
 
 def find_trading_day():
+    """
+    ★ v10.8：14:00 前直接從前一交易日開始（三大法人資料 16:30 後才有）；
+    14:00 後先嘗試今天，沒資料再往前找。
+    """
     warm_up_cookie()
-    d = datetime.now()
+    now = datetime.now()
+    d = now
+    if now.hour < 14:
+        print(f"  現在 {now.strftime(chr(37)+chr(72)+chr(58)+chr(37)+chr(77))}，14:00 前自動使用前一交易日")
+        d -= timedelta(days=1)
     for _ in range(7):
         if d.weekday() < 5:
             date_str = d.strftime("%Y%m%d")
@@ -1445,44 +1529,69 @@ def find_trading_day():
 
 def save_cache(ss, date_str, foreign, trust, dealer, f_sell, t_sell, d_sell,
                current_prices=None, current_margin=None):
-    """把所有資料序列化後寫入 Sheets「快取」工作表"""
-    payload = {
-        "date_str":       date_str,
-        "foreign":        foreign,
-        "trust":          trust,
-        "dealer":         dealer,
-        "f_sell":         f_sell,
-        "t_sell":         t_sell,
-        "d_sell":         d_sell,
-        "current_prices": {k: list(v) for k, v in (current_prices or {}).items()},
-        "current_margin": {k: list(v) for k, v in (current_margin or {}).items()},
-    }
+    """
+    把所有資料序列化後寫入 Sheets「快取」工作表。
+    ★ v10.8 修正：每個 key 獨立一列，避免單 cell 超過 50000 字元限制。
+    """
+    rows = [
+        ["date_str",       date_str],
+        ["foreign",        json.dumps(foreign,  ensure_ascii=False)],
+        ["trust",          json.dumps(trust,    ensure_ascii=False)],
+        ["dealer",         json.dumps(dealer,   ensure_ascii=False)],
+        ["f_sell",         json.dumps(f_sell,   ensure_ascii=False)],
+        ["t_sell",         json.dumps(t_sell,   ensure_ascii=False)],
+        ["d_sell",         json.dumps(d_sell,   ensure_ascii=False)],
+        ["current_prices", json.dumps({k: list(v) for k, v in (current_prices or {}).items()}, ensure_ascii=False)],
+        ["current_margin", json.dumps({k: list(v) for k, v in (current_margin or {}).items()}, ensure_ascii=False)],
+    ]
     ws = get_or_create(ss, "快取", cols=2)
     ws.clear()
-    ws.update(range_name="A1", values=[
-        ["date_str", date_str],
-        ["payload",  json.dumps(payload, ensure_ascii=False)],
-    ])
+    if ws.row_count < len(rows) + 5:
+        ws.add_rows(len(rows) + 5 - ws.row_count)
+    ws.update(range_name="A1", values=rows)
     print(f"  💾 快取已寫入 Sheets（日期：{date_str}）")
 
 def load_cache(ss, date_str):
-    """從 Sheets「快取」工作表讀取，快取不為空即可使用（不檢查日期）"""
+    """
+    從 Sheets「快取」工作表讀取。
+    ★ v10.8：支援新格式（每 key 一列）與舊格式（單 payload 列）。
+    """
     try:
         ws = ss.worksheet("快取")
-        rows = ws.get_all_values()
-        if len(rows) < 2:
+        all_rows = ws.get_all_values()
+        if not all_rows:
             return None
-        cached_date = rows[0][1] if len(rows[0]) > 1 else ""
+
+        # 建立 key→value 查表
+        kv = {row[0]: row[1] for row in all_rows if len(row) >= 2}
+        cached_date = kv.get("date_str", "")
         if cached_date:
             print(f"  ℹ️ 快取日期：{cached_date}")
-        payload_str = rows[1][1] if len(rows[1]) > 1 else ""
-        data = json.loads(payload_str)
-        current_prices = {k: tuple(v) for k, v in data.get("current_prices", {}).items()}
-        current_margin = {k: tuple(v) for k, v in data.get("current_margin", {}).items()}
+
+        # 新格式：各 key 獨立一列
+        if "foreign" in kv:
+            foreign  = json.loads(kv["foreign"])
+            trust    = json.loads(kv["trust"])
+            dealer   = json.loads(kv["dealer"])
+            f_sell   = json.loads(kv["f_sell"])
+            t_sell   = json.loads(kv["t_sell"])
+            d_sell   = json.loads(kv["d_sell"])
+            current_prices = {k: tuple(v) for k, v in json.loads(kv.get("current_prices", "{}")).items()}
+            current_margin = {k: tuple(v) for k, v in json.loads(kv.get("current_margin", "{}")).items()}
+        # 舊格式相容：payload 在 B2
+        elif "payload" in kv:
+            data = json.loads(kv["payload"])
+            foreign  = data["foreign"];  trust   = data["trust"];  dealer = data["dealer"]
+            f_sell   = data["f_sell"];   t_sell  = data["t_sell"]; d_sell = data["d_sell"]
+            current_prices = {k: tuple(v) for k, v in data.get("current_prices", {}).items()}
+            current_margin = {k: tuple(v) for k, v in data.get("current_margin", {}).items()}
+        else:
+            print("  ⚠️ 快取格式無法辨識")
+            return None
+
         print(f"  ✅ 快取命中（日期：{cached_date}）")
-        return (data["date_str"], data["foreign"], data["trust"], data["dealer"],
-                data["f_sell"],   data["t_sell"],  data["d_sell"],
-                current_prices,   current_margin)
+        return (cached_date, foreign, trust, dealer, f_sell, t_sell, d_sell,
+                current_prices, current_margin)
     except gspread.exceptions.WorksheetNotFound:
         print(f"  ⚠️ 快取工作表不存在，需重新抓取")
         return None
