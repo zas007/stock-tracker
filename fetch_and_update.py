@@ -106,6 +106,8 @@ def fetch_institutional(date_str):
             f"T86 欄位數不足（{sample_len} 欄，需要 ≥19）。"
             "可能尚未收盤，三大法人資料通常 16:30 後才有。"
         )
+    # ★ v10.8 過濾欄位數不足的列，避免 list index out of range
+    data["data"] = [r for r in data["data"] if len(r) >= 19]
 
     # 實際欄位（19欄）：
     # [2][3][4]   外陸資(不含外資自營商) 買進/賣出/買超
@@ -303,6 +305,49 @@ def fetch_price_map_batch(date_str):
     return price_map
 
 
+def fetch_price_map_otc(date_str):
+    """
+    ★ v10.8 上櫃股行情（OTC/櫃買中心）
+    一次抓全上櫃，回傳 { code: (avg, close, vol, pct_str, None) }
+    API: tpex.org.tw daily_close_quotes
+    欄位：[0]代號 [1]名稱 [2]收盤 [3]漲跌 [7]均價 [8]成交股數
+    """
+    year = int(date_str[:4]) - 1911
+    d    = f"{year}/{date_str[4:6]}/{date_str[6:]}"
+    url  = (f"https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes"
+            f"/stk_quote_result.php?d={d}&output=json")
+    print(f"  [otc] 抓取上櫃行情（{date_str}）...")
+    text = curl_get(url)
+    if not text or text.startswith("<") or text.startswith("Host"):
+        print("  [otc] ❌ 無回應")
+        return {}
+    try:
+        data  = json.loads(text)
+        rows  = data["tables"][0].get("data", data["tables"][0].get("aaData", []))
+    except Exception as e:
+        print(f"  [otc] ❌ 解析失敗：{e}")
+        return {}
+
+    otc_map = {}
+    for row in rows:
+        try:
+            code    = str(row[0]).strip()
+            close   = float(str(row[2]).replace(",", "").strip())
+            diff    = float(str(row[3]).replace(",", "").strip().replace("+", ""))
+            avg     = float(str(row[7]).replace(",", "").strip())
+            shares  = float(str(row[8]).replace(",", "").strip())
+            vol     = int(shares / 1000)
+            prev_close = close - diff
+            pct    = (close - prev_close) / prev_close * 100 if prev_close > 0 else 0.0
+            sign   = "+" if pct >= 0 else ""
+            pct_str = f"{sign}{pct:.2f}%"
+            otc_map[code] = (avg, close, vol, pct_str, None)
+        except Exception:
+            continue
+    print(f"  [otc] ✅ {len(otc_map)} 支")
+    return otc_map
+
+
 # ═══════════════════════════════════════════════
 # 批次抓均價、收盤、成交量（寫入 stock dict）
 # ═══════════════════════════════════════════════
@@ -320,7 +365,7 @@ def enrich_with_prices(groups, date_str):
 
     total = len(all_codes)
 
-    # 第一段：batch
+    # 第一段：TWSE batch
     batch_map = fetch_price_map_batch(date_str)
     hit, miss_codes = 0, []
     for code in all_codes:
@@ -330,9 +375,22 @@ def enrich_with_prices(groups, date_str):
         else:
             miss_codes.append(code)
 
-    print(f"  [batch] 命中 {hit}/{total}，補抓 {len(miss_codes)} 支...")
+    print(f"  [batch] 命中 {hit}/{total}，剩餘 {len(miss_codes)} 支...")
 
-    # 第二段：逐支補抓（未命中者，保留量比計算）
+    # 第二段：OTC batch（上櫃股）
+    if miss_codes:
+        otc_map = fetch_price_map_otc(date_str)
+        otc_hit, still_miss = 0, []
+        for code in miss_codes:
+            if code in otc_map:
+                all_codes[code] = otc_map[code]
+                otc_hit += 1
+            else:
+                still_miss.append(code)
+        print(f"  [otc] 命中 {otc_hit}/{len(miss_codes)}，補抓 {len(still_miss)} 支...")
+        miss_codes = still_miss
+
+    # 第三段：逐支補抓（仍未命中者，保留量比計算）
     for i, code in enumerate(miss_codes):
         avg, close, vol, chg, vr = fetch_stock_day_full(code, date_str)
         if close > 0:
@@ -572,7 +630,13 @@ def get_or_create(ss, name, cols=15):
     except: return ss.add_worksheet(title=name, rows=300, cols=cols)
 
 def prepend_block(ws, new_block, disp, date_marker_prefix, sep_cols):
+    """
+    ★ v10.8 batch 寫入：
+    舊邏輯：delete_rows → get_all_values → clear → add_rows → update（4~5次呼叫）
+    新邏輯：get_all_values → Python切片過濾 → clear → update（2次呼叫，add_rows 只在必要時）
+    """
     existing = ws.get_all_values()
+    # 今天已有資料 → 在 Python 裡直接切掉，不用 delete_rows
     if existing and existing[0] and existing[0][0].startswith(f"{date_marker_prefix}{disp}"):
         end_row = len(existing)
         for i in range(1, len(existing)):
@@ -583,8 +647,7 @@ def prepend_block(ws, new_block, disp, date_marker_prefix, sep_cols):
             if cell.startswith("─") and disp in (existing[i][1] if len(existing[i]) > 1 else ""):
                 end_row = i + 1
                 break
-        ws.delete_rows(1, end_row)
-        existing = ws.get_all_values()
+        existing = existing[end_row:]   # ★ Python 切片，不打 API
 
     if existing and any(any(c for c in row) for row in existing):
         sep       = [["─" * 20, f"以上為 {disp}"] + [""] * (sep_cols - 2)]
@@ -642,15 +705,27 @@ def update_sell_sheet(ss, date_str, f_sell, t_sell, d_sell):
 
 
 def append_history(ss, date_str, foreign, trust, dealer, f_sell, t_sell, d_sell):
+    """
+    ★ v10.8 batch 寫入：
+    避免逐行 delete_rows（300次寫入），改為讀出→過濾今天→整批寫回，
+    只用 2 次 API 呼叫（clear + update）。
+    """
     ws   = get_or_create(ss, "歷史紀錄", 10)
     disp = fmt_date(date_str)
-    if not ws.get_all_values():
-        ws.append_row(["日期","名次","代號","股票名稱","法人類別","張數",
-                       "當日均價(元)","買/賣","成交量(張)","籌碼集中度"])
+    headers = ["日期","名次","代號","股票名稱","法人類別","張數",
+               "當日均價(元)","買/賣","成交量(張)","籌碼集中度"]
+
     existing = ws.get_all_values()
-    for i in reversed(range(len(existing))):
-        if existing[i] and existing[i][0] == disp:
-            ws.delete_rows(i+1)
+    if not existing:
+        existing = [headers]
+
+    # 如果第一列是標題，保留；過濾掉今天已有的資料
+    if existing and existing[0] == headers:
+        kept = [existing[0]] + [r for r in existing[1:] if not (r and r[0] == disp)]
+    else:
+        kept = [r for r in existing if not (r and r[0] == disp)]
+        kept = [headers] + kept
+
     new_rows = []
     for label, data in [("外資",foreign),("投信",trust),("自營商",dealer)]:
         for i, r in enumerate(data):
@@ -663,8 +738,13 @@ def append_history(ss, date_str, foreign, trust, dealer, f_sell, t_sell, d_sell)
         for i, r in enumerate(data):
             new_rows.append([disp, i+1, r["code"], r["name"], label,
                              abs(r["net"]), r["avg_price"] or "", "賣超", "", ""])
-    ws.append_rows(new_rows)
-    print(f"  ✅ 歷史紀錄 新增 {len(new_rows)} 筆")
+
+    full = kept + new_rows
+    ws.clear()
+    if ws.row_count < len(full) + 10:
+        ws.add_rows(len(full) + 10 - ws.row_count)
+    ws.update(range_name="A1", values=full)
+    print(f"  ✅ 歷史紀錄 新增 {len(new_rows)} 筆（合計 {len(full)-1} 筆）")
 
 
 # ═══════════════════════════════════════════════
@@ -1300,6 +1380,47 @@ def fetch_industry_map():
         rows = re.findall(r"<tr[^>]*>(.*?)</tr>", html, re.DOTALL)
         industry_map = {}
         current_industry = ""
+        # ★ v10.8 官方產業別 → 族群名稱對照（避免歸入無意義的「股票」）
+        INDUSTRY_TO_SECTOR = {
+            "水泥工業":       "傳產",
+            "食品工業":       "傳產",
+            "塑膠工業":       "傳產",
+            "紡織纖維":       "傳產",
+            "電機機械":       "傳產",
+            "電器電纜":       "傳產",
+            "化學工業":       "傳產",
+            "玻璃陶瓷":       "傳產",
+            "造紙工業":       "傳產",
+            "鋼鐵工業":       "傳產",
+            "橡膠工業":       "傳產",
+            "汽車工業":       "傳產",
+            "建材營造":       "傳產",
+            "航運業":         "航運",
+            "觀光餐旅":       "其他",
+            "金融保險":       "金融",
+            "貿易百貨":       "其他",
+            "綜合":           "其他",
+            "其他":           "其他",
+            "半導體業":       "半導體",
+            "電腦及週邊設備業": "電子代工",
+            "光電業":         "其他",
+            "通信網路業":     "其他",
+            "電子零組件業":   "其他",
+            "電子通路業":     "電子代工",
+            "資訊服務業":     "其他",
+            "其他電子業":     "其他",
+            "生技醫療業":     "其他",
+            "文化創意業":     "其他",
+            "農業科技業":     "其他",
+            "電子商務":       "其他",
+            "綠能環保":       "其他",
+            "數位雲端":       "其他",
+            "運動休閒":       "其他",
+            "居家生活":       "其他",
+        }
+        SKIP_INDUSTRIES = {"股票", "上市認購(售)權證", "上市ETF", "上市ETN",
+                           "上市受益證券", "上市資產支持證券", "特別股"}
+
         for row in rows:
             cells = re.findall(r"<td[^>]*>(.*?)</td>", row, re.DOTALL)
             cells = [re.sub(r"<[^>]+>", "", c).strip() for c in cells]
@@ -1307,10 +1428,15 @@ def fetch_industry_map():
                 continue
             # 產業別標題列：只有一格且不含空格（無代號）
             if len(cells) == 1 and cells[0]:
-                current_industry = cells[0]
+                raw = cells[0]
+                if raw in SKIP_INDUSTRIES:
+                    current_industry = ""   # 清空，後續股票列不會歸入
+                else:
+                    # 對照到我們的族群名稱，找不到就用官方名稱
+                    current_industry = INDUSTRY_TO_SECTOR.get(raw, raw)
                 continue
             # 股票列：第一格是「代號　名稱」（全形空格分隔）
-            if cells and "　" in cells[0]:
+            if cells and "　" in cells[0] and current_industry:
                 parts = cells[0].split("　")
                 code  = parts[0].strip()
                 if code.isdigit() and len(code) == 4:
@@ -1432,14 +1558,27 @@ def update_sector_sheet(ss, date_str, all_buy_codes, all_buy_names, current_pric
 
     if missing and not sheet_only:
         print(f"  補抓族群成員行情（{len(missing)} 支不在快取中）...")
-        for i, code in enumerate(missing):
+        # ★ v10.8 先查 OTC batch，再逐支補抓
+        otc_map = fetch_price_map_otc(date_str)
+        still_missing = []
+        for code in missing:
+            if code in otc_map:
+                avg, close, vol, chg, vr = otc_map[code]
+                if close > 0:
+                    current_prices[code] = (avg, close, vol, chg, vr)
+            else:
+                still_missing.append(code)
+        if otc_map:
+            otc_hits = len(missing) - len(still_missing)
+            print(f"  [otc] 族群補抓命中 {otc_hits}/{len(missing)} 支")
+        for i, code in enumerate(still_missing):
             avg, close, vol, chg, vr = fetch_stock_day_full(code, date_str)
             if close > 0:
-                current_prices[code] = (avg, close, vol, chg, vr)   # ★ 直接合併進快取
-                print(f"  [{i+1}/{len(missing)}] {code}: 收盤={close:.2f} {chg}")
+                current_prices[code] = (avg, close, vol, chg, vr)
+                print(f"  [{i+1}/{len(still_missing)}] {code}: 收盤={close:.2f} {chg}")
             else:
-                print(f"  [{i+1}/{len(missing)}] {code}: 收盤=0，跳過（資料未就緒）")
-            if i < len(missing) - 1:
+                print(f"  [{i+1}/{len(still_missing)}] {code}: 收盤=0，跳過（資料未就緒）")
+            if i < len(still_missing) - 1:
                 time.sleep(0.4)
         # ★ 補抓完後更新雲端快取
         if cache_ref:
@@ -1686,7 +1825,7 @@ def main():
     args = parser.parse_args()
 
     print("=" * 50)
-    print("  台灣股市三大法人買超/賣超追蹤 v10.6")
+    print("  台灣股市三大法人買超/賣超追蹤 v10.8")
     print("  config.py 獨立設定 ｜ 族群聯動累積 ｜ 分模式執行")
     print("=" * 50)
     print(f"  族群反查表：{len(CODE_TO_SECTOR)} 支股票已對應族群")
@@ -1875,7 +2014,7 @@ def main():
         for attempt in range(1, max_retries + 1):
             try:
                 fn()
-                time.sleep(3)   # 每張工作表寫完後固定等 3 秒
+                time.sleep(5)   # 每張工作表寫完後固定等 5 秒（v10.8 調高避免 429）
                 return True
             except Exception as e:
                 err = str(e)
