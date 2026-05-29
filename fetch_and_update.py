@@ -1,5 +1,5 @@
 """
-台灣股市三大法人買超/賣超追蹤 v10.8
+台灣股市三大法人買超/賣超追蹤 v11.0
 優化重點：
 1. 修正版本標題（v8 → v10）
 2. 合併 fetch_stock_quote / fetch_stock_day → fetch_stock_day_full
@@ -9,6 +9,7 @@
 6. 分模式執行（--fetch-only / --sheet-only / --debug-margin）
 7. 雲端快取（Google Sheets「快取」工作表）
 8. 買超/賣超榜上限從 10 改 50，enrich_with_prices 改兩段式（STOCK_DAY_ALL batch 查表 → 查不到才逐支補抓）
+9. 保底補抓三段式（batch→OTC→skip）、賣超移出 enrich_with_prices、Step 1.5 快取命中跳過 Step 2/3
 """
 
 import subprocess, json, gspread, sys, os, time, re
@@ -264,8 +265,8 @@ def fetch_price_map_batch(date_str):
     量比固定回傳 None（無前10日資料，只有當日）。
     失敗時回傳空 dict，由 enrich_with_prices 回退逐支補抓。
     """
-    url = (f"https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY_ALL"
-           f"?date={date_str}&response=json")
+    # 不帶 date 參數，抓最新一日；帶日期時歷史資料為空
+    url = "https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY_ALL?response=json"
     print(f"  [batch] STOCK_DAY_ALL {date_str}...")
     text = curl_get(url)
     if not text or text.startswith("<"):
@@ -279,6 +280,12 @@ def fetch_price_map_batch(date_str):
 
     if data.get("stat") != "OK":
         print(f"  [batch] ❌ stat={data.get('stat')}，改逐支抓取")
+        return {}
+
+    # 驗證回傳日期是否吻合目標日期
+    api_date = str(data.get("date", ""))
+    if api_date and api_date != date_str:
+        print(f"  [batch] ⚠️ 回傳日期 {api_date} ≠ 目標 {date_str}，batch 不適用")
         return {}
 
     rows = data.get("data", [])
@@ -352,11 +359,12 @@ def fetch_price_map_otc(date_str):
 # 批次抓均價、收盤、成交量（寫入 stock dict）
 # ═══════════════════════════════════════════════
 
-def enrich_with_prices(groups, date_str):
+def enrich_with_prices(groups, date_str, prefetched_map=None):
     """
     ★ v10.8 兩段式：
     1. STOCK_DAY_ALL batch 查表（0.3 秒抓全市場）
     2. batch 查不到的代號才逐支打 STOCK_DAY（保留量比計算）
+    prefetched_map: 外部已抓好的 batch map，避免重複打 API
     """
     all_codes = {}
     for group in groups:
@@ -365,8 +373,8 @@ def enrich_with_prices(groups, date_str):
 
     total = len(all_codes)
 
-    # 第一段：TWSE batch
-    batch_map = fetch_price_map_batch(date_str)
+    # 第一段：TWSE batch（若外部已抓則直接用）
+    batch_map = prefetched_map if prefetched_map is not None else fetch_price_map_batch(date_str)
     hit, miss_codes = 0, []
     for code in all_codes:
         if code in batch_map:
@@ -908,17 +916,35 @@ def _calc_analysis_rows(ss, date_str, current_prices, current_margin):
 
     all_hist_codes = set(row[2] for row in rows if len(row) > 2 and row[2])
 
-    # ── 現價保底：快取缺少才補抓 ──
+    # ── 現價保底：batch 優先，只逐支補真正缺的 ──
     missing_price = [c for c in all_hist_codes if c not in current_prices]
     if missing_price:
         print(f"  📡 保底補抓現價（{len(missing_price)} 支，快取未涵蓋）...")
-        for i, code in enumerate(missing_price):
-            avg, close, vol, pct_str, vr = fetch_stock_day_full(code, date_str)
-            if close > 0:
-                current_prices[code] = (avg, close, vol, pct_str, vr)
-                print(f"    [{i+1}/{len(missing_price)}] {code}: 收盤={close:.2f}")
-            if i < len(missing_price) - 1:
-                time.sleep(0.5)
+        # 第一段：TWSE batch
+        batch_map = fetch_price_map_batch(date_str)
+        still_missing = []
+        for code in missing_price:
+            if code in batch_map:
+                current_prices[code] = batch_map[code]
+            else:
+                still_missing.append(code)
+        if batch_map:
+            print(f"  [batch] 保底命中 {len(missing_price)-len(still_missing)}/{len(missing_price)} 支")
+        # 第二段：OTC batch
+        if still_missing:
+            otc_map = fetch_price_map_otc(date_str)
+            remain = []
+            for code in still_missing:
+                if code in otc_map:
+                    current_prices[code] = otc_map[code]
+                else:
+                    remain.append(code)
+            if otc_map:
+                print(f"  [otc] 保底命中 {len(still_missing)-len(remain)}/{len(still_missing)} 支")
+            still_missing = remain
+        # 第三段：batch/OTC 均未命中（興櫃/停牌等），跳過，不影響推薦評分
+        if still_missing:
+            print(f"  [skip] {len(still_missing)} 支 batch/OTC 均未命中，跳過（量比 None）")
         print(f"  ✅ 現價保底完成")
 
     # ── 融資券保底：快取缺少才補抓 ──
@@ -1558,38 +1584,33 @@ def update_sector_sheet(ss, date_str, all_buy_codes, all_buy_names, current_pric
 
     if missing and not sheet_only:
         print(f"  補抓族群成員行情（{len(missing)} 支不在快取中）...")
-        # ★ v10.8 先查 OTC batch，再逐支補抓
-        otc_map = fetch_price_map_otc(date_str)
+        # ★ v11.0 三段式：TWSE batch → OTC batch → 逐支補抓
+        batch_map = fetch_price_map_batch(date_str)
         still_missing = []
         for code in missing:
-            if code in otc_map:
-                avg, close, vol, chg, vr = otc_map[code]
-                if close > 0:
-                    current_prices[code] = (avg, close, vol, chg, vr)
+            if code in batch_map:
+                current_prices[code] = batch_map[code]
             else:
                 still_missing.append(code)
-        if otc_map:
-            otc_hits = len(missing) - len(still_missing)
-            print(f"  [otc] 族群補抓命中 {otc_hits}/{len(missing)} 支")
-        for i, code in enumerate(still_missing):
-            avg, close, vol, chg, vr = fetch_stock_day_full(code, date_str)
-            if close > 0:
-                current_prices[code] = (avg, close, vol, chg, vr)
-                print(f"  [{i+1}/{len(still_missing)}] {code}: 收盤={close:.2f} {chg}")
-            else:
-                print(f"  [{i+1}/{len(still_missing)}] {code}: 收盤=0，跳過（資料未就緒）")
-            if i < len(still_missing) - 1:
-                time.sleep(0.4)
-        # ★ 補抓完後更新雲端快取
-        if cache_ref:
-            try:
-                save_cache(ss, date_str,
-                           cache_ref["foreign"], cache_ref["trust"], cache_ref["dealer"],
-                           cache_ref["f_sell"],  cache_ref["t_sell"], cache_ref["d_sell"],
-                           current_prices=current_prices)
-                print(f"  💾 快取已更新（補入 {len(missing)} 支族群成員行情）")
-            except Exception as e:
-                print(f"  ⚠️ 快取更新失敗（不影響本次寫入）：{e}")
+        if batch_map:
+            print(f"  [batch] 族群補抓命中 {len(missing)-len(still_missing)}/{len(missing)} 支")
+        if still_missing:
+            otc_map = fetch_price_map_otc(date_str)
+            remain = []
+            for code in still_missing:
+                if code in otc_map:
+                    avg, close, vol, chg, vr = otc_map[code]
+                    if close > 0:
+                        current_prices[code] = (avg, close, vol, chg, vr)
+                else:
+                    remain.append(code)
+            if otc_map:
+                otc_hits = len(still_missing) - len(remain)
+                print(f"  [otc] 族群補抓命中 {otc_hits}/{len(still_missing)} 支")
+            still_missing = remain
+        if still_missing:
+            print(f"  [skip] {len(still_missing)} 支 batch/OTC 均未命中，跳過")
+        # 族群成員行情不存快取（避免超過 50000 字元限制）
     elif missing and sheet_only:
         print(f"  ℹ️ {len(missing)} 支族群成員不在快取中，行情留空（sheet-only 模式）")
 
@@ -1752,13 +1773,29 @@ def prefetch_history_codes(ss, date_str, current_prices, current_margin):
     missing = [c for c in all_hist_codes if c not in current_prices]
     if missing:
         print(f"  📡 補抓歷史股票現價（{len(missing)} 支）...")
-        for i, code in enumerate(missing):
-            avg, close, vol, pct_str, vr = fetch_stock_day_full(code, date_str)
-            current_prices[code] = (avg, close, vol, pct_str, vr)
-            if close > 0:
-                print(f"    [{i+1}/{len(missing)}] {code}: 收盤={close:.2f} 成交={vol:,}張")
-            if i < len(missing) - 1:
-                time.sleep(0.5)
+        # 三段式：TWSE batch → OTC batch → 逐支
+        batch_map = fetch_price_map_batch(date_str)
+        still_missing = []
+        for code in missing:
+            if code in batch_map:
+                current_prices[code] = batch_map[code]
+            else:
+                still_missing.append(code)
+        if batch_map:
+            print(f"  [batch] 命中 {len(missing)-len(still_missing)}/{len(missing)} 支")
+        if still_missing:
+            otc_map = fetch_price_map_otc(date_str)
+            remain = []
+            for code in still_missing:
+                if code in otc_map:
+                    current_prices[code] = otc_map[code]
+                else:
+                    remain.append(code)
+            if otc_map:
+                print(f"  [otc] 命中 {len(still_missing)-len(remain)}/{len(still_missing)} 支")
+            still_missing = remain
+        if still_missing:
+            print(f"  [skip] {len(still_missing)} 支 batch/OTC 均未命中，跳過")
         print(f"  ✅ 現價補抓完成")
 
     # 補抓融資融券
@@ -1902,41 +1939,83 @@ def main():
             print(f"\n❌ 抓取失敗：{e}")
             input("按 Enter 關閉..."); sys.exit(1)
 
-        # Step 2: 抓個股價格
-        print(f"\n💹 Step 2/5 抓取個股價格與成交量...")
         all_groups = [foreign, trust, dealer, f_sell, t_sell, d_sell]
-        try:
-            enrich_with_prices(all_groups, date_str)
-        except Exception as e:
-            print(f"  ⚠️ 價格抓取部分失敗：{e}")
-
-        # Step 3: 抓融資融券
-        print(f"\n📋 Step 3/5 抓取融資融券資料...")
         buy_groups = [foreign, trust, dealer]
-        try:
-            enrich_with_margin(buy_groups, date_str)
-        except Exception as e:
-            print(f"  ⚠️ 融資融券抓取部分失敗：{e}")
 
-        # 建立快取
-        current_prices = {}
-        current_margin = {}
-        for group in all_groups:
-            for stock in group:
-                current_prices[stock["code"]] = (
-                    stock.get("avg_price",     0.0),
-                    stock.get("close",         0.0),
-                    stock.get("volume",        0),
-                    stock.get("change_pct",    "N/A"),
-                    stock.get("volume_ratio",  None),
-                )
-        for group in buy_groups:
-            for stock in group:
-                current_margin[stock["code"]] = (
-                    stock.get("margin_balance", 0),
-                    stock.get("margin_change",  0),
-                    stock.get("short_balance",  0),
-                )
+        # Step 1.5: 快取命中則跳過 Step 2/3，直接用快取的 prices/margin
+        _cache_result = load_cache(ss, date_str)
+        if _cache_result and _cache_result[0] == date_str:
+            _, _cf, _ct, _cd, _cfs, _cts, _cds, current_prices, current_margin = _cache_result
+            sell_price_map = current_prices
+            # 將快取 stock 欄位回填給 group 物件（供 Sheets 寫入用）
+            for live_group, cached_group in zip(all_groups, [_cf,_ct,_cd,_cfs,_cts,_cds]):
+                cached_by_code = {s["code"]: s for s in cached_group}
+                for stock in live_group:
+                    cached = cached_by_code.get(stock["code"], {})
+                    for key in ("avg_price","close","volume","change_pct","volume_ratio",
+                                "margin_balance","margin_change","short_balance"):
+                        if key in cached:
+                            stock[key] = cached[key]
+            print("  ✅ 快取命中，跳過 Step 2/3 API 抓取")
+        else:
+            # Step 2: 抓個股價格
+            print(f"\n💹 Step 2/5 抓取個股價格與成交量...")
+            try:
+                # 先抓全市場 batch，賣超和買超共用，不重打 API
+                sell_price_map = {}
+                sell_price_map.update(fetch_price_map_batch(date_str))
+                sell_price_map.update(fetch_price_map_otc(date_str))
+                # 買超：完整三段式（含量比），直接傳入已抓好的 batch，不重打
+                enrich_with_prices([foreign, trust, dealer], date_str, prefetched_map=sell_price_map)
+                # 賣超：只需收盤價，從 batch 直接填，量比 None
+                for group in [f_sell, t_sell, d_sell]:
+                    for stock in group:
+                        code = stock["code"]
+                        if code in sell_price_map:
+                            avg, close, vol, chg, _ = sell_price_map[code]
+                            stock["avg_price"] = avg
+                            stock["close"] = close
+                            stock["volume"] = vol
+                            stock["change_pct"] = chg
+                            stock["volume_ratio"] = None
+            except Exception as e:
+                print(f"  ⚠️ 價格抓取部分失敗：{e}")
+
+            # Step 3: 抓融資融券
+            print(f"\n📋 Step 3/5 抓取融資融券資料...")
+            try:
+                enrich_with_margin(buy_groups, date_str)
+            except Exception as e:
+                print(f"  ⚠️ 融資融券抓取部分失敗：{e}")
+
+            # 建立快取
+            current_prices = {}
+            current_margin = {}
+            for group in all_groups:
+                for stock in group:
+                    current_prices[stock["code"]] = (
+                        stock.get("avg_price",     0.0),
+                        stock.get("close",         0.0),
+                        stock.get("volume",        0),
+                        stock.get("change_pct",    "N/A"),
+                        stock.get("volume_ratio",  None),
+                    )
+            for group in buy_groups:
+                for stock in group:
+                    current_margin[stock["code"]] = (
+                        stock.get("margin_balance", 0),
+                        stock.get("margin_change",  0),
+                        stock.get("short_balance",  0),
+                    )
+
+            # 存快取（只存買超/賣超榜，不含全市場 batch，避免超過 50000 字元限制）
+            save_cache(ss, date_str, foreign, trust, dealer, f_sell, t_sell, d_sell,
+                       current_prices, current_margin)
+
+            # sell_price_map 補入 current_prices（族群聯動等榜外股票用，存快取後再補）
+            for code, val in sell_price_map.items():
+                if code not in current_prices:
+                    current_prices[code] = val
 
         all_buy_codes = set()
         all_buy_names = {}
@@ -1945,9 +2024,16 @@ def main():
                 all_buy_codes.add(stock["code"])
                 all_buy_names[stock["code"]] = stock["name"]
 
-        # 存完整快取到 Sheets
-        save_cache(ss, date_str, foreign, trust, dealer, f_sell, t_sell, d_sell,
-                   current_prices, current_margin)
+        # sell_price_map 補入 current_prices（族群聯動等榜外股票用）
+        # 快取命中時 sell_price_map = current_prices（僅 300 支），需重新抓全市場
+        if sell_price_map is current_prices:
+            _full_map = {}
+            _full_map.update(fetch_price_map_batch(date_str))
+            _full_map.update(fetch_price_map_otc(date_str))
+            sell_price_map = _full_map
+        for code, val in sell_price_map.items():
+            if code not in current_prices:
+                current_prices[code] = val
 
     # ★ 供 update_sector_sheet 補抓後重存快取用
     _CACHE_REF = {

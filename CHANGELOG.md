@@ -5,6 +5,50 @@ Google Sheets ID：`1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g`
 
 ---
 
+## v11.0 — 2026/05/29
+
+### 優化
+
+- **保底補抓全面改為 batch 優先（三段式：TWSE→OTC→skip）**
+  * 舊問題：對照分析、prefetch_history_codes、族群聯動補抓均為逐支打 API（72 支 ≈ 36 秒）
+  * 新邏輯：先 TWSE STOCK_DAY_ALL batch → OTC batch → 均未命中才 skip（不再逐支）
+  * 保底補抓的股票不進推薦池，量比填 None 不影響評分
+
+- **賣超組移出 enrich_with_prices，改用 batch 直接填（量比 None）**
+  * 舊問題：買超+賣超共 219 支都走逐支補抓
+  * 新邏輯：先抓一次 sell_price_map（TWSE+OTC batch），買超傳入 prefetched_map 不重打；賣超直接從 sell_price_map 填值
+  * 結果：逐支補抓從 219 支降至買超榜真正未命中數（今日測試：0 支）
+
+- **STOCK_DAY_ALL 移除 date 參數，加日期驗證**
+  * 舊問題：帶日期時 API 回傳空資料（0 支），導致全部落到逐支補抓
+  * 新邏輯：不帶日期抓最新一日，回傳日期 ≠ 目標日期時印 ⚠️ 並回傳 {}
+
+- **新增 Step 1.5：快取命中跳過 Step 2/3**
+  * 補跑昨天時，`find_trading_day` 確認 date_str 後立即 `load_cache`
+  * 快取日期吻合 → 直接用快取的 prices/margin，完全跳過 API 抓取
+  * 快取未命中 → 正常跑 Step 2/3 → save_cache
+
+- **sell_price_map 補入 current_prices 供族群聯動使用**
+  * 全市場 batch（TWSE+OTC）補入後，族群成員無需再補抓
+  * save_cache 在補入前執行，避免全市場資料超過 50000 字元限制
+
+### 修正
+
+- **族群聯動移除 save_cache 呼叫**
+  * 舊問題：補抓族群成員後重存快取，current_prices 含全市場資料 → APIError 50000 字元
+  * 修正：族群成員行情不存快取
+
+- **enrich_with_prices 新增 prefetched_map 參數**
+  * 外部已抓好的 batch map 可直接傳入，避免重複打 API
+
+### 待驗證（禮拜一）
+
+- 快取格式更新後，補跑昨天是否完全跳過 Step 2/3
+- 族群聯動補抓是否為 0 支
+- 對照分析保底是否印出 `[batch] 保底命中`
+
+---
+
 ## v10.9 — 2026/05/28
 
 ### 新增
