@@ -5,6 +5,43 @@ Google Sheets ID：`1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g`
 
 ---
 
+## v11.1 — 2026/06/01
+
+### 新增
+
+- **訊號欄細化：各法人今日狀態標記**
+  * 訊號後附加 `外🟢投🔴自⚪` 格式，一眼看出哪個法人今天有買/賣/未出現
+  * 🟢 今日只有買超 / 🔴 今日只有賣超 / 🟡 既買又賣 / ⚪ 未出現
+
+- **訊號欄細化：大量買超相對值判斷**
+  * 新增 `🔥 大量買超` 訊號：今日三法人合計買超 ≥ 近 N 日均量 × 倍數
+  * 門檻從 `config.py` 讀取，預設 `LARGE_BUY_DAYS=3`、`LARGE_BUY_RATIO=1.5`
+
+- **`config.py` 新增兩個門檻參數**
+  * `LARGE_BUY_DAYS`：大量買超參考天數（預設 3）
+  * `LARGE_BUY_RATIO`：今日買超 ÷ 均量門檻倍數（預設 1.5）
+
+### 修改
+
+- **`calc_signal` 完整重寫**
+  * 新增 `f_entries`、`t_entries`、`d_entries`、`all_dates`、`net_by_date` 參數
+  * 第一層判斷優先順序：🔴 今日賣超 → ⚠️ 已停止買入 → 🔥 大量買超 → ✅ 持續買入
+  * `sell_hist` 改為支援 `dict`（`{f:[], t:[], d:[]}`）與舊版 list 兩種格式（向下相容）
+
+- **`build_row` 呼叫 `calc_signal` 補傳參數**
+  * 補傳各法人 entries 與歷史日期資料，供第二層法人標記使用
+
+- **config import block**
+  * 用 `getattr` 讀取 `LARGE_BUY_DAYS`、`LARGE_BUY_RATIO`，確保舊版 config.py 不炸
+  * `except ImportError` 分支補預設值
+
+### 待驗證
+
+- [ ] 跑一次完整執行，確認對照分析「訊號」欄格式正確
+- [ ] 確認「🔥 大量買超」有正常觸發
+
+---
+
 ## v11.0 — 2026/05/29
 
 ### 優化

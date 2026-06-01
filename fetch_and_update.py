@@ -29,12 +29,16 @@ try:
     TRUST_STAR  = _cfg.TRUST_STAR
     TRUST_FIRE  = _cfg.TRUST_FIRE
     MARGIN_WARN = _cfg.MARGIN_WARN
+    LARGE_BUY_DAYS  = getattr(_cfg, "LARGE_BUY_DAYS",  3)
+    LARGE_BUY_RATIO = getattr(_cfg, "LARGE_BUY_RATIO", 1.5)
     SECTOR_MAP  = _cfg.SECTOR_MAP
     CODE_NAME_MAP = _cfg.CODE_NAME_MAP
     print("✅ 已載入 config.py")
 except ImportError:
     print("⚠️ 找不到 config.py，使用主程式內建預設值")
-    CODE_NAME_MAP = {}
+    CODE_NAME_MAP   = {}
+    LARGE_BUY_DAYS  = 3
+    LARGE_BUY_RATIO = 1.5
 
 # ═══════════════════════════════════════════════
 # ★ 固定系統設定
@@ -561,15 +565,78 @@ def calc_trend(entries, n=3):
     else:
         return "➡️ 持平"
 
-def calc_signal(code, buy_entries, sell_hist, disp):
-    signals = []
-    recent_sell_dates = [e[0] for e in sell_hist.get(code, [])]
-    if disp in recent_sell_dates:
-        signals.append("🔴 今日賣超")
+def calc_signal(code, buy_entries, sell_hist, disp,
+                f_entries=None, t_entries=None, d_entries=None,
+                all_dates=None, net_by_date=None):
+    """
+    訊號判斷（v11.1）：
+    第一層：今日買賣狀態
+      🔴 今日賣超   — 三法人合計今日為賣超
+      🔥 大量買超   — 今日買超 ≥ 近3日平均 × 1.5（且近3日有資料）
+      ✅ 持續買入   — 今日有買超，量正常
+      ⚠️ 已停止買入 — 歷史有買超但今日未出現
+
+    第二層：各法人今日狀態（附加在後）
+      外資/投信/自營商各自顯示：
+        🟢 今日買超  🔴 今日賣超  ⚪ 未出現
+    """
+    sells   = sell_hist.get(code, {})
+    f_sells = sells.get("f", []) if isinstance(sells, dict) else sells
+    t_sells = sells.get("t", []) if isinstance(sells, dict) else []
+    d_sells = sells.get("d", []) if isinstance(sells, dict) else []
+
+    f_entries = f_entries or []
+    t_entries = t_entries or []
+    d_entries = d_entries or []
+
+    # ── 第一層：今日整體狀態 ──
+    today_f_buy  = sum(e[1] for e in f_entries if e[0] == disp)
+    today_t_buy  = sum(e[1] for e in t_entries if e[0] == disp)
+    today_d_buy  = sum(e[1] for e in d_entries if e[0] == disp)
+    today_f_sell = sum(e[1] for e in f_sells   if e[0] == disp)
+    today_t_sell = sum(e[1] for e in t_sells   if e[0] == disp)
+    today_d_sell = sum(e[1] for e in d_sells   if e[0] == disp)
+    today_net    = today_f_buy + today_t_buy + today_d_buy \
+                 - today_f_sell - today_t_sell - today_d_sell
+
     buy_dates = sorted(set(e[0] for e in buy_entries), reverse=True)
-    if buy_dates and buy_dates[0] != disp:
-        signals.append("⚠️ 已停止買入")
-    return " ".join(signals) if signals else "✅ 持續買入"
+    active_today = buy_dates and buy_dates[0] == disp
+
+    if today_net < 0:
+        main_signal = "🔴 今日賣超"
+    elif not active_today:
+        main_signal = "⚠️ 已停止買入"
+    else:
+        # 大量判斷：今日買超 ≥ 近3日均量 × 1.5
+        if all_dates and net_by_date and today_net > 0:
+            daily_net = net_by_date.get(code, {})
+            # 找今天以前的最近3個交易日（只計買超 > 0 的天）
+            past_dates = [d for d in reversed(all_dates) if d < disp][:LARGE_BUY_DAYS]
+            past_nets  = [max(daily_net.get(d, 0), 0) for d in past_dates]
+            if past_nets and sum(past_nets) > 0:
+                avg_n = sum(past_nets) / len(past_nets)
+                main_signal = "🔥 大量買超" if today_net >= avg_n * LARGE_BUY_RATIO else "✅ 持續買入"
+            else:
+                main_signal = "✅ 持續買入"
+        else:
+            main_signal = "✅ 持續買入"
+
+    # ── 第二層：各法人今日標記 ──
+    def inst_label(buy_today, sell_today):
+        if buy_today > 0 and sell_today == 0:
+            return "🟢"
+        if sell_today > 0 and buy_today == 0:
+            return "🔴"
+        if buy_today > 0 and sell_today > 0:
+            return "🟡"   # 同日既買又賣（少見）
+        return "⚪"
+
+    f_lbl = inst_label(today_f_buy, today_f_sell)
+    t_lbl = inst_label(today_t_buy, today_t_sell)
+    d_lbl = inst_label(today_d_buy, today_d_sell)
+
+    inst_part = f"外{f_lbl}投{t_lbl}自{d_lbl}"
+    return f"{main_signal} {inst_part}"
 
 def is_etf_code(code):
     """
@@ -868,7 +935,9 @@ def build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net
     all_entries = s["f"] + s["t"] + s["d"]
     all_remaining, all_wavg = calc_position_fifo(all_entries, all_sells)
     pct_str, risk = calc_risk(close, all_wavg)
-    signal        = calc_signal(code, all_entries, sell_hist, disp)
+    signal        = calc_signal(code, all_entries, sell_hist, disp,
+                               f_entries=s["f"], t_entries=s["t"], d_entries=s["d"],
+                               all_dates=all_dates, net_by_date=net_by_date)
     trust_label   = calc_trust_label(t_consec)
 
     today_net           = sum(e[1] for e in all_entries if e[0] == disp)
