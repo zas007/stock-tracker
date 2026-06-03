@@ -1116,20 +1116,21 @@ PERFORMANCE_HEADERS = [
 
 def _score_matrix(consec, chip_lbl):
     """
-    連續天數 × 籌碼集中度 矩陣評分（35分）
+    連續天數 × 籌碼集中度 矩陣評分（40分）
+    天數越長代表法人持續買進，分數越高。
     """
     if chip_lbl == "🔵 高度集中":
-        if consec <= 3:   return 35   # 剛啟動 + 強力買進 → 最佳
-        elif consec <= 7: return 28   # 持續強勢
-        else:             return 20   # 長期高集中，注意漲幅
+        if consec <= 3:   return 28   # 剛啟動
+        elif consec <= 7: return 34   # 持續強勢
+        else:             return 40   # 長期持續，最佳
     elif chip_lbl == "🟦 中度集中":
-        if consec <= 3:   return 20
-        elif consec <= 7: return 18
-        else:             return 12
+        if consec <= 3:   return 16
+        elif consec <= 7: return 22
+        else:             return 28
     else:  # 偏低
-        if consec <= 3:   return 5
+        if consec <= 3:   return 4
         elif consec <= 7: return 8
-        else:             return 3
+        else:             return 12
 
 
 def _score_margin(health):
@@ -1139,8 +1140,8 @@ def _score_margin(health):
 
 
 def _score_risk(risk):
-    """出貨風險評分（25分）"""
-    return {"🟢 低": 25, "🟡 中": 12, "🔴 高": 0}.get(risk, 0)
+    """出貨風險評分（20分）：🔴高風險已在 score_stock 過濾"""
+    return {"🟢 低": 20, "🟡 中": 10, "🔴 高": 0}.get(risk, 0)
 
 
 def _score_volume_ratio(vr):
@@ -1150,10 +1151,11 @@ def _score_volume_ratio(vr):
         vr = float(vr)
     except (ValueError, TypeError):
         return 0
-    if vr >= 2.0:   return 15   # 爆量，法人積極進場
-    if vr >= 1.5:   return 12   # 明顯放量
-    if vr >= 1.0:   return 8    # 正常量
-    return 3                    # 縮量
+    if vr >= 3.0:   return 15   # 大爆量
+    if vr >= 2.0:   return 12   # 明顯放量
+    if vr >= 1.5:   return 8    # 溫和放量
+    if vr >= 1.0:   return 4    # 正常量
+    return 0                    # 縮量不加分
 
 
 def _dealer_label(d_consec):
@@ -1172,6 +1174,11 @@ def score_stock(row):
       [19]=現價, [20]=漲幅%, [21]=出貨風險, [22]=訊號
       [23]=籌碼集中度%, [24]=籌碼集中度評級
       [28]=融資健康度, [29]=量比
+
+    v11.2 過濾邏輯：
+      移除「漲幅 ≤2%」門檻（避免錯殺法人剛開始佈局的股票）
+      改為「漲幅 >8%」上限（避免追高）
+      新增「出貨風險🔴」過濾
     """
     code         = row[0]
     signal       = row[23]
@@ -1184,15 +1191,19 @@ def score_stock(row):
     except (ValueError, TypeError):
         volume_ratio = None
 
-    # 過濾條件：ETF、今日賣超、連續天數=0、無集中度資料、當日漲幅 ≤ 2%
-    if is_etf_code(code):                    return None
-    if "🔴 今日賣超" in str(signal):          return None
-    if not chip_lbl:                          return None
+    # ── 過濾條件 ──────────────────────────────────────
+    if is_etf_code(code):               return None   # ETF 不推
+    if "🔴 今日賣超" in str(signal):     return None   # 今日賣超
+    if not chip_lbl:                     return None   # 無集中度資料
+    if risk == "🔴 高":                  return None   # 出貨風險高，不推
+
+    # 漲幅上限：當日已漲超過 8% 視為追高，不推
     chg_str = str(row[20]).replace("%", "").replace("+", "").strip()
     try:
-        if float(chg_str) <= 2.0:            return None
+        chg = float(chg_str)
+        if chg > 8.0:                    return None
     except (ValueError, TypeError):
-        return None   # N/A 或無法解析一律過濾
+        pass   # 無法解析漲幅（N/A等）→ 不過濾，讓評分決定
 
     # 取三法人最大連續天數作為代表
     consec = max(
@@ -1203,9 +1214,9 @@ def score_stock(row):
     if consec == 0: return None
 
     score = (
-        _score_matrix(consec, chip_lbl) +      # 35分
+        _score_matrix(consec, chip_lbl) +      # 40分
         _score_margin(health) +                # 25分
-        _score_risk(risk) +                    # 25分
+        _score_risk(risk) +                    # 20分
         _score_volume_ratio(volume_ratio)      # 15分
     )
     return min(score, 100)
