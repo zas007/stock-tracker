@@ -1,5 +1,5 @@
 """
-台灣股市三大法人買超/賣超追蹤 v11.0
+台灣股市三大法人買超/賣超追蹤（版本見 VERSION 常數）
 優化重點：
 1. 修正版本標題（v8 → v10）
 2. 合併 fetch_stock_quote / fetch_stock_day → fetch_stock_day_full
@@ -15,6 +15,8 @@
 import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
+
+VERSION = "v11.3"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -704,6 +706,47 @@ def get_or_create(ss, name, cols=15):
     try: return ss.worksheet(name)
     except: return ss.add_worksheet(title=name, rows=300, cols=cols)
 
+def purge_old_rows(ws, cutoff_date_str, date_col=0, header_rows=1):
+    """
+    清除工作表中日期超過保留期限的列。
+    - cutoff_date_str: 截止日期字串，格式 YYYY/MM/DD，早於此日期的列會被刪除
+    - date_col: 日期欄位的索引（預設0，即A欄）
+    - header_rows: 要保留的標題列數（預設1）
+    只處理格式為 YYYY/MM/DD 的日期欄位，分隔線列（空列或標記列）一律保留。
+    回傳刪除筆數。
+    """
+    from datetime import datetime
+    try:
+        cutoff = datetime.strptime(cutoff_date_str, "%Y/%m/%d")
+    except ValueError:
+        return 0
+
+    all_rows = ws.get_all_values()
+    if not all_rows:
+        return 0
+
+    kept = all_rows[:header_rows]
+    removed = 0
+    for row in all_rows[header_rows:]:
+        date_val = row[date_col].strip() if len(row) > date_col else ""
+        # 嘗試解析日期，無法解析（分隔線/標記列）一律保留
+        try:
+            row_date = datetime.strptime(date_val, "%Y/%m/%d")
+            if row_date < cutoff:
+                removed += 1
+                continue
+        except ValueError:
+            pass  # 非日期列，保留
+        kept.append(row)
+
+    if removed > 0:
+        ws.clear()
+        if ws.row_count < len(kept) + 10:
+            ws.add_rows(len(kept) + 10 - ws.row_count)
+        ws.update(range_name="A1", values=kept)
+        print(f"  🗑️  {ws.title}：清除 {removed} 筆超過1個月的舊資料")
+    return removed
+
 def prepend_block(ws, new_block, disp, date_marker_prefix, sep_cols):
     """
     ★ v10.8 batch 寫入：
@@ -789,6 +832,11 @@ def append_history(ss, date_str, foreign, trust, dealer, f_sell, t_sell, d_sell)
     disp = fmt_date(date_str)
     headers = ["日期","名次","代號","股票名稱","法人類別","張數",
                "當日均價(元)","買/賣","成交量(張)","籌碼集中度"]
+
+    # 清除超過1個月的舊資料
+    from datetime import datetime, timedelta
+    _cutoff = (datetime.strptime(date_str, "%Y%m%d") - timedelta(days=31)).strftime("%Y/%m/%d")
+    purge_old_rows(ws, _cutoff)
 
     existing = ws.get_all_values()
     if not existing:
@@ -972,10 +1020,11 @@ ANALYSIS_HEADERS = [
 ]
 
 
-def _calc_analysis_rows(ss, date_str, current_prices, current_margin):
+def _calc_analysis_rows(ss, date_str, current_prices, current_margin, cache_prices=None):
     """
     從歷史紀錄計算 all_rows（純計算，不寫 Sheets）。
     選4（對照分析）和選6（明日關注）共用此函式。
+    cache_prices: 快取載入的原始 current_prices，batch 不適用時作為保底來源。
     """
     hist = get_or_create(ss, "歷史紀錄")
     disp = fmt_date(date_str)
@@ -985,7 +1034,7 @@ def _calc_analysis_rows(ss, date_str, current_prices, current_margin):
 
     all_hist_codes = set(row[2] for row in rows if len(row) > 2 and row[2])
 
-    # ── 現價保底：batch 優先，只逐支補真正缺的 ──
+    # ── 現價保底：batch 優先，batch 日期不吻合時從快取補，真正缺的才跳過 ──
     missing_price = [c for c in all_hist_codes if c not in current_prices]
     if missing_price:
         print(f"  📡 保底補抓現價（{len(missing_price)} 支，快取未涵蓋）...")
@@ -1011,9 +1060,23 @@ def _calc_analysis_rows(ss, date_str, current_prices, current_margin):
             if otc_map:
                 print(f"  [otc] 保底命中 {len(still_missing)-len(remain)}/{len(still_missing)} 支")
             still_missing = remain
-        # 第三段：batch/OTC 均未命中（興櫃/停牌等），跳過，不影響推薦評分
+        # 第三段：batch/OTC 日期不吻合（補跑歷史日期），從快取 current_prices 補
+        # ★ v11.3 修正：batch 不適用時改查快取，而非直接跳過
+        if still_missing and cache_prices:  # cache_prices 由呼叫端傳入
+            from_cache = []
+            truly_missing = []
+            for code in still_missing:
+                if code in cache_prices:
+                    current_prices[code] = cache_prices[code]
+                    from_cache.append(code)
+                else:
+                    truly_missing.append(code)
+            if from_cache:
+                print(f"  [cache] 快取補底命中 {len(from_cache)}/{len(still_missing)} 支")
+            still_missing = truly_missing
+        # 第四段：興櫃/停牌等真正無資料，跳過
         if still_missing:
-            print(f"  [skip] {len(still_missing)} 支 batch/OTC 均未命中，跳過（量比 None）")
+            print(f"  [skip] {len(still_missing)} 支 batch/OTC/快取均未命中，跳過（量比 None）")
         print(f"  ✅ 現價保底完成")
 
     # ── 融資券保底：快取缺少才補抓 ──
@@ -1067,7 +1130,7 @@ def update_analysis(ss, date_str, current_prices, current_margin):
     計算部分委由 _calc_analysis_rows()，本函式只負責寫入 Sheets。
     """
     disp     = fmt_date(date_str)
-    all_rows = _calc_analysis_rows(ss, date_str, current_prices, current_margin)
+    all_rows = _calc_analysis_rows(ss, date_str, current_prices, current_margin, cache_prices=current_prices)
     if not all_rows:
         print("  ⚠️ 歷史紀錄無資料，跳過對照分析")
         return []
@@ -1088,6 +1151,9 @@ def update_analysis(ss, date_str, current_prices, current_margin):
 
     # ── 每日快照（prepend 累積）──
     ws_snap    = get_or_create(ss, "每日快照", n_cols)
+    from datetime import datetime, timedelta
+    _cutoff = (datetime.strptime(date_str, "%Y%m%d") - timedelta(days=31)).strftime("%Y/%m/%d")
+    purge_old_rows(ws_snap, _cutoff)
     snap_block = [
         [f"統計截至：{disp}"] + [""] * (n_cols - 1),
         ANALYSIS_HEADERS
@@ -1192,7 +1258,9 @@ def score_stock(row):
         volume_ratio = None
 
     # ── 過濾條件 ──────────────────────────────────────
+    _finance_codes = set(SECTOR_MAP.get("金融", []))
     if is_etf_code(code):               return None   # ETF 不推
+    if code in _finance_codes:          return None   # 金融股不推（波動小、法人長期持有）
     if "🔴 今日賣超" in str(signal):     return None   # 今日賣超
     if not chip_lbl:                     return None   # 無集中度資料
     if risk == "🔴 高":                  return None   # 出貨風險高，不推
@@ -1261,6 +1329,9 @@ def update_recommendation(ss, date_str, all_rows):
 
     n_cols = len(RECOMMEND_HEADERS)
     ws = get_or_create(ss, "明日關注", n_cols)
+    from datetime import datetime, timedelta
+    _cutoff = (datetime.strptime(date_str, "%Y%m%d") - timedelta(days=31)).strftime("%Y/%m/%d")
+    purge_old_rows(ws, _cutoff)
 
     rec_rows = []
     for rank, (score, r) in enumerate(top5, 1):
@@ -1367,6 +1438,9 @@ def update_performance(ss, date_str, current_prices):
 
     # ── 讀取「推薦成效」現有資料 ──
     ws_perf = get_or_create(ss, "推薦成效", N_COLS)
+    from datetime import datetime, timedelta
+    _cutoff = (datetime.strptime(date_str, "%Y%m%d") - timedelta(days=31)).strftime("%Y/%m/%d")
+    purge_old_rows(ws_perf, _cutoff)
     try:
         existing = ws_perf.get_all_values()
     except Exception:
@@ -1631,6 +1705,9 @@ def update_sector_sheet(ss, date_str, all_buy_codes, all_buy_names, current_pric
     """
     disp      = fmt_date(date_str)
     ws        = get_or_create(ss, "族群聯動", 8)
+    from datetime import datetime, timedelta
+    _cutoff = (datetime.strptime(date_str, "%Y%m%d") - timedelta(days=31)).strftime("%Y/%m/%d")
+    purge_old_rows(ws, _cutoff)
     # 找出買超榜中不在 SECTOR_MAP 的新股票（sheet-only 時跳過 API 查詢）
     unknown_codes = {c for c in all_buy_codes if c not in CODE_TO_SECTOR}
     if unknown_codes and not sheet_only:
@@ -1942,7 +2019,7 @@ def main():
     args = parser.parse_args()
 
     print("=" * 50)
-    print("  台灣股市三大法人買超/賣超追蹤 v10.8")
+    print(f"  台灣股市三大法人買超/賣超追蹤 {VERSION}")
     print("  config.py 獨立設定 ｜ 族群聯動累積 ｜ 分模式執行")
     print("=" * 50)
     print(f"  族群反查表：{len(CODE_TO_SECTOR)} 支股票已對應族群")
@@ -2088,14 +2165,16 @@ def main():
                         stock.get("short_balance",  0),
                     )
 
-            # 存快取（只存買超/賣超榜，不含全市場 batch，避免超過 50000 字元限制）
-            save_cache(ss, date_str, foreign, trust, dealer, f_sell, t_sell, d_sell,
-                       current_prices, current_margin)
-
-            # sell_price_map 補入 current_prices（族群聯動等榜外股票用，存快取後再補）
+            # sell_price_map 補入 current_prices（族群聯動等榜外股票用）
+            # ★ v11.3 修正：先補入 sell_price_map，再存快取
+            #   舊邏輯先存快取再補，導致族群聯動保底股票不在快取中，sheet-only 時行情留空
             for code, val in sell_price_map.items():
                 if code not in current_prices:
                     current_prices[code] = val
+
+            # 存快取（買超/賣超榜 + sell_price_map，不含全市場 batch 避免超過 50000 字元）
+            save_cache(ss, date_str, foreign, trust, dealer, f_sell, t_sell, d_sell,
+                       current_prices, current_margin)
 
         all_buy_codes = set()
         all_buy_names = {}
@@ -2142,7 +2221,7 @@ def main():
         if not _analysis_rows:
             # 只做計算，不寫對照分析/快照工作表
             print("  ℹ️ 自動計算分析資料（不更新對照分析工作表）...")
-            _analysis_rows = _calc_analysis_rows(ss, date_str, current_prices, current_margin)
+            _analysis_rows = _calc_analysis_rows(ss, date_str, current_prices, current_margin, cache_prices=current_prices)
         if not _analysis_rows:
             print("  ⚠️ 歷史紀錄無資料，無法計算推薦")
             return
