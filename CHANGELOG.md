@@ -5,6 +5,27 @@ Google Sheets ID：`1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g`
 
 ---
 
+## v11.4 — 2026/06/03
+
+### 修改
+
+- **`config.py` 族群擴充（21 個族群）**
+  * 新增族群：`汽車零件`（東陽、鴻準）、`建設營造`（興富發、潤弘）
+  * 半導體 +3：瑞昱、中環、義隆
+  * 電子代工 +3：聯強、群光、宏達電
+  * 傳產 +5：大成、國喬、東聯、中鋼、正新
+  * 金融 +1：臺企銀（共 25 支，補入漏網金融股）
+
+- **`update_sector_sheet` 族群聯動寫入過濾**
+  * 非買超榜成員且收盤價不在 50~130 的成員略過不寫入
+  * 目的：減少聯動資訊雜訊，專注在合理價位區間的個股
+
+### 待驗證
+
+- [ ] 族群聯動確認只顯示買超榜成員或收盤價 50~130 的成員
+
+---
+
 ## v11.3 — 2026/06/03
 
 ### 新增
@@ -24,9 +45,10 @@ Google Sheets ID：`1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g`
   * 金融股（依 `config.py` SECTOR_MAP["金融"] 清單判斷）不進推薦池
   * 原因：金融股法人長期持有、波動小，不適合短線明日關注邏輯
 
-- **`save_cache` 順序修正**
-  * 舊邏輯：先存快取再補入 `sell_price_map`，導致族群聯動保底股票（約167支）不在快取中
-  * 新邏輯：先補入 `sell_price_map` 再存快取，快取涵蓋買超/賣超榜 + 族群成員完整現價
+- **`save_cache` 拆分 `current_prices` / `sector_prices` 分格存**
+  * 舊邏輯：先存快取再補入 `sell_price_map`，且全部塞同一格，超過 50000 字元上限導致 APIError
+  * 新邏輯：買超/賣超榜存 `current_prices`，族群成員另存 `sector_prices`，分兩格避免超限
+  * `load_cache` 讀取時自動合併 `sector_prices` 進 `current_prices`，榜上已有的不覆蓋
 
 - **`_calc_analysis_rows` 保底補抓改查快取**
   * 舊邏輯：batch/OTC 日期不吻合時直接跳過（量比 None）
@@ -41,6 +63,7 @@ Google Sheets ID：`1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g`
 - [ ] 確認金融股不再出現於明日關注
 - [ ] 確認各工作表舊資料（>1個月）有被自動清除
 - [ ] 完整執行後再補跑，確認 `[cache] 快取補底命中` 有正常觸發（不再出現 167支跳過）
+- [ ] 族群聯動確認只顯示買超榜成員或收盤價 50~130 的成員
 
 ---
 

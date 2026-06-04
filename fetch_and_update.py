@@ -16,7 +16,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.3"  # ← 每次 commit 只改這裡
+VERSION = "v11.4"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -1796,6 +1796,9 @@ def update_sector_sheet(ss, date_str, all_buy_codes, all_buy_names, current_pric
         for code in members:
             name, close, chg, vol = get_quote(code)
             in_buy = "✅ 買超榜" if code in hit_set else ""
+            # ★ v11.3 過濾：只顯示在買超榜，或收盤價在 50~130 的成員
+            if not in_buy and not (close and 50 <= close <= 130):
+                continue
             new_block.append([
                 code,
                 name,
@@ -1845,10 +1848,12 @@ def find_trading_day():
 # ═══════════════════════════════════════════════
 
 def save_cache(ss, date_str, foreign, trust, dealer, f_sell, t_sell, d_sell,
-               current_prices=None, current_margin=None):
+               current_prices=None, current_margin=None, sector_prices=None):
     """
     把所有資料序列化後寫入 Sheets「快取」工作表。
     ★ v10.8 修正：每個 key 獨立一列，避免單 cell 超過 50000 字元限制。
+    ★ v11.3 修正：current_prices（買超/賣超榜）和 sector_prices（族群成員）分格存，
+                  避免合併後超過 50000 字元上限。
     """
     rows = [
         ["date_str",       date_str],
@@ -1859,6 +1864,7 @@ def save_cache(ss, date_str, foreign, trust, dealer, f_sell, t_sell, d_sell,
         ["t_sell",         json.dumps(t_sell,   ensure_ascii=False)],
         ["d_sell",         json.dumps(d_sell,   ensure_ascii=False)],
         ["current_prices", json.dumps({k: list(v) for k, v in (current_prices or {}).items()}, ensure_ascii=False)],
+        ["sector_prices",  json.dumps({k: list(v) for k, v in (sector_prices  or {}).items()}, ensure_ascii=False)],
         ["current_margin", json.dumps({k: list(v) for k, v in (current_margin or {}).items()}, ensure_ascii=False)],
     ]
     ws = get_or_create(ss, "快取", cols=2)
@@ -1894,6 +1900,11 @@ def load_cache(ss, date_str):
             t_sell   = json.loads(kv["t_sell"])
             d_sell   = json.loads(kv["d_sell"])
             current_prices = {k: tuple(v) for k, v in json.loads(kv.get("current_prices", "{}")).items()}
+            # sector_prices 合併進 current_prices（族群成員保底，榜上已有的不覆蓋）
+            _sector = {k: tuple(v) for k, v in json.loads(kv.get("sector_prices", "{}")).items()}
+            for _k, _v in _sector.items():
+                if _k not in current_prices:
+                    current_prices[_k] = _v
             current_margin = {k: tuple(v) for k, v in json.loads(kv.get("current_margin", "{}")).items()}
         # 舊格式相容：payload 在 B2
         elif "payload" in kv:
@@ -2165,16 +2176,16 @@ def main():
                         stock.get("short_balance",  0),
                     )
 
-            # sell_price_map 補入 current_prices（族群聯動等榜外股票用）
-            # ★ v11.3 修正：先補入 sell_price_map，再存快取
-            #   舊邏輯先存快取再補，導致族群聯動保底股票不在快取中，sheet-only 時行情留空
+            # ★ v11.3 修正：current_prices（買超/賣超榜）和 sector_prices（族群成員）分開存
+            #   避免合併後超過 Google Sheets 單格 50000 字元上限
+            sector_prices = {}
             for code, val in sell_price_map.items():
                 if code not in current_prices:
-                    current_prices[code] = val
+                    sector_prices[code] = val   # 榜外族群成員另存
 
-            # 存快取（買超/賣超榜 + sell_price_map，不含全市場 batch 避免超過 50000 字元）
+            # 存快取（買超/賣超榜存 current_prices，族群成員存 sector_prices，分格避免超限）
             save_cache(ss, date_str, foreign, trust, dealer, f_sell, t_sell, d_sell,
-                       current_prices, current_margin)
+                       current_prices, current_margin, sector_prices=sector_prices)
 
         all_buy_codes = set()
         all_buy_names = {}
