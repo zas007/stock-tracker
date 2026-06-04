@@ -16,7 +16,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.4"  # ← 每次 commit 只改這裡
+VERSION = "v11.5"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -1646,6 +1646,9 @@ def auto_update_sector_map(new_codes, all_buy_names, industry_map):
 
     added = {}
     for code in sorted(new_codes):
+        # ★ v11.5 過濾：代號含字母或長度 > 4 的為 ETF/槓桿反向/受益憑證，略過不補入族群
+        if not code.isdigit() or len(code) > 4:
+            continue
         name   = all_buy_names.get(code, code)
         sector = industry_map.get(code, "其他")
         SECTOR_MAP.setdefault(sector, [])
@@ -1708,8 +1711,9 @@ def update_sector_sheet(ss, date_str, all_buy_codes, all_buy_names, current_pric
     from datetime import datetime, timedelta
     _cutoff = (datetime.strptime(date_str, "%Y%m%d") - timedelta(days=31)).strftime("%Y/%m/%d")
     purge_old_rows(ws, _cutoff)
-    # 找出買超榜中不在 SECTOR_MAP 的新股票（sheet-only 時跳過 API 查詢）
-    unknown_codes = {c for c in all_buy_codes if c not in CODE_TO_SECTOR}
+    # 找出買超榜中不在 SECTOR_MAP 的新股票（ETF/受益憑證排除，sheet-only 時跳過 API 查詢）
+    unknown_codes = {c for c in all_buy_codes
+                     if c not in CODE_TO_SECTOR and c.isdigit() and len(c) <= 4}
     if unknown_codes and not sheet_only:
         print(f"  發現 {len(unknown_codes)} 支新股票不在族群表：{sorted(unknown_codes)}")
         print("  正在查詢官方產業別...")
@@ -1854,15 +1858,21 @@ def save_cache(ss, date_str, foreign, trust, dealer, f_sell, t_sell, d_sell,
     ★ v10.8 修正：每個 key 獨立一列，避免單 cell 超過 50000 字元限制。
     ★ v11.3 修正：current_prices（買超/賣超榜）和 sector_prices（族群成員）分格存，
                   避免合併後超過 50000 字元上限。
+    ★ v11.5 修正：foreign/trust/dealer/f_sell/t_sell/d_sell 各切成 _0/_1 兩塊（25支/塊），
+                  避免單格超過 50000 字元上限。
     """
-    rows = [
-        ["date_str",       date_str],
-        ["foreign",        json.dumps(foreign,  ensure_ascii=False)],
-        ["trust",          json.dumps(trust,    ensure_ascii=False)],
-        ["dealer",         json.dumps(dealer,   ensure_ascii=False)],
-        ["f_sell",         json.dumps(f_sell,   ensure_ascii=False)],
-        ["t_sell",         json.dumps(t_sell,   ensure_ascii=False)],
-        ["d_sell",         json.dumps(d_sell,   ensure_ascii=False)],
+    def _split_rows(key, lst, chunk=25):
+        """將 list 切成 chunk 大小的塊，產生 [key_0, ...], [key_1, ...] 等列"""
+        result = []
+        for i in range(0, max(1, len(lst)), chunk):
+            result.append([f"{key}_{i // chunk}", json.dumps(lst[i:i+chunk], ensure_ascii=False)])
+        return result
+
+    rows = [["date_str", date_str]]
+    for key, lst in [("foreign", foreign), ("trust", trust), ("dealer", dealer),
+                     ("f_sell", f_sell), ("t_sell", t_sell), ("d_sell", d_sell)]:
+        rows.extend(_split_rows(key, lst))
+    rows += [
         ["current_prices", json.dumps({k: list(v) for k, v in (current_prices or {}).items()}, ensure_ascii=False)],
         ["sector_prices",  json.dumps({k: list(v) for k, v in (sector_prices  or {}).items()}, ensure_ascii=False)],
         ["current_margin", json.dumps({k: list(v) for k, v in (current_margin or {}).items()}, ensure_ascii=False)],
@@ -1872,13 +1882,28 @@ def save_cache(ss, date_str, foreign, trust, dealer, f_sell, t_sell, d_sell,
     if ws.row_count < len(rows) + 5:
         ws.add_rows(len(rows) + 5 - ws.row_count)
     ws.update(range_name="A1", values=rows)
-    print(f"  💾 快取已寫入 Sheets（日期：{date_str}）")
+    print(f"  💾 快取已寫入 Sheets（日期：{date_str}，共 {len(rows)} 列）")
 
 def load_cache(ss, date_str):
     """
     從 Sheets「快取」工作表讀取。
     ★ v10.8：支援新格式（每 key 一列）與舊格式（單 payload 列）。
+    ★ v11.5：支援切塊格式（foreign_0/foreign_1 等），自動合併；
+             同時相容舊的單格格式（foreign）。
     """
+    def _load_chunks(kv, key):
+        """讀取 key_0, key_1, ... 並合併；若不存在則 fallback 讀 key"""
+        if f"{key}_0" in kv:
+            result = []
+            i = 0
+            while f"{key}_{i}" in kv:
+                result.extend(json.loads(kv[f"{key}_{i}"]))
+                i += 1
+            return result
+        elif key in kv:
+            return json.loads(kv[key])
+        return []
+
     try:
         ws = ss.worksheet("快取")
         all_rows = ws.get_all_values()
@@ -1891,14 +1916,14 @@ def load_cache(ss, date_str):
         if cached_date:
             print(f"  ℹ️ 快取日期：{cached_date}")
 
-        # 新格式：各 key 獨立一列
-        if "foreign" in kv:
-            foreign  = json.loads(kv["foreign"])
-            trust    = json.loads(kv["trust"])
-            dealer   = json.loads(kv["dealer"])
-            f_sell   = json.loads(kv["f_sell"])
-            t_sell   = json.loads(kv["t_sell"])
-            d_sell   = json.loads(kv["d_sell"])
+        # 新格式：切塊或單格（各 key 獨立一列）
+        if "foreign_0" in kv or "foreign" in kv:
+            foreign  = _load_chunks(kv, "foreign")
+            trust    = _load_chunks(kv, "trust")
+            dealer   = _load_chunks(kv, "dealer")
+            f_sell   = _load_chunks(kv, "f_sell")
+            t_sell   = _load_chunks(kv, "t_sell")
+            d_sell   = _load_chunks(kv, "d_sell")
             current_prices = {k: tuple(v) for k, v in json.loads(kv.get("current_prices", "{}")).items()}
             # sector_prices 合併進 current_prices（族群成員保底，榜上已有的不覆蓋）
             _sector = {k: tuple(v) for k, v in json.loads(kv.get("sector_prices", "{}")).items()}
@@ -2178,10 +2203,12 @@ def main():
 
             # ★ v11.3 修正：current_prices（買超/賣超榜）和 sector_prices（族群成員）分開存
             #   避免合併後超過 Google Sheets 單格 50000 字元上限
+            # ★ v11.5 修正：sector_prices 只存族群成員（不存全市場，否則 ~7000支超限）
+            all_sector_codes = {c for members in SECTOR_MAP.values() for c in members}
             sector_prices = {}
-            for code, val in sell_price_map.items():
-                if code not in current_prices:
-                    sector_prices[code] = val   # 榜外族群成員另存
+            for code in all_sector_codes:
+                if code not in current_prices and code in sell_price_map:
+                    sector_prices[code] = sell_price_map[code]
 
             # 存快取（買超/賣超榜存 current_prices，族群成員存 sector_prices，分格避免超限）
             save_cache(ss, date_str, foreign, trust, dealer, f_sell, t_sell, d_sell,
