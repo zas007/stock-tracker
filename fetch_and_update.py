@@ -16,7 +16,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.6"  # ← 每次 commit 只改這裡
+VERSION = "v11.7"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -1411,21 +1411,21 @@ PERFORMANCE_HEADERS = [
 
 def _score_matrix(consec, chip_lbl):
     """
-    連續天數 × 籌碼集中度 矩陣評分（40分）
-    天數越長代表法人持續買進，分數越高。
+    連續天數 × 籌碼集中度 矩陣評分（45分）
+    拉大高/中/低集中度之間的差距。
     """
     if chip_lbl == "🔵 高度集中":
-        if consec <= 3:   return 28   # 剛啟動
-        elif consec <= 7: return 34   # 持續強勢
-        else:             return 40   # 長期持續，最佳
+        if consec <= 3:   return 30
+        elif consec <= 7: return 38
+        else:             return 45
     elif chip_lbl == "🟦 中度集中":
-        if consec <= 3:   return 16
-        elif consec <= 7: return 22
-        else:             return 28
+        if consec <= 3:   return 18
+        elif consec <= 7: return 25
+        else:             return 32
     else:  # 偏低
-        if consec <= 3:   return 4
-        elif consec <= 7: return 8
-        else:             return 12
+        if consec <= 3:   return 5
+        elif consec <= 7: return 9
+        else:             return 13
 
 
 def _score_margin(health):
@@ -1435,22 +1435,22 @@ def _score_margin(health):
 
 
 def _score_risk(risk):
-    """出貨風險評分（20分）：🔴高風險已在 score_stock 過濾"""
-    return {"🟢 低": 20, "🟡 中": 10, "🔴 高": 0}.get(risk, 0)
+    """出貨風險評分（15分）：🔴高風險已在 score_stock 過濾"""
+    return {"🟢 低": 15, "🟡 中": 7, "🔴 高": 0}.get(risk, 0)
 
 
 def _score_volume_ratio(vr):
     """量比評分（15分）：今日量 ÷ 近10日均量"""
-    if vr is None or vr == "": return 0
+    if vr is None or vr == "": return 5   # ★ 無資料給基礎分，不全部歸零
     try:
         vr = float(vr)
     except (ValueError, TypeError):
-        return 0
+        return 5
     if vr >= 3.0:   return 15   # 大爆量
     if vr >= 2.0:   return 12   # 明顯放量
-    if vr >= 1.5:   return 8    # 溫和放量
-    if vr >= 1.0:   return 4    # 正常量
-    return 0                    # 縮量不加分
+    if vr >= 1.5:   return 9    # 溫和放量
+    if vr >= 1.0:   return 6    # 正常量
+    return 2                    # 縮量
 
 
 def _dealer_label(d_consec):
@@ -1494,6 +1494,13 @@ def score_stock(row):
     if not chip_lbl:                     return None   # 無集中度資料
     if risk == "🔴 高":                  return None   # 出貨風險高，不推
 
+    # 現價上限：> 400 元不推（價格過高，散戶參與度低）
+    try:
+        close_val = float(str(row[19]).replace(",", ""))
+        if close_val > 400:              return None
+    except (ValueError, TypeError):
+        pass
+
     # 漲幅上限：當日已漲超過 8% 視為追高，不推
     chg_str = str(row[20]).replace("%", "").replace("+", "").strip()
     try:
@@ -1511,9 +1518,9 @@ def score_stock(row):
     if consec == 0: return None
 
     score = (
-        _score_matrix(consec, chip_lbl) +      # 40分
+        _score_matrix(consec, chip_lbl) +      # 45分
         _score_margin(health) +                # 25分
-        _score_risk(risk) +                    # 20分
+        _score_risk(risk) +                    # 15分
         _score_volume_ratio(volume_ratio)      # 15分
     )
     return min(score, 100)
@@ -1896,8 +1903,9 @@ def auto_update_sector_map(new_codes, all_buy_names, industry_map):
 
     added = {}
     for code in sorted(new_codes):
-        # ★ v11.5 過濾：代號含字母或長度 > 4 的為 ETF/槓桿反向/受益憑證，略過不補入族群
-        if not code.isdigit() or len(code) > 4:
+        # ★ v11.7 過濾：ETF/槓桿反向/受益憑證略過不補入族群
+        # is_etf_code 涵蓋：含字母、00 開頭（如 0052、00919）、長度 > 4
+        if not code.isdigit() or len(code) > 4 or is_etf_code(code):
             continue
         name   = all_buy_names.get(code, code)
         sector = industry_map.get(code, "其他")
@@ -1963,7 +1971,8 @@ def update_sector_sheet(ss, date_str, all_buy_codes, all_buy_names, current_pric
     purge_old_rows(ws, _cutoff)
     # 找出買超榜中不在 SECTOR_MAP 的新股票（ETF/受益憑證排除，sheet-only 時跳過 API 查詢）
     unknown_codes = {c for c in all_buy_codes
-                     if c not in CODE_TO_SECTOR and c.isdigit() and len(c) <= 4}
+                     if c not in CODE_TO_SECTOR and c.isdigit() and len(c) <= 4
+                     and not is_etf_code(c)}
     if unknown_codes and not sheet_only:
         print(f"  發現 {len(unknown_codes)} 支新股票不在族群表：{sorted(unknown_codes)}")
         print("  正在查詢官方產業別...")
@@ -2075,14 +2084,15 @@ def update_sector_sheet(ss, date_str, all_buy_codes, all_buy_names, current_pric
 
 def find_trading_day():
     """
-    ★ v10.8：14:00 前直接從前一交易日開始（三大法人資料 16:30 後才有）；
-    14:00 後先嘗試今天，沒資料再往前找。
+    ★ v11.7：16:30 前自動使用前一交易日（三大法人資料 16:30 後才釋出）；
+    16:30 後先嘗試今天，沒資料再往前找。執行時間顯示於 Step 1。
     """
     warm_up_cookie()
     now = datetime.now()
     d = now
-    if now.hour < 14:
-        print(f"  現在 {now.strftime(chr(37)+chr(72)+chr(58)+chr(37)+chr(77))}，14:00 前自動使用前一交易日")
+    print(f"  執行時間：{now.strftime('%Y/%m/%d %H:%M')}")
+    if now.hour < 16 or (now.hour == 16 and now.minute < 30):
+        print(f"  16:30 前自動使用前一交易日（三大法人資料 16:30 後才釋出）")
         d -= timedelta(days=1)
     for _ in range(7):
         if d.weekday() < 5:
@@ -2195,7 +2205,7 @@ def load_cache(ss, date_str):
             print("  ⚠️ 快取格式無法辨識")
             return None
 
-        print(f"  ✅ 快取命中（日期：{cached_date}）")
+        print(f"  📋 {cached_date} 快取讀取成功")
         return (cached_date, foreign, trust, dealer, f_sell, t_sell, d_sell,
                 current_prices, current_margin, futures_signal)
     except gspread.exceptions.WorksheetNotFound:
