@@ -5,6 +5,42 @@ Google Sheets ID：`1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g`
 
 ---
 
+## v11.6 — 2026/06/05
+
+### 新增
+
+- **外資期貨未平倉燈號（待處理事項 #5）**
+  * 新增 `_futures_dots()` / `fetch_futures_signal()` / `fetch_futures_two_days()`
+  * 期交所 API 以 bytes 模式抓取，decode Big5 編碼
+  * 燈號邏輯：口數每 3,000 口一顆（最多5顆，無條件捨去），變化量每 1,500 口一顆
+  * 正值 → 🟢，負值 → 🔴，未滿一顆 → 🟡
+  * 結果顯示於「明日關注」工作表區塊第二行
+  * 期貨燈號結果存入「快取」工作表 `futures_signal` key，sheet-only 時直接讀取不重打 API
+
+- **融券餘額歷史趨勢（待處理事項 #6）**
+  * 新增「融券歷史」工作表（SHEET_OPTIONS 選項 8），每日存一批，保留 31 天自動清除
+  * 新增 `update_short_history()` / `load_short_history()` / `calc_short_trend()`
+  * 趨勢標記：↗ 連增N天 / ↘ 連減N天 / ➡ 持平（需 ≥2 天才顯示連增/減）
+  * 對照分析新增「融券趨勢」欄（ANALYSIS_HEADERS 欄數 32 → 33）
+
+- **fetch_industry_map Big5 解析修正（待處理事項 #1）**
+  * 舊邏輯假設「單格列為產業別標題」，實際 HTML 每列直接帶產業別（cells[4]）
+  * 修正後正確載入 26,789 支，產業別歸類正確
+  * INDUSTRY_TO_SECTOR 補上「建材營造業」「貿易百貨業」等帶「業」字的官方名稱變體，及「建材營造」對應到「建設營造」族群
+
+### 調整
+
+- **sheet-only 選 6 跳過保底補抓 API**
+  * `_calc_analysis_rows` 新增 `fast_mode` 參數
+  * `_run_recommendation` 傳入 `fast_mode=True`，跳過歷史股票現價/融資券補抓，直接用快取內資料算評分
+
+- **config.py 族群擴充（28 → 33 族群）**
+  * 新增族群：電子代工-機殼、AI伺服器-連接器、量測設備、生技醫療、貿易百貨（原百貨零售改名）
+  * 現有族群補入：建設營造 +2（皇昌、長虹）、PCB +2（台光電、健鼎）、電信 +1（是方電訊）、光學元件 +1（玉晶光）、電子代工 +1（弘憶股）、傳產 +2（龍邦、新纖）、金融 +1（王道銀行）
+  * CODE_NAME_MAP 補入所有新增代號
+
+---
+
 ## v11.5 — 2026/06/04
 
 ### 修正

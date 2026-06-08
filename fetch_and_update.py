@@ -16,7 +16,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.5"  # ← 每次 commit 只改這裡
+VERSION = "v11.6"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -362,6 +362,105 @@ def fetch_price_map_otc(date_str):
 
 
 # ═══════════════════════════════════════════════
+# ★ v11.6 外資期貨未平倉燈號（期交所）
+# ═══════════════════════════════════════════════
+
+def _futures_dots(value, per_dot, max_dots=5):
+    """
+    依絕對值換算燈號顆數（最多 max_dots 顆，無條件捨去）。
+    正值 → 🟢，負值 → 🔴，未滿一顆 → 🟡
+    口數：每 3,000 口一顆；變化量：每 1,500 口一顆
+    """
+    dots = min(int(abs(value) // per_dot), max_dots)
+    if dots == 0:
+        return "🟡"
+    emoji = "🟢" if value > 0 else "🔴"
+    return emoji * dots
+
+
+def fetch_futures_signal(date_str):
+    """
+    從期交所抓外資大台指未平倉淨口數，回傳 (口數, 燈號) 或 None（失敗時）。
+    API: https://www.taifex.com.tw/cht/3/futContractsDateDown（CSV 格式，Big5 編碼）
+
+    燈號邏輯（每 3,000 口一顆，最多 5 顆）：
+      🟢🟢🟢🟢🟢 > +15,000 口
+      🟢🟢🟢🟢   +12,001 ~ +15,000
+      ...
+      🟡          -3,000 ~ +3,000（未達一顆）
+      ...
+      🔴🔴🔴🔴🔴 < -15,000 口
+    """
+    d = f"{date_str[:4]}/{date_str[4:6]}/{date_str[6:]}"
+    url = (f"https://www.taifex.com.tw/cht/3/futContractsDateDown"
+           f"?queryStartDate={d}&queryEndDate={d}&commodityId=TXF")
+
+    # ★ 期交所回傳 Big5 編碼，需用 bytes 模式讀取再 decode
+    result = subprocess.run([
+        "curl", "-s", "--max-time", "20",
+        "-H", "User-Agent: Mozilla/5.0",
+        "-H", "Referer: https://www.taifex.com.tw/",
+        url
+    ], capture_output=True)   # 不帶 text=True，取 bytes
+
+    if not result.stdout:
+        print("  ⚠️ 期交所 API 無回應")
+        return None
+
+    try:
+        text = result.stdout.decode("big5", errors="replace")
+    except Exception as e:
+        print(f"  ⚠️ 期交所編碼解析失敗：{e}")
+        return None
+
+    if text.startswith("<"):
+        print("  ⚠️ 期交所 API 回傳 HTML（可能無當日資料）")
+        return None
+
+    try:
+        # CSV 格式：日期,商品名稱,身份別,多方口數,多方契約金額,空方口數,空方契約金額,多空淨額口數,...
+        lines = [l for l in text.strip().splitlines() if l.strip()]
+        for line in lines:
+            cols = line.split(",")
+            # 找外資那列（身份別欄含「外資」）
+            if len(cols) >= 8 and "外資" in cols[2]:
+                net    = to_int(cols[7])   # 多空淨額口數
+                signal = _futures_dots(net, per_dot=3000)
+                return net, signal
+        print("  ⚠️ 期交所資料找不到外資欄位")
+        return None
+    except Exception as e:
+        print(f"  ⚠️ 期交所資料解析失敗：{e}")
+        return None
+
+
+def fetch_futures_two_days(date_str):
+    """
+    抓今日和前一交易日的期貨資料，計算增減。
+    回傳 (net: int, signal: str, delta_str: str) 或 None。
+    delta 燈號：每 1,500 口一顆，最多 5 顆。
+    """
+    today_result = fetch_futures_signal(date_str)
+    if today_result is None:
+        return None
+    net, signal = today_result
+
+    prev_str = prev_trading_date(date_str)
+    prev_result = fetch_futures_signal(prev_str)
+
+    if prev_result is not None:
+        prev_net, _ = prev_result
+        delta = net - prev_net
+        delta_signal = _futures_dots(delta, per_dot=1500)
+        sign = "+" if delta >= 0 else ""
+        delta_str = f"較前日 {delta_signal} {sign}{delta:,}"
+    else:
+        delta_str = ""
+
+    return net, signal, delta_str
+
+
+# ═══════════════════════════════════════════════
 # 批次抓均價、收盤、成交量（寫入 stock dict）
 # ═══════════════════════════════════════════════
 
@@ -495,6 +594,123 @@ def enrich_with_margin(groups, date_str):
     found = sum(1 for c in all_codes if c in margin_map)
     print(f"  ✅ 融資融券 找到 {found}/{total} 支")
     return margin_map
+
+
+# ═══════════════════════════════════════════════
+# ★ v11.6 融券歷史工作表（獨立工作表，方案B）
+# ═══════════════════════════════════════════════
+
+def update_short_history(ss, date_str, current_margin):
+    """
+    將本次執行中的融券餘額寫入「融券歷史」工作表（每日一批）。
+    格式：日期, 代號, 融券餘額(張)
+    保留 31 天，超過自動清除。
+    只寫 current_margin 中有融券資料的股票（sb > 0）。
+    """
+    disp = fmt_date(date_str)
+    ws   = get_or_create(ss, "融券歷史", 3)
+
+    from datetime import datetime, timedelta
+    _cutoff = (datetime.strptime(date_str, "%Y%m%d") - timedelta(days=31)).strftime("%Y/%m/%d")
+    purge_old_rows(ws, _cutoff)
+
+    existing = ws.get_all_values()
+    headers  = ["日期", "代號", "融券餘額(張)"]
+    if not existing:
+        existing = [headers]
+
+    # 過濾掉今天已寫入的列（重跑時覆蓋）
+    if existing and existing[0] == headers:
+        kept = [existing[0]] + [r for r in existing[1:] if not (r and r[0] == disp)]
+    else:
+        kept = [r for r in existing if not (r and r[0] == disp)]
+        kept = [headers] + kept
+
+    new_rows = [
+        [disp, code, sb]
+        for code, (mb, mc, sb) in current_margin.items()
+        if sb > 0
+    ]
+    new_rows.sort(key=lambda r: r[1])   # 依代號排序
+
+    full = kept + new_rows
+    ws.clear()
+    if ws.row_count < len(full) + 10:
+        ws.add_rows(len(full) + 10 - ws.row_count)
+    ws.update(range_name="A1", values=full)
+    print(f"  ✅ 融券歷史 寫入 {len(new_rows)} 筆（{disp}）")
+
+
+def load_short_history(ss, date_str):
+    """
+    從「融券歷史」工作表讀取近期資料，建立趨勢查表。
+    回傳 {code: [(disp, sb), ...]}，按日期升序。
+    """
+    try:
+        ws   = ss.worksheet("融券歷史")
+        rows = ws.get_all_values()
+    except Exception:
+        return {}
+
+    result = {}
+    for row in rows[1:]:   # 跳標題
+        if len(row) < 3 or not row[1]:
+            continue
+        d_str, code = row[0].strip(), row[1].strip()
+        try:
+            sb = int(str(row[2]).replace(",", ""))
+        except ValueError:
+            continue
+        result.setdefault(code, []).append((d_str, sb))
+
+    # 每支股票按日期升序
+    for code in result:
+        result[code].sort(key=lambda x: x[0])
+    return result
+
+
+def calc_short_trend(short_hist, code):
+    """
+    計算融券連增/連減天數。
+    回傳 (連增天數, 連減天數, 趨勢標記)。
+    趨勢標記：「↗ 連增N天」/ 「↘ 連減N天」/ 「➡ 持平」/ 「」（資料不足）
+    """
+    entries = short_hist.get(code, [])
+    if len(entries) < 2:
+        return 0, 0, ""
+
+    # 從最新往回看
+    vals = [sb for _, sb in entries]
+    up_count   = 0
+    down_count = 0
+
+    # 連增：從最後一天往前，每天都比前一天多
+    for i in range(len(vals) - 1, 0, -1):
+        if vals[i] > vals[i - 1]:
+            up_count += 1
+        else:
+            break
+
+    # 連減：從最後一天往前，每天都比前一天少
+    if up_count == 0:
+        for i in range(len(vals) - 1, 0, -1):
+            if vals[i] < vals[i - 1]:
+                down_count += 1
+            else:
+                break
+
+    if up_count >= 2:
+        label = f"↗ 連增{up_count}天"
+    elif down_count >= 2:
+        label = f"↘ 連減{down_count}天"
+    elif up_count == 1:
+        label = "↗ 增"
+    elif down_count == 1:
+        label = "↘ 減"
+    else:
+        label = "➡ 持平"
+
+    return up_count, down_count, label
 
 
 # ═══════════════════════════════════════════════
@@ -946,10 +1162,12 @@ def _consecutive_days(entries, code, all_dates, net_by_date):
     return count
 
 
-def build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net_by_date):
+def build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net_by_date,
+              short_hist=None):
     """
     ★ 優化：從 inner function 獨立為模組層函式。
     建立對照分析 / 每日快照 的單列資料。
+    ★ v11.6：新增 short_hist 參數，輸出融券趨勢欄。
     """
     code = s["code"]
 
@@ -993,6 +1211,9 @@ def build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net
     mb, mc, sb          = current_margin.get(code, (0, 0, 0))
     margin_health       = calc_margin_health(mc, today_net)
 
+    # ★ v11.6 融券趨勢
+    _, _, short_trend = calc_short_trend(short_hist or {}, code)
+
     return [
         code, s["name"],
         f_total, f_consec, f_net, f_wavg or "", f_trend,
@@ -1003,6 +1224,7 @@ def build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net
         chip_pct, chip_lbl,
         mb or "", mc if (mb or mc) else "", sb or "", margin_health,
         volume_ratio,
+        short_trend,
         s["last"]
     ]
 
@@ -1016,15 +1238,18 @@ ANALYSIS_HEADERS = [
     "籌碼集中度%","籌碼集中度評級",
     "融資餘額(張)","融資增減(張)","融券餘額(張)","融資健康度",
     "量比",
+    "融券趨勢",
     "最近出現日"
 ]
 
 
-def _calc_analysis_rows(ss, date_str, current_prices, current_margin, cache_prices=None):
+def _calc_analysis_rows(ss, date_str, current_prices, current_margin, cache_prices=None, fast_mode=False):
     """
     從歷史紀錄計算 all_rows（純計算，不寫 Sheets）。
     選4（對照分析）和選6（明日關注）共用此函式。
     cache_prices: 快取載入的原始 current_prices，batch 不適用時作為保底來源。
+    fast_mode: True 時跳過保底補抓 API，只用 current_prices/current_margin 內已有的資料。
+               適用於只選明日關注推薦、不需要完整歷史股票資料的情境。
     """
     hist = get_or_create(ss, "歷史紀錄")
     disp = fmt_date(date_str)
@@ -1034,9 +1259,9 @@ def _calc_analysis_rows(ss, date_str, current_prices, current_margin, cache_pric
 
     all_hist_codes = set(row[2] for row in rows if len(row) > 2 and row[2])
 
-    # ── 現價保底：batch 優先，batch 日期不吻合時從快取補，真正缺的才跳過 ──
+    # ── 現價保底：fast_mode 時跳過，只用快取內已有的資料 ──
     missing_price = [c for c in all_hist_codes if c not in current_prices]
-    if missing_price:
+    if missing_price and not fast_mode:
         print(f"  📡 保底補抓現價（{len(missing_price)} 支，快取未涵蓋）...")
         # 第一段：TWSE batch
         batch_map = fetch_price_map_batch(date_str)
@@ -1079,9 +1304,9 @@ def _calc_analysis_rows(ss, date_str, current_prices, current_margin, cache_pric
             print(f"  [skip] {len(still_missing)} 支 batch/OTC/快取均未命中，跳過（量比 None）")
         print(f"  ✅ 現價保底完成")
 
-    # ── 融資券保底：快取缺少才補抓 ──
+    # ── 融資券保底：快取缺少才補抓（fast_mode 時跳過）──
     missing_margin = [c for c in all_hist_codes if c not in current_margin]
-    if missing_margin:
+    if missing_margin and not fast_mode:
         print(f"  📡 保底補抓融資融券（{len(missing_margin)} 支，快取未涵蓋）...")
         margin_map = _fetch_margin_map(date_str)
         for rc, val in margin_map.items():
@@ -1092,8 +1317,12 @@ def _calc_analysis_rows(ss, date_str, current_prices, current_margin, cache_pric
 
     buy_map, sell_hist, net_by_date, all_dates = _build_history_maps(rows)
 
+    # ★ v11.6 載入融券歷史，供 build_row 計算趨勢
+    short_hist = load_short_history(ss, date_str)
+
     all_rows = [
-        build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net_by_date)
+        build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net_by_date,
+                  short_hist=short_hist)
         for s in buy_map.values()
     ]
 
@@ -1239,7 +1468,7 @@ def score_stock(row):
       [3]=外資連續, [8]=投信連續, [13]=自營連續
       [19]=現價, [20]=漲幅%, [21]=出貨風險, [22]=訊號
       [23]=籌碼集中度%, [24]=籌碼集中度評級
-      [28]=融資健康度, [29]=量比
+      [28]=融資健康度, [29]=量比, [30]=融券趨勢, [31]=最近出現日
 
     v11.2 過濾邏輯：
       移除「漲幅 ≤2%」門檻（避免錯殺法人剛開始佈局的股票）
@@ -1290,12 +1519,30 @@ def score_stock(row):
     return min(score, 100)
 
 
-def update_recommendation(ss, date_str, all_rows):
+def update_recommendation(ss, date_str, all_rows, cached_futures=""):
     """
     從 all_rows（build_row 產出）計算評分，
     取前5名寫入「明日關注」工作表（prepend 累積）。
+    ★ v11.6：區塊頂部加入外資期貨未平倉燈號。
+    cached_futures: 快取內的期貨燈號字串，有值就直接用，否則重打 API。
+    回傳 futures_line（供 main 存回快取）。
     """
     disp = fmt_date(date_str)
+
+    # ★ v11.6 期貨燈號：快取有值就直接用，否則打 API
+    if cached_futures:
+        futures_line = cached_futures
+        print(f"  {futures_line}（快取）")
+    else:
+        print("  📡 抓取外資期貨未平倉...")
+        futures_info = fetch_futures_two_days(date_str)
+        if futures_info:
+            net, signal, delta_str = futures_info
+            sign = "+" if net >= 0 else ""
+            futures_line = f"外資大台指淨部位：{signal} {sign}{net:,} 口　{delta_str}"
+        else:
+            futures_line = "外資大台指淨部位：⚠️ 資料取得失敗"
+        print(f"  {futures_line}")
 
     # 計算評分，過濾不合格
     scored = []
@@ -1339,11 +1586,13 @@ def update_recommendation(ss, date_str, all_rows):
 
     block = [
         [f"資料日期：{disp} ｜ 明日關注推薦（綜合評分前5名）"] + [""] * (n_cols - 1),
+        [futures_line] + [""] * (n_cols - 1),
         RECOMMEND_HEADERS,
     ] + rec_rows
 
     prepend_block(ws, block, disp, "資料日期：", n_cols)
     print(f"  ✅ 明日關注 更新完成（Top5：{', '.join(r[1] for _, r in top5)}）")
+    return futures_line
 
 
 # ═══════════════════════════════════════════════
@@ -1574,11 +1823,15 @@ def fetch_industry_map():
             "鋼鐵工業":       "傳產",
             "橡膠工業":       "傳產",
             "汽車工業":       "傳產",
-            "建材營造":       "傳產",
-            "航運業":         "航運",
-            "觀光餐旅":       "其他",
-            "金融保險":       "金融",
-            "貿易百貨":       "其他",
+            "建材營造":        "建設營造",
+            "建材營造業":      "建設營造",
+            "航運業":          "航運",
+            "觀光餐旅":        "其他",
+            "觀光餐旅業":      "其他",
+            "金融保險":        "金融",
+            "金融保險業":      "金融",
+            "貿易百貨":        "貿易百貨",
+            "貿易百貨業":      "貿易百貨",
             "綜合":           "其他",
             "其他":           "其他",
             "半導體業":       "半導體",
@@ -1601,26 +1854,23 @@ def fetch_industry_map():
         SKIP_INDUSTRIES = {"股票", "上市認購(售)權證", "上市ETF", "上市ETN",
                            "上市受益證券", "上市資產支持證券", "特別股"}
 
-        for row in rows:
+        for i, row in enumerate(rows):
             cells = re.findall(r"<td[^>]*>(.*?)</td>", row, re.DOTALL)
             cells = [re.sub(r"<[^>]+>", "", c).strip() for c in cells]
             if not cells:
                 continue
-            # 產業別標題列：只有一格且不含空格（無代號）
-            if len(cells) == 1 and cells[0]:
-                raw = cells[0]
-                if raw in SKIP_INDUSTRIES:
-                    current_industry = ""   # 清空，後續股票列不會歸入
-                else:
-                    # 對照到我們的族群名稱，找不到就用官方名稱
-                    current_industry = INDUSTRY_TO_SECTOR.get(raw, raw)
-                continue
-            # 股票列：第一格是「代號　名稱」（全形空格分隔）
-            if cells and "　" in cells[0] and current_industry:
-                parts = cells[0].split("　")
+            # 股票列格式：[代號\u3000名稱, ISIN, 上市日, 市場別, 產業別, CFICode, 備註]
+            # cells[0] 含 \u3000，cells[3] 是產業別
+            if len(cells) >= 5 and "\u3000" in cells[0]:
+                parts = cells[0].split("\u3000")
                 code  = parts[0].strip()
-                if code.isdigit() and len(code) == 4:
-                    industry_map[code] = current_industry
+                if not (code.isdigit() and len(code) <= 6):
+                    continue
+                raw_industry = cells[4].strip() if len(cells) > 4 and cells[4].strip() else ""
+                if raw_industry in SKIP_INDUSTRIES:
+                    continue
+                sector = INDUSTRY_TO_SECTOR.get(raw_industry, raw_industry)
+                industry_map[code] = sector
         print(f"  ✅ 官方產業別 載入 {len(industry_map)} 支")
         return industry_map
     except Exception as e:
@@ -1876,6 +2126,7 @@ def save_cache(ss, date_str, foreign, trust, dealer, f_sell, t_sell, d_sell,
         ["current_prices", json.dumps({k: list(v) for k, v in (current_prices or {}).items()}, ensure_ascii=False)],
         ["sector_prices",  json.dumps({k: list(v) for k, v in (sector_prices  or {}).items()}, ensure_ascii=False)],
         ["current_margin", json.dumps({k: list(v) for k, v in (current_margin or {}).items()}, ensure_ascii=False)],
+        ["futures_signal", ""],   # ★ v11.6 預留，由 update_recommendation 寫入
     ]
     ws = get_or_create(ss, "快取", cols=2)
     ws.clear()
@@ -1931,6 +2182,7 @@ def load_cache(ss, date_str):
                 if _k not in current_prices:
                     current_prices[_k] = _v
             current_margin = {k: tuple(v) for k, v in json.loads(kv.get("current_margin", "{}")).items()}
+            futures_signal = kv.get("futures_signal", "")   # ★ v11.6
         # 舊格式相容：payload 在 B2
         elif "payload" in kv:
             data = json.loads(kv["payload"])
@@ -1938,13 +2190,14 @@ def load_cache(ss, date_str):
             f_sell   = data["f_sell"];   t_sell  = data["t_sell"]; d_sell = data["d_sell"]
             current_prices = {k: tuple(v) for k, v in data.get("current_prices", {}).items()}
             current_margin = {k: tuple(v) for k, v in data.get("current_margin", {}).items()}
+            futures_signal = ""
         else:
             print("  ⚠️ 快取格式無法辨識")
             return None
 
         print(f"  ✅ 快取命中（日期：{cached_date}）")
         return (cached_date, foreign, trust, dealer, f_sell, t_sell, d_sell,
-                current_prices, current_margin)
+                current_prices, current_margin, futures_signal)
     except gspread.exceptions.WorksheetNotFound:
         print(f"  ⚠️ 快取工作表不存在，需重新抓取")
         return None
@@ -2101,7 +2354,7 @@ def main():
         if not result:
             print("❌ 快取不存在或日期不符，請先執行完整模式或只抓資料")
             input("按 Enter 關閉..."); sys.exit(1)
-        date_str, foreign, trust, dealer, f_sell, t_sell, d_sell, current_prices, current_margin = result
+        date_str, foreign, trust, dealer, f_sell, t_sell, d_sell, current_prices, current_margin, _cached_futures = result
         buy_groups = [foreign, trust, dealer]
         all_buy_codes = set()
         all_buy_names = {}
@@ -2138,7 +2391,7 @@ def main():
         # Step 1.5: 快取命中則跳過 Step 2/3，直接用快取的 prices/margin
         _cache_result = load_cache(ss, date_str)
         if _cache_result and _cache_result[0] == date_str:
-            _, _cf, _ct, _cd, _cfs, _cts, _cds, current_prices, current_margin = _cache_result
+            _, _cf, _ct, _cd, _cfs, _cts, _cds, current_prices, current_margin, _cached_futures = _cache_result
             sell_price_map = current_prices
             # 將快取 stock 欄位回填給 group 物件（供 Sheets 寫入用）
             for live_group, cached_group in zip(all_groups, [_cf,_ct,_cd,_cfs,_cts,_cds]):
@@ -2151,6 +2404,7 @@ def main():
                             stock[key] = cached[key]
             print("  ✅ 快取命中，跳過 Step 2/3 API 抓取")
         else:
+            _cached_futures = ""   # ★ v11.6 完整執行時由 update_recommendation 填入並存快取
             # Step 2: 抓個股價格
             print(f"\n💹 Step 2/5 抓取個股價格與成交量...")
             try:
@@ -2249,21 +2503,36 @@ def main():
 
     # ── 選擇要寫入的工作表 ──
     _analysis_rows = []   # 暫存 update_analysis 回傳的 all_rows
+    _cached_futures = ""  # ★ v11.6 期貨燈號快取
 
     def _run_analysis():
         nonlocal _analysis_rows
         _analysis_rows = update_analysis(ss, date_str, current_prices, current_margin)
 
     def _run_recommendation():
-        nonlocal _analysis_rows
+        nonlocal _analysis_rows, _cached_futures
         if not _analysis_rows:
-            # 只做計算，不寫對照分析/快照工作表
             print("  ℹ️ 自動計算分析資料（不更新對照分析工作表）...")
-            _analysis_rows = _calc_analysis_rows(ss, date_str, current_prices, current_margin, cache_prices=current_prices)
+            _analysis_rows = _calc_analysis_rows(ss, date_str, current_prices, current_margin,
+                                                  cache_prices=current_prices, fast_mode=True)
         if not _analysis_rows:
             print("  ⚠️ 歷史紀錄無資料，無法計算推薦")
             return
-        update_recommendation(ss, date_str, _analysis_rows)
+        result_line = update_recommendation(ss, date_str, _analysis_rows, cached_futures=_cached_futures)
+        # ★ v11.6 把期貨燈號存回快取（下次 sheet-only 不重打 API）
+        if result_line and result_line != _cached_futures:
+            _cached_futures = result_line
+            try:
+                ws_cache = ss.worksheet("快取")
+                all_vals = ws_cache.get_all_values()
+                for i, row in enumerate(all_vals):
+                    if row and row[0] == "futures_signal":
+                        ws_cache.update_cell(i + 1, 2, result_line)
+                        break
+                else:
+                    ws_cache.append_row(["futures_signal", result_line])
+            except Exception as e:
+                print(f"  ⚠️ 期貨快取存回失敗：{e}")
 
     SHEET_OPTIONS = [
         ("1", "今日買超排行",  lambda: update_buy_sheet(ss, date_str, foreign, trust, dealer)),
@@ -2273,6 +2542,7 @@ def main():
         ("5", "族群聯動",      lambda: update_sector_sheet(ss, date_str, all_buy_codes, all_buy_names, current_prices, sheet_only=args.sheet_only, cache_ref=_CACHE_REF)),
         ("6", "明日關注推薦",  _run_recommendation),
         ("7", "推薦成效追蹤",  lambda: update_performance(ss, date_str, current_prices)),
+        ("8", "融券歷史",      lambda: update_short_history(ss, date_str, current_margin)),
     ]
 
     if args.sheet_only:
