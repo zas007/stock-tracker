@@ -1205,6 +1205,7 @@ def build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net
                                f_entries=s["f"], t_entries=s["t"], d_entries=s["d"],
                                all_dates=all_dates, net_by_date=net_by_date)
     trust_label   = calc_trust_label(t_consec)
+    accel_ratio, accel_label = _calc_buy_accel(all_entries, all_dates)
 
     today_net           = sum(e[1] for e in all_entries if e[0] == disp)
     chip_pct, chip_lbl  = calc_chip_concentration(today_net, volume, code)
@@ -1220,7 +1221,7 @@ def build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net
         t_total, t_consec, t_net, t_wavg or "", t_trend, trust_label,
         d_total, d_consec, d_net, d_wavg or "", d_trend,
         f_total + t_total + d_total,
-        close or "", change_pct or "", pct_str, risk, signal,
+        close or "", change_pct or "", pct_str, risk, signal, accel_label,
         chip_pct, chip_lbl,
         mb or "", mc if (mb or mc) else "", sb or "", margin_health,
         volume_ratio,
@@ -1234,13 +1235,138 @@ ANALYSIS_HEADERS = [
     "外資累計天數","外資連續天數","外資買超(張)","外資加權均價","外資趨勢",
     "投信累計天數","投信連續天數","投信買超(張)","投信加權均價","投信趨勢","投信標記",
     "自營商累計天數","自營商連續天數","自營商買超(張)","自營商加權均價","自營商趨勢",
-    "合計累計天數","現價","當日漲跌%","漲幅%","出貨風險","訊號",
+    "合計累計天數","現價","當日漲跌%","漲幅%","出貨風險","訊號","買超加速度",
     "籌碼集中度%","籌碼集中度評級",
     "融資餘額(張)","融資增減(張)","融券餘額(張)","融資健康度",
     "量比",
     "融券趨勢",
     "最近出現日"
 ]
+
+
+# ═══════════════════════════════════════════════
+# ★ v11.8 族群熱度排行工作表
+# ═══════════════════════════════════════════════
+
+SECTOR_HEAT_DAYS = 5   # 近幾個交易日（交易日剛好一週）
+
+def _last_n_trading_dates(all_dates, n):
+    """從 all_dates（已排序）取最後 n 個交易日"""
+    return set(all_dates[-n:]) if len(all_dates) >= n else set(all_dates)
+
+
+def update_sector_heatmap(ss, date_str, ss_hist_rows=None):
+    """
+    計算近 SECTOR_HEAT_DAYS 個交易日各族群熱度，寫入「族群熱度」工作表。
+    熱度分 = 不同成員數 × 2 + 觸發天數 × 1
+    趨勢：近 3 天 vs 近 5 天每日不同成員數均值比較
+    主力成員：近 5 天買超張數前 3 名
+    ss_hist_rows: 外部傳入歷史紀錄列表（避免重複抓 Sheets），None 時自行抓取。
+    """
+    disp = fmt_date(date_str)
+    ws   = get_or_create(ss, "族群熱度", 7)
+
+    # ── 取得歷史紀錄 ──
+    if ss_hist_rows is None:
+        hist = get_or_create(ss, "歷史紀錄")
+        rows = hist.get_all_values()[1:]
+    else:
+        rows = ss_hist_rows
+
+    if not rows:
+        print("  ⚠️ 歷史紀錄無資料，跳過族群熱度")
+        return
+
+    # ── 取所有交易日清單，找近 5 個 ──
+    all_dates = sorted(set(r[0] for r in rows if r and r[0]))
+    recent_dates  = _last_n_trading_dates(all_dates, SECTOR_HEAT_DAYS)
+    recent3_dates = _last_n_trading_dates(all_dates, 3)
+
+    # ── 建立 {代號: [法人類別, 日期, 張數]} 近期資料 ──
+    # 格式：code_day_map[code][date] = total_net（三法人合計，只算買超）
+    code_day_map = {}   # {code: {date: net}}
+    for row in rows:
+        if len(row) < 8 or not row[2]: continue
+        date, code, net_s, buy_sell = row[0], row[2], row[5], row[7] if len(row) > 7 else "買超"
+        if date not in recent_dates: continue
+        if buy_sell != "買超": continue
+        try:   net = int(str(net_s).replace(",", ""))
+        except: continue
+        code_day_map.setdefault(code, {})
+        code_day_map[code][date] = code_day_map[code].get(date, 0) + net
+
+    # ── 計算各族群熱度 ──
+    results = []
+    for sector, members in SECTOR_MAP.items():
+        if not members: continue
+        member_set = set(members)
+
+        # 各日出現的不同成員數
+        day_members = {}   # {date: set(codes)}
+        for code in member_set:
+            for date in code_day_map.get(code, {}):
+                if date in recent_dates:
+                    day_members.setdefault(date, set()).add(code)
+
+        if not day_members: continue   # 近 5 天完全沒出現
+
+        trigger_days   = len(day_members)
+        unique_members = len(set(c for codes in day_members.values() for c in codes))
+        heat_score     = unique_members * 2 + trigger_days
+
+        # 趨勢：近 3 天 vs 近 5 天每日成員數均值
+        avg5 = sum(len(v) for v in day_members.values()) / SECTOR_HEAT_DAYS
+        avg3_days = {d: v for d, v in day_members.items() if d in recent3_dates}
+        avg3 = sum(len(v) for v in avg3_days.values()) / 3 if avg3_days else 0
+        if avg3 > avg5 * 1.2:   trend = "↗ 升溫"
+        elif avg3 < avg5 * 0.8: trend = "↘ 降溫"
+        else:                   trend = "➡ 持平"
+
+        # 主力成員：近 5 天買超張數前 3 名
+        member_total = {}
+        for code in member_set:
+            total = sum(code_day_map.get(code, {}).values())
+            if total > 0:
+                name = CODE_NAME_MAP.get(code, code)
+                member_total[f"{name}({code})"] = total
+        top3 = sorted(member_total.items(), key=lambda x: x[1], reverse=True)[:3]
+        top3_str = "  ".join(f"{n} {v:,}張" for n, v in top3)
+
+        results.append({
+            "sector":         sector,
+            "trigger_days":   trigger_days,
+            "unique_members": unique_members,
+            "heat_score":     heat_score,
+            "trend":          trend,
+            "top3":           top3_str,
+        })
+
+    # 依熱度分降冪排
+    results.sort(key=lambda x: x["heat_score"], reverse=True)
+
+    # ── 寫入工作表 ──
+    headers = ["族群", f"近{SECTOR_HEAT_DAYS}天觸發天數", "不同成員數", "熱度分", "趨勢", "主力成員（近5天買超）", "統計截至"]
+    data = [
+        [f"族群熱度排行（近 {SECTOR_HEAT_DAYS} 個交易日，統計截至 {disp}）"] + [""] * 6,
+        headers,
+    ]
+    for r in results:
+        data.append([
+            r["sector"],
+            r["trigger_days"],
+            r["unique_members"],
+            r["heat_score"],
+            r["trend"],
+            r["top3"],
+            disp,
+        ])
+
+    ws.clear()
+    if ws.row_count < len(data) + 5:
+        ws.add_rows(len(data) + 5 - ws.row_count)
+    ws.update(range_name="A1", values=data)
+    print(f"  ✅ 族群熱度 更新完成（{len(results)} 個族群有近期活動）")
+
 
 
 def _calc_analysis_rows(ss, date_str, current_prices, current_margin, cache_prices=None, fast_mode=False):
@@ -1411,21 +1537,21 @@ PERFORMANCE_HEADERS = [
 
 def _score_matrix(consec, chip_lbl):
     """
-    連續天數 × 籌碼集中度 矩陣評分（45分）
-    拉大高/中/低集中度之間的差距。
+    連續天數 × 籌碼集中度 矩陣評分（40分）
+    天數越長代表法人持續買進，分數越高。
     """
     if chip_lbl == "🔵 高度集中":
-        if consec <= 3:   return 30
-        elif consec <= 7: return 38
-        else:             return 45
+        if consec <= 3:   return 26
+        elif consec <= 7: return 33
+        else:             return 40
     elif chip_lbl == "🟦 中度集中":
-        if consec <= 3:   return 18
-        elif consec <= 7: return 25
-        else:             return 32
+        if consec <= 3:   return 15
+        elif consec <= 7: return 21
+        else:             return 27
     else:  # 偏低
-        if consec <= 3:   return 5
-        elif consec <= 7: return 9
-        else:             return 13
+        if consec <= 3:   return 4
+        elif consec <= 7: return 7
+        else:             return 10
 
 
 def _score_margin(health):
@@ -1440,17 +1566,76 @@ def _score_risk(risk):
 
 
 def _score_volume_ratio(vr):
-    """量比評分（15分）：今日量 ÷ 近10日均量"""
-    if vr is None or vr == "": return 5   # ★ 無資料給基礎分，不全部歸零
+    """量比評分（7分）：今日量 ÷ 近10日均量"""
+    if vr is None or vr == "": return 2   # ★ 無資料給基礎分，不全部歸零
     try:
         vr = float(vr)
     except (ValueError, TypeError):
-        return 5
-    if vr >= 3.0:   return 15   # 大爆量
-    if vr >= 2.0:   return 12   # 明顯放量
-    if vr >= 1.5:   return 9    # 溫和放量
-    if vr >= 1.0:   return 6    # 正常量
-    return 2                    # 縮量
+        return 2
+    if vr >= 3.0:   return 7    # 大爆量
+    if vr >= 2.0:   return 5    # 明顯放量
+    if vr >= 1.5:   return 4    # 溫和放量
+    if vr >= 1.0:   return 2    # 正常量
+    return 1                    # 縮量
+
+
+def _score_short_trend(short_trend):
+    """
+    融券趨勢評分（-8 ~ +8，中性 0）：
+    融券回補（↘）→ 空頭退場，加分；融券增加（↗）→ 空頭加碼，扣分。
+    最終 score 會在 score_stock 內 clamp 到 [0, 100]。
+    """
+    s = str(short_trend).strip()
+    if not s:
+        return 0
+    # 連減/連增：取天數判斷強度
+    m = re.search(r"連[增減](\d+)天", s)
+    days = int(m.group(1)) if m else 0
+    if "↘" in s:   # 融券減少 → 利多
+        return 8 if days >= 3 else 4
+    if "↗" in s:   # 融券增加 → 利空
+        return -8 if days >= 2 else -4
+    return 0       # 持平或資料不足
+
+
+def _calc_buy_accel(all_entries, all_dates):
+    """
+    計算三法人合計買超「加速度」：最近1日買超 vs 前2日平均的比值。
+    回傳 (ratio, label)：
+      ratio: float（無法計算時 None）
+      label: "🚀 加速" / "📈 溫和加速" / "➡ 持平" / "📉 減速" / ""
+    """
+    if not all_entries or not all_dates:
+        return None, ""
+    # 從 all_entries 組出每日合計買超（只取買超 > 0 的日期）
+    daily = {}
+    for date, net, price in all_entries:
+        daily[date] = daily.get(date, 0) + net
+    # 取最近有買超紀錄的3個交易日（在 all_dates 裡，由新到舊）
+    buy_dates = sorted([d for d in daily if daily[d] > 0], reverse=True)
+    if len(buy_dates) < 2:
+        return None, ""
+    recent   = daily[buy_dates[0]]          # 最近1日
+    prev_avg = sum(daily[d] for d in buy_dates[1:3]) / min(len(buy_dates) - 1, 2)  # 前1~2日均
+    if prev_avg <= 0:
+        return None, ""
+    ratio = round(recent / prev_avg, 2)
+    if ratio >= 1.5:   label = "🚀 加速"
+    elif ratio >= 1.2: label = "📈 溫和加速"
+    elif ratio >= 0.8: label = "➡ 持平"
+    else:              label = "📉 減速"
+    return ratio, label
+
+
+def _score_accel(accel_label):
+    """買超加速度評分（0~3分），輸入 _calc_buy_accel 回傳的 label 字串"""
+    s = str(accel_label).strip()
+    if not s:           return 1   # 資料不足給中性分
+    if "🚀" in s:       return 3
+    if "📈" in s:       return 2
+    if "➡" in s:        return 1
+    if "📉" in s:       return 0
+    return 1
 
 
 def _dealer_label(d_consec):
@@ -1466,9 +1651,9 @@ def score_stock(row):
     輸入 build_row 產出的 row，回傳綜合評分（0~100）。
     row index 對照 ANALYSIS_HEADERS：
       [3]=外資連續, [8]=投信連續, [13]=自營連續
-      [19]=現價, [20]=漲幅%, [21]=出貨風險, [22]=訊號
-      [23]=籌碼集中度%, [24]=籌碼集中度評級
-      [28]=融資健康度, [29]=量比, [30]=融券趨勢, [31]=最近出現日
+      [19]=現價, [20]=當日漲跌%, [21]=漲幅%, [22]=出貨風險, [23]=訊號
+      [24]=買超加速度, [25]=籌碼集中度%, [26]=籌碼集中度評級
+      [29]=融資健康度, [30]=量比, [31]=融券趨勢, [32]=最近出現日
 
     v11.2 過濾邏輯：
       移除「漲幅 ≤2%」門檻（避免錯殺法人剛開始佈局的股票）
@@ -1478,9 +1663,11 @@ def score_stock(row):
     code         = row[0]
     signal       = row[23]
     risk         = row[22]
-    chip_lbl     = row[25]
-    health       = row[28]
-    vr_raw = row[29] if len(row) > 29 else None
+    accel_label  = row[24] if len(row) > 24 else ""
+    chip_lbl     = row[26]
+    health       = row[29]
+    vr_raw = row[30] if len(row) > 30 else None
+    short_trend  = row[31] if len(row) > 31 else ""
     try:
         volume_ratio = float(vr_raw) if (vr_raw is not None and vr_raw != "") else None
     except (ValueError, TypeError):
@@ -1518,12 +1705,14 @@ def score_stock(row):
     if consec == 0: return None
 
     score = (
-        _score_matrix(consec, chip_lbl) +      # 45分
+        _score_matrix(consec, chip_lbl) +      # 40分
         _score_margin(health) +                # 25分
         _score_risk(risk) +                    # 15分
-        _score_volume_ratio(volume_ratio)      # 15分
+        _score_volume_ratio(volume_ratio) +    # 7分
+        _score_accel(accel_label) +            # 3分
+        _score_short_trend(short_trend)        # -8 ~ +8分
     )
-    return min(score, 100)
+    return max(0, min(score, 100))
 
 
 def update_recommendation(ss, date_str, all_rows, cached_futures=""):
@@ -1669,6 +1858,51 @@ def _fmt_close(today_close, base_close):
         return f"－{today_close}"
 
 
+def _archive_performance(ss, expired_rows):
+    """
+    將 T+3 追蹤完畢的推薦成效列搬入「推薦歷史」工作表（永久保留）。
+    - 已存在（同推薦日+代號）的筆不重複寫入
+    - expired_rows：list of list，格式同 PERFORMANCE_HEADERS
+    """
+    if not expired_rows:
+        return
+
+    ws = get_or_create(ss, "推薦歷史", len(PERFORMANCE_HEADERS))
+
+    try:
+        existing = ws.get_all_values()
+    except Exception:
+        existing = []
+
+    # 建立已存在的 (推薦日, 代號) set
+    import re as _re
+    date_pat = _re.compile(r"^\d{4}/\d{2}/\d{2}$")
+    existing_keys = set()
+    for row in existing:
+        if row and date_pat.match(str(row[0]).strip()) and len(row) >= 2:
+            existing_keys.add((row[0].strip(), row[1].strip()))
+
+    new_rows = [
+        r for r in expired_rows
+        if (str(r[0]).strip(), str(r[1]).strip()) not in existing_keys
+    ]
+
+    if not new_rows:
+        print(f"  ℹ️ 推薦歷史：{len(expired_rows)} 筆已存在，無需新增")
+        return
+
+    # 若工作表是空的，先寫標題列
+    if not existing:
+        existing = [PERFORMANCE_HEADERS]
+
+    full = existing + new_rows
+    ws.clear()
+    if ws.row_count < len(full) + 10:
+        ws.add_rows(len(full) + 10 - ws.row_count)
+    ws.update(range_name="A1", values=full)
+    print(f"  ✅ 推薦歷史 新增 {len(new_rows)} 筆（累計 {len(full)-1} 筆）")
+
+
 def update_performance(ss, date_str, current_prices):
     """
     推薦成效追蹤（v10.7 重寫）：
@@ -1769,8 +2003,7 @@ def update_performance(ss, date_str, current_prices):
                     r[col_idx] = _fmt_close(today_close, base_close)
                 break
 
-    # ── 步驟3：移除推薦日距今超過 T+3 的筆 ──
-    # 若推薦日的 T+3 < today，表示已超過，直接清除
+    # ── 步驟3：T+3 已填完的筆搬入「推薦歷史」，再從追蹤清單移除 ──
     from datetime import datetime
     today_dt = datetime.strptime(disp_today, "%Y/%m/%d")
     def _is_expired(rec_disp):
@@ -1780,7 +2013,12 @@ def update_performance(ss, date_str, current_prices):
         except Exception:
             return False
 
-    rows = [r for r in rows if not _is_expired(r[0])]
+    expired = [r for r in rows if _is_expired(r[0])]
+    rows    = [r for r in rows if not _is_expired(r[0])]
+
+    # T+3 填完的筆搬入歷史工作表
+    if expired:
+        _archive_performance(ss, expired)
 
     # ── 步驟4：整表寫回 ──
     header_row = [PERFORMANCE_HEADERS]
@@ -1790,7 +2028,8 @@ def update_performance(ss, date_str, current_prices):
     if ws_perf.row_count < len(full_data) + 10:
         ws_perf.add_rows(len(full_data) + 10 - ws_perf.row_count)
     ws_perf.update(range_name="A1", values=full_data)
-    print(f"  ✅ 推薦成效 更新完成（追蹤中：{len(rows)} 筆）")
+    archived_count = len(expired)
+    print(f"  ✅ 推薦成效 更新完成（追蹤中：{len(rows)} 筆，本次封存：{archived_count} 筆）")
 
 
 # ═══════════════════════════════════════════════
@@ -2553,14 +2792,15 @@ def main():
         ("6", "明日關注推薦",  _run_recommendation),
         ("7", "推薦成效追蹤",  lambda: update_performance(ss, date_str, current_prices)),
         ("8", "融券歷史",      lambda: update_short_history(ss, date_str, current_margin)),
+        ("9", "族群熱度排行",   lambda: update_sector_heatmap(ss, date_str)),
     ]
 
     if args.sheet_only:
         print()
-        print("┌─────────────────────────────────────┐")
-        print("│  選擇要寫入的工作表（可複選）         │")
-        print("│  輸入編號，以逗號分隔，Enter 全選     │")
-        print("├─────────────────────────────────────┤")
+        print("┌──────────────────────────────────────┐")
+        print("│  選擇要寫入的工作表（可複選）          │")
+        print("│  輸入編號，以逗號分隔，Enter 全選      │")
+        print("├──────────────────────────────────────┤")
         for key, name, _ in SHEET_OPTIONS:
             print(f"│  {key}) {name:<30}│")
         print("└─────────────────────────────────────┘")
