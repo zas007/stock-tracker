@@ -16,7 +16,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.7"  # ← 每次 commit 只改這裡
+VERSION = "v11.9"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -458,6 +458,70 @@ def fetch_futures_two_days(date_str):
         delta_str = ""
 
     return net, signal, delta_str
+
+
+# ═══════════════════════════════════════════════
+# ★ v11.9 大盤指數（MI_INDEX）
+# ═══════════════════════════════════════════════
+
+def fetch_market_index(date_str):
+    """
+    從 TWSE MI_INDEX API 抓加權指數當日漲跌幅。
+    回傳 float（如 1.23 或 -0.45），失敗時回傳 None。
+    API 欄位（Y9999）：[0]指數名稱 [1]收盤 [2]漲跌 [3]漲跌幅(%)
+    """
+    url = (f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX"
+           f"?date={date_str}&response=json")
+    text = curl_get(url)
+    if not text or text.startswith("<"):
+        print("  ⚠️ MI_INDEX 無回應")
+        return None
+    try:
+        data = json.loads(text)
+        if data.get("stat") != "OK":
+            print(f"  ⚠️ MI_INDEX stat={data.get('stat')}")
+            return None
+        # tables[8] 是「各類指數」，找「發行量加權股價指數」
+        for table in data.get("tables", []):
+            for row in table.get("data", []):
+                if not row:
+                    continue
+                name = str(row[0]).strip()
+                if "加權股價指數" in name or name == "發行量加權股價指數":
+                    # 漲跌幅欄：去除 % 符號和正負符號後轉 float
+                    pct_raw = str(row[3]).replace("%", "").replace("+", "").replace(",", "").strip()
+                    # 漲跌方向從漲跌欄判斷（含 ▲▼ 或正負）
+                    diff_raw = str(row[2]).strip()
+                    try:
+                        pct = float(pct_raw)
+                        if "▼" in diff_raw or (pct > 0 and "-" in diff_raw):
+                            pct = -abs(pct)
+                        return round(pct, 2)
+                    except ValueError:
+                        continue
+        print("  ⚠️ MI_INDEX 找不到加權指數列")
+        return None
+    except Exception as e:
+        print(f"  ⚠️ MI_INDEX 解析失敗：{e}")
+        return None
+
+
+def calc_relative_strength(change_pct_str, market_pct):
+    """
+    計算個股相對大盤強弱。
+    change_pct_str: 個股當日漲跌幅字串，如 "+2.30%" 或 "-1.20%"
+    market_pct: 大盤漲跌幅 float，如 1.23 或 -0.45
+    回傳字串，如 "+1.07%" / "-0.45%" / ""（無法計算）
+    """
+    if market_pct is None:
+        return ""
+    try:
+        stock_pct = float(str(change_pct_str).replace("%", "").replace("+", "").strip())
+    except (ValueError, TypeError):
+        return ""
+    diff = round(stock_pct - market_pct, 2)
+    sign = "+" if diff >= 0 else ""
+    return f"{sign}{diff}%"
 
 
 # ═══════════════════════════════════════════════
@@ -1163,11 +1227,12 @@ def _consecutive_days(entries, code, all_dates, net_by_date):
 
 
 def build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net_by_date,
-              short_hist=None):
+              short_hist=None, market_pct=None):
     """
     ★ 優化：從 inner function 獨立為模組層函式。
     建立對照分析 / 每日快照 的單列資料。
     ★ v11.6：新增 short_hist 參數，輸出融券趨勢欄。
+    ★ v11.9：新增 market_pct 參數，輸出相對強弱欄。
     """
     code = s["code"]
 
@@ -1215,6 +1280,9 @@ def build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net
     # ★ v11.6 融券趨勢
     _, _, short_trend = calc_short_trend(short_hist or {}, code)
 
+    # ★ v11.9 大盤相對強弱
+    relative_strength = calc_relative_strength(change_pct, market_pct)
+
     return [
         code, s["name"],
         f_total, f_consec, f_net, f_wavg or "", f_trend,
@@ -1226,6 +1294,7 @@ def build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net
         mb or "", mc if (mb or mc) else "", sb or "", margin_health,
         volume_ratio,
         short_trend,
+        relative_strength,
         s["last"]
     ]
 
@@ -1240,7 +1309,8 @@ ANALYSIS_HEADERS = [
     "融資餘額(張)","融資增減(張)","融券餘額(張)","融資健康度",
     "量比",
     "融券趨勢",
-    "最近出現日"
+    "相對強弱%",   # ★ v11.9 [32]
+    "最近出現日"   # [33]
 ]
 
 
@@ -1446,9 +1516,18 @@ def _calc_analysis_rows(ss, date_str, current_prices, current_margin, cache_pric
     # ★ v11.6 載入融券歷史，供 build_row 計算趨勢
     short_hist = load_short_history(ss, date_str)
 
+    # ★ v11.9 抓大盤漲跌幅，供 build_row 計算相對強弱
+    print("  📡 抓取大盤指數...")
+    market_pct = fetch_market_index(date_str)
+    if market_pct is not None:
+        sign = "+" if market_pct >= 0 else ""
+        print(f"  加權指數：{sign}{market_pct}%")
+    else:
+        print("  ⚠️ 大盤指數取得失敗，相對強弱欄留空")
+
     all_rows = [
         build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net_by_date,
-                  short_hist=short_hist)
+                  short_hist=short_hist, market_pct=market_pct)
         for s in buy_map.values()
     ]
 
@@ -1653,7 +1732,8 @@ def score_stock(row):
       [3]=外資連續, [8]=投信連續, [13]=自營連續
       [19]=現價, [20]=當日漲跌%, [21]=漲幅%, [22]=出貨風險, [23]=訊號
       [24]=買超加速度, [25]=籌碼集中度%, [26]=籌碼集中度評級
-      [29]=融資健康度, [30]=量比, [31]=融券趨勢, [32]=最近出現日
+      [29]=融資健康度, [30]=量比, [31]=融券趨勢
+      [32]=相對強弱%（v11.9）, [33]=最近出現日
 
     v11.2 過濾邏輯：
       移除「漲幅 ≤2%」門檻（避免錯殺法人剛開始佈局的股票）

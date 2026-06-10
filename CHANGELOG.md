@@ -5,7 +5,21 @@ Google Sheets ID：`1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g`
 
 ---
 
-## v11.7 — 2026/06/08
+## v11.9 — 2026/06/10
+
+### 新增
+
+- **大盤相對強弱欄位（對照分析）**
+  * 新增 `fetch_market_index(date_str)`：打 TWSE MI_INDEX API 抓加權指數當日漲跌幅，回傳 float，失敗回傳 None
+  * 新增 `calc_relative_strength(change_pct_str, market_pct)`：計算個股漲跌幅 - 大盤漲跌幅，正值表示獨強，負值表示跟跌，回傳字串如 `"+1.07%"`
+  * `build_row` 新增 `market_pct` 參數，return 列插入「相對強弱%」欄
+  * `ANALYSIS_HEADERS` 新增「相對強弱%」欄（索引 [32]，最近出現日移至 [33]）
+  * `_calc_analysis_rows` 計算前先呼叫 `fetch_market_index`，傳入所有 `build_row`
+  * market_pct 不存快取（每次動態抓，1 次 API）；API 失敗時欄位留空，不影響其他欄位
+
+---
+
+## v11.8 — 2026/06/09
 
 ### 修正
 
