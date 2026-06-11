@@ -16,7 +16,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.9"  # ← 每次 commit 只改這裡
+VERSION = "v11.10"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -2524,7 +2524,7 @@ def load_cache(ss, date_str):
             print("  ⚠️ 快取格式無法辨識")
             return None
 
-        print(f"  📋 {cached_date} 快取讀取成功")
+        print(f"  📋 {cached_date} 快取讀取完成")
         return (cached_date, foreign, trust, dealer, f_sell, t_sell, d_sell,
                 current_prices, current_margin, futures_signal)
     except gspread.exceptions.WorksheetNotFound:
@@ -2731,8 +2731,10 @@ def main():
                                 "margin_balance","margin_change","short_balance"):
                         if key in cached:
                             stock[key] = cached[key]
-            print("  ✅ 快取命中，跳過 Step 2/3 API 抓取")
+            print("  ✅ 快取命中（日期吻合），跳過 Step 2/3 API 抓取")
         else:
+            if _cache_result and _cache_result[0] != date_str:
+                print(f"  ⚠️ 快取日期不符（{_cache_result[0]} ≠ {date_str}），重新抓取")
             _cached_futures = ""   # ★ v11.6 完整執行時由 update_recommendation 填入並存快取
             # Step 2: 抓個股價格
             print(f"\n💹 Step 2/5 抓取個股價格與成交量...")
