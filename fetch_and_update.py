@@ -16,7 +16,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.10"  # ← 每次 commit 只改這裡
+VERSION = "v11.14"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -466,44 +466,178 @@ def fetch_futures_two_days(date_str):
 
 def fetch_market_index(date_str):
     """
-    從 TWSE MI_INDEX API 抓加權指數當日漲跌幅。
+    從 TWSE 抓加權指數當日漲跌幅。
+    ★ v11.14 重寫：
+      1. MI_INDEX（tables 有資料時優先用）
+      2. Fallback：FMTQIK（每月指數統計，取當日收盤與前日比較）
     回傳 float（如 1.23 或 -0.45），失敗時回傳 None。
-    API 欄位（Y9999）：[0]指數名稱 [1]收盤 [2]漲跌 [3]漲跌幅(%)
     """
+    # ── 方法一：MI_INDEX ──
     url = (f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX"
            f"?date={date_str}&response=json")
     text = curl_get(url)
-    if not text or text.startswith("<"):
-        print("  ⚠️ MI_INDEX 無回應")
-        return None
-    try:
-        data = json.loads(text)
-        if data.get("stat") != "OK":
-            print(f"  ⚠️ MI_INDEX stat={data.get('stat')}")
-            return None
-        # tables[8] 是「各類指數」，找「發行量加權股價指數」
-        for table in data.get("tables", []):
-            for row in table.get("data", []):
-                if not row:
-                    continue
-                name = str(row[0]).strip()
-                if "加權股價指數" in name or name == "發行量加權股價指數":
-                    # 漲跌幅欄：去除 % 符號和正負符號後轉 float
-                    pct_raw = str(row[3]).replace("%", "").replace("+", "").replace(",", "").strip()
-                    # 漲跌方向從漲跌欄判斷（含 ▲▼ 或正負）
-                    diff_raw = str(row[2]).strip()
+    if text and not text.startswith("<"):
+        try:
+            data = json.loads(text)
+            if data.get("stat") == "OK":
+                tables = data.get("tables", [])
+                for table in tables:
+                    rows = table.get("data") or table.get("aaData") or []
+                    for row in rows:
+                        if not row:
+                            continue
+                        name = str(row[0]).strip()
+                        if "加權" not in name or "不含金融" in name or "電子" in name:
+                            continue
+                        for col in range(2, min(6, len(row))):
+                            pct_raw = str(row[col]).replace("%","").replace("+","").replace(",","").strip()
+                            try:
+                                pct = float(pct_raw)
+                                if abs(pct) > 20:   # 漲跌幅不可能超過 20%，過濾成交金額等大數字
+                                    continue
+                                diff_raw = str(row[col-1]).strip() if col > 0 else ""
+                                if "▼" in diff_raw or (pct > 0 and diff_raw.startswith("-")):
+                                    pct = -abs(pct)
+                                print(f"  加權指數（MI_INDEX）：{'+'if pct>=0 else ''}{pct}%")
+                                return round(pct, 2)
+                            except ValueError:
+                                continue
+        except Exception:
+            pass
+
+    # ── 方法二：FMTQIK（月指數統計，算當日 vs 前日漲跌幅）──
+    url2 = (f"https://www.twse.com.tw/rwd/zh/afterTrading/FMTQIK"
+            f"?date={date_str}&response=json")
+    text2 = curl_get(url2)
+    if text2 and not text2.startswith("<"):
+        try:
+            data2 = json.loads(text2)
+            if data2.get("stat") == "OK":
+                rows2 = data2.get("data") or data2.get("aaData") or []
+                year  = int(date_str[:4]) - 1911
+                target = f"{year}/{date_str[4:6]}/{date_str[6:]}"
+                closes = {}
+                for row in rows2:
+                    d = str(row[0]).strip()
                     try:
-                        pct = float(pct_raw)
-                        if "▼" in diff_raw or (pct > 0 and "-" in diff_raw):
-                            pct = -abs(pct)
-                        return round(pct, 2)
-                    except ValueError:
-                        continue
-        print("  ⚠️ MI_INDEX 找不到加權指數列")
-        return None
-    except Exception as e:
-        print(f"  ⚠️ MI_INDEX 解析失敗：{e}")
-        return None
+                        closes[d] = float(str(row[4]).replace(",", ""))  # [4]=加權指數收盤
+                    except Exception:
+                        pass
+                if target in closes:
+                    dates_sorted = sorted(closes.keys())
+                    idx = dates_sorted.index(target)
+                    if idx > 0:
+                        prev = dates_sorted[idx - 1]
+                        pct = round((closes[target] - closes[prev]) / closes[prev] * 100, 2)
+                        print(f"  加權指數（FMTQIK）：{'+'if pct>=0 else ''}{pct}%")
+                        return pct
+        except Exception:
+            pass
+
+    print("  ⚠️ 大盤指數取得失敗，相對強弱欄留空")
+    return None
+
+
+def _fetch_stock_day_rows(code, date_str):
+    """
+    抓個股月歷史資料，回傳 (rows, is_otc) tuple。
+    先嘗試 TWSE STOCK_DAY；失敗或無資料時改試 TPEX。
+    rows 格式：[日期, *, *, *, *, *, 收盤價, ...]
+      TWSE: row[0]=民國日期 "115/06/10"，row[6]=收盤
+      TPEX: row[0]=民國日期 "115/06/10"，row[2]=收盤
+    回傳 (rows, source)：source = "twse" | "tpex" | None
+    """
+    # ── TWSE ──
+    url = (f"https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY"
+           f"?date={date_str}&stockNo={code}&response=json")
+    text = curl_get(url)
+    if text and not text.startswith("<"):
+        try:
+            data = json.loads(text)
+            if data.get("stat") == "OK" and data.get("data"):
+                return data["data"], "twse"
+        except Exception:
+            pass
+
+    # ── TPEX fallback ──
+    year = int(date_str[:4]) - 1911
+    ym   = f"{year}/{date_str[4:6]}"
+    url2 = (f"https://www.tpex.org.tw/web/stock/aftertrading/daily_trading_info"
+            f"/st43_result.php?d={ym}&s={code}_ASC&o=json")
+    text2 = curl_get(url2)
+    if text2 and not text2.startswith("<"):
+        try:
+            data2 = json.loads(text2)
+            rows2 = data2.get("aaData") or data2.get("data") or []
+            if rows2:
+                return rows2, "tpex"
+        except Exception:
+            pass
+
+    return [], None
+
+
+def fetch_ma5(code, date_str):
+    """
+    ★ v11.11 取得個股5日均線並判斷是否突破。
+    ★ v11.12 修正：補上 TPEX 上櫃路徑，月初自動補抓上個月。
+    回傳 (close, ma5, label)：
+      label = "⬆ 突破5日線" / "➡ 站穩5日線" / "⬇ 跌破5日線" / ""（資料不足）
+    """
+    try:
+        year   = int(date_str[:4]) - 1911
+        target = f"{year}/{date_str[4:6]}/{date_str[6:]}"
+        rows, source = _fetch_stock_day_rows(code, date_str)
+        if not rows:
+            return None, None, ""
+
+        # 收盤欄位：TWSE=row[6]，TPEX=row[2]
+        close_idx = 2 if source == "tpex" else 6
+
+        # 找目標日 index
+        target_idx = None
+        for idx, row in enumerate(rows):
+            if row[0].strip() == target:
+                target_idx = idx
+                break
+        if target_idx is None:
+            return None, None, ""
+
+        # 月初資料不足 → 補抓上個月
+        start  = max(0, target_idx - 5)
+        window = rows[start: target_idx + 1]
+        if target_idx < 5:
+            d = datetime.strptime(date_str, "%Y%m%d").replace(day=1) - timedelta(days=1)
+            prev_rows, _ = _fetch_stock_day_rows(code, d.strftime("%Y%m%d"))
+            need       = 5 - target_idx
+            supplement = prev_rows[-need:] if len(prev_rows) >= need else prev_rows
+            window     = supplement + window
+
+        closes = []
+        for row in window:
+            try:
+                closes.append(float(str(row[close_idx]).replace(",", "")))
+            except Exception:
+                closes.append(None)
+        closes = [c for c in closes if c is not None]
+        if len(closes) < 5:
+            return None, None, ""
+
+        today_close = closes[-1]
+        ma5 = round(sum(closes[-5:]) / 5, 2)
+
+        if today_close >= ma5:
+            if len(closes) >= 6:
+                prev_close = closes[-2]
+                prev_ma5   = round(sum(closes[-6:-1]) / 5, 2)
+                label = "⬆ 突破5日線" if prev_close < prev_ma5 else "➡ 站穩5日線"
+            else:
+                label = "➡ 站穩5日線"
+        else:
+            label = "⬇ 跌破5日線"
+        return today_close, ma5, label
+    except Exception:
+        return None, None, ""
 
 
 def calc_relative_strength(change_pct_str, market_pct):
@@ -1227,12 +1361,13 @@ def _consecutive_days(entries, code, all_dates, net_by_date):
 
 
 def build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net_by_date,
-              short_hist=None, market_pct=None):
+              short_hist=None, market_pct=None, ma5_map=None):
     """
     ★ 優化：從 inner function 獨立為模組層函式。
     建立對照分析 / 每日快照 的單列資料。
     ★ v11.6：新增 short_hist 參數，輸出融券趨勢欄。
     ★ v11.9：新增 market_pct 參數，輸出相對強弱欄。
+    ★ v11.11：新增 ma5_map 參數，輸出5日線欄。
     """
     code = s["code"]
 
@@ -1283,6 +1418,9 @@ def build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net
     # ★ v11.9 大盤相對強弱
     relative_strength = calc_relative_strength(change_pct, market_pct)
 
+    # ★ v11.11 5日均線突破標記
+    ma5_label = (ma5_map or {}).get(code, ("", "", ""))[2] if ma5_map else ""
+
     return [
         code, s["name"],
         f_total, f_consec, f_net, f_wavg or "", f_trend,
@@ -1294,6 +1432,7 @@ def build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net
         mb or "", mc if (mb or mc) else "", sb or "", margin_health,
         volume_ratio,
         short_trend,
+        ma5_label,        # ★ v11.11 [32]
         relative_strength,
         s["last"]
     ]
@@ -1309,8 +1448,9 @@ ANALYSIS_HEADERS = [
     "融資餘額(張)","融資增減(張)","融券餘額(張)","融資健康度",
     "量比",
     "融券趨勢",
-    "相對強弱%",   # ★ v11.9 [32]
-    "最近出現日"   # [33]
+    "5日線",       # ★ v11.11 [32]
+    "相對強弱%",   # ★ v11.9  [33]
+    "最近出現日"   # [34]
 ]
 
 
@@ -1525,9 +1665,25 @@ def _calc_analysis_rows(ss, date_str, current_prices, current_margin, cache_pric
     else:
         print("  ⚠️ 大盤指數取得失敗，相對強弱欄留空")
 
+    # ★ v11.11 抓5日均線（對 buy_map 所有代號，逐支打 STOCK_DAY）
+    ma5_map = {}
+    if not fast_mode:
+        _ma5_codes = list(buy_map.keys())
+        print(f"  📡 抓取5日均線（{len(_ma5_codes)} 支）...")
+        for i, code in enumerate(_ma5_codes):
+            c, m, lbl = fetch_ma5(code, date_str)
+            if lbl:
+                ma5_map[code] = (c, m, lbl)
+            if i < len(_ma5_codes) - 1:
+                time.sleep(0.3)
+        _hit = sum(1 for v in ma5_map.values() if v[2])
+        print(f"  ✅ 5日線計算完成（{_hit}/{len(_ma5_codes)} 支有效）")
+    else:
+        print("  ℹ️ fast_mode：跳過5日均線抓取")
+
     all_rows = [
         build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net_by_date,
-                  short_hist=short_hist, market_pct=market_pct)
+                  short_hist=short_hist, market_pct=market_pct, ma5_map=ma5_map)
         for s in buy_map.values()
     ]
 
@@ -1733,7 +1889,7 @@ def score_stock(row):
       [19]=現價, [20]=當日漲跌%, [21]=漲幅%, [22]=出貨風險, [23]=訊號
       [24]=買超加速度, [25]=籌碼集中度%, [26]=籌碼集中度評級
       [29]=融資健康度, [30]=量比, [31]=融券趨勢
-      [32]=相對強弱%（v11.9）, [33]=最近出現日
+      [32]=5日線（v11.11）, [33]=相對強弱%, [34]=最近出現日
 
     v11.2 過濾邏輯：
       移除「漲幅 ≤2%」門檻（避免錯殺法人剛開始佈局的股票）

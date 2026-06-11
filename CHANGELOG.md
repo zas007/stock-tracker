@@ -5,6 +5,65 @@ Google Sheets ID：`1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g`
 
 ---
 
+## v11.14 — 2026/06/11
+
+### 修正
+
+- **`fetch_market_index` tables 全空問題**
+  * MI_INDEX 在盤中（16:30 前）回傳空 tables，非 API 格式問題
+  * 新增 fallback：改抓 FMTQIK（月指數統計），取當日與前日收盤計算漲跌幅
+  * MI_INDEX 欄位掃描改為動態找漲跌幅欄（過濾 >20% 的大數字避免誤判成交金額）
+
+---
+
+## v11.13 — 2026/06/11
+
+### 修正
+
+- **`fetch_market_index` aaData key 遺漏**
+  * MI_INDEX 部分 table 用 `aaData` 而非 `data` 存資料，改為 `table.get("data") or table.get("aaData")`
+  * debug 輸出升級：同時印出 `fields` 和前 2 列內容，方便下次確認
+
+- **`fetch_ma5` 上櫃股票命中率低**
+  * `_fetch_stock_day_rows` 改為先打 TWSE，失敗或無資料時自動 fallback 到 TPEX `st43_result.php`
+  * TPEX 收盤欄位在 `row[2]`（TWSE 為 `row[6]`），依 source 自動切換
+  * 預期命中率從 ~21% 大幅提升
+
+---
+
+## v11.12 — 2026/06/11
+
+### 修正
+
+- **`fetch_ma5` 月初命中率低**
+  * 當月交易日 < 5 筆時（月初），自動補抓上個月資料補足窗口
+  * 抽出 `_fetch_stock_day_rows(code, date_str)` 共用，避免重複解析邏輯
+  * 預期命中率從 ~17% 提升至 ~95%+
+
+- **`fetch_market_index` 找不到加權指數列**
+  * 放寬搜尋：由「加權股價指數」精確比對改為「加權」關鍵字，排除「不含金融」「電子」子指數
+  * 欄位自適應：漲跌幅欄先嘗試 `[3]`，失敗再試 `[4]`（應對 API 不同 table 格式）
+  * 找不到時印出各 table 第一列名稱，方便未來 debug
+
+---
+
+## v11.11 — 2026/06/11
+
+### 新增
+
+- **5日線標記（對照分析）**
+  * 新增 `fetch_ma5(code, date_str)`：打 STOCK_DAY API（單支月資料），取最近 6 筆收盤計算 MA5，判斷突破 / 站穩 / 跌破
+  * 回傳 `(close, ma5, label)`：
+    - `⬆ 突破5日線`：今收 >= MA5 且前日收 < 前日MA5（首次站上）
+    - `➡ 站穩5日線`：今收 >= MA5 且前日也在 MA5 之上
+    - `⬇ 跌破5日線`：今收 < MA5
+    - `""`：資料不足（歷史筆數 < 5）
+  * `ANALYSIS_HEADERS` 新增「5日線」欄（索引 [32]）；「相對強弱%」移至 [33]，「最近出現日」移至 [34]
+  * `build_row` 新增 `ma5_map` 參數，讀入對應代號的 label 寫入回傳列
+  * `_calc_analysis_rows` 計算前對 `buy_map` 所有代號逐支抓取（sleep 0.3s 控流），`fast_mode` 時跳過
+
+---
+
 ## v11.10 — 2026/06/10
 
 ### 修正
@@ -31,11 +90,7 @@ Google Sheets ID：`1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g`
 
 ---
 
-## v11.8 — 2026/06/09
-
-### 修正
-
-- **ETF 過濾漏洞（`auto_update_sector_map` / `unknown_codes`）**
+## v11.7 — 2026/06/09
   * 舊邏輯：只過濾「含字母或長度 > 4」，`0052` 等 4 碼 `00` 開頭的 ETF 會被補入族群表
   * 新邏輯：兩處都改用 `is_etf_code(code)` 判斷，涵蓋含字母、`00` 開頭、長度 > 4 三種情況
   * 影響：`auto_update_sector_map`、`update_sector_sheet` 的 `unknown_codes`
