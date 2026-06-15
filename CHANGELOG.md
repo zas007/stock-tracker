@@ -5,6 +5,37 @@ Google Sheets ID：`1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g`
 
 ---
 
+## v11.16 — 2026/06/15
+
+### 修正
+
+- **集保 API 改版（`fetch_tdcc_data` 整個重寫）**
+  * 舊端點 `/portal/smWeb/qryStockAjax?REQ_OPR=qryStockNo` 已改版，回傳 `{"query":null,"suggestions":[]}` 而非股東結構資料
+  * 舊備用端點 `/smWeb/QryStockAjax.do` 已 404
+  * 改用 opendata CSV 批次下載：`https://opendata.tdcc.com.tw/getOD.ashx?id=1-5`（全市場，每週五更新）
+  * CSV 欄位：資料日期 / 證券代號 / 持股分級(1~15) / 人數 / 股數 / 占集保庫存數比例%
+  * 大戶定義：持股分級 ≥ 13（持股 50 張以上）
+  * 一次請求取得全市場資料，命中率大幅提升（實測 460/460）
+
+- **`fetch_tdcc_if_needed` 簡化**
+  * 舊：先 probe 一支股票試日期，再決定是否全量抓取（兩次請求）
+  * 新：直接下載 CSV 比對日期，`weekly_chg` 改由程式計算（新 big_pct - 快取舊 big_pct）
+
+### 效能
+
+- **5日均線改批次抓取（`fetch_ma5_batch`）**
+  * 舊：367 支逐支打 STOCK_DAY API + sleep（耗時數分鐘）
+  * 新：新增 `fetch_ma5_batch(codes, date_str)`，抓近 9 個交易日的 STOCK_DAY_ALL（上市）+ OTC 批次行情，一次組出全部收盤序列
+  * 請求次數：367 次 → 約 5~10 次，速度大幅提升
+  * 月初 edge case：自動往前多抓一個月的資料確保 5 日窗口完整
+  * 原 `fetch_ma5`（逐支版）保留備用，不刪除
+
+### 待驗證
+
+- `fetch_ma5_batch` 命中率是否與舊版相當（預期 ≥ 174/367）
+
+---
+
 ## v11.15 — 2026/06/12
 
 ### 新增

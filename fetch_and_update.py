@@ -16,7 +16,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.15"  # ← 每次 commit 只改這裡
+VERSION = "v11.16"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -466,45 +466,70 @@ def fetch_futures_two_days(date_str):
 
 def fetch_tdcc_data(codes):
     """
-    逐支抓集保股東結構（大戶持股%、週變化）。
-    API：https://www.tdcc.com.tw/portal/smWeb/qryStockAjax?REQ_OPR=qryStockNo
+    批次下載集保股東結構（大戶持股%）。
+    來源：opendata.tdcc.com.tw/getOD.ashx?id=1-5（全市場 CSV，每週五更新）
+    CSV 欄位：資料日期, 證券代號, 持股分級(1~15), 人數, 股數, 占集保庫存數比例%
+    大戶定義：持股分級 >= 13（持股 50,000 股 / 50 張以上）
+    weekly_chg：與快取舊值比較（呼叫端計算），此函式回傳 weekly_chg=0.0 佔位。
     回傳 dict：{code: (big_pct: float, weekly_chg: float, tdcc_date: str)}
-    無法取得的股票不會出現在 dict 裡。
     """
-    result = {}
-    for code in codes:
-        try:
-            url = "https://www.tdcc.com.tw/portal/smWeb/qryStockAjax?REQ_OPR=qryStockNo"
-            payload = (
-                f"SCA_DATE=&SqlMethod=StockNo&StockNo={code}"
-                f"&StockName=&REQ_BASE_DATE=&REQ_TYPE="
-            )
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Referer": "https://www.tdcc.com.tw/portal/zh/smWeb/qryStock",
-                "Origin": "https://www.tdcc.com.tw",
-            }
-            import urllib.request
-            req = urllib.request.Request(url, data=payload.encode(), headers=headers)
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                raw = resp.read().decode("utf-8")
-            data = json.loads(raw)
-            tdcc_date = data.get("date", "")
-            rows = data.get("list", [])
-            if not rows or not tdcc_date:
-                continue
-            total_shares = sum(int(r.get("shareCount", 0)) for r in rows)
-            big_shares   = sum(int(r.get("shareCount", 0)) for r in rows
-                               if int(r.get("stdNo", "0").replace(",","")) >= 1000)
-            if total_shares <= 0:
-                continue
-            big_pct    = round(big_shares / total_shares * 100, 2)
-            weekly_chg = float(data.get("weeklyChg", 0) or 0)
-            result[code] = (big_pct, weekly_chg, tdcc_date)
-            time.sleep(0.3)
-        except Exception:
+    import urllib.request
+    import csv
+    import io
+
+    url = "https://opendata.tdcc.com.tw/getOD.ashx?id=1-5"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        "Referer": "https://www.tdcc.com.tw/portal/zh/smWeb/qryStock",
+    }
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode("utf-8-sig")  # 處理 BOM
+    except Exception as e:
+        print(f"  ⚠️ 集保 CSV 下載失敗：{e}")
+        return {}
+
+    # 解析 CSV：{code: {level: shares}}
+    stock_shares = {}   # {code: {level(int): shares(int)}}
+    tdcc_date = ""
+    reader = csv.reader(io.StringIO(raw))
+    next(reader, None)  # 跳過 header
+    for row in reader:
+        if len(row) < 6:
             continue
+        date_str, code, level_str, _, shares_str, _ = row[0], row[1], row[2], row[3], row[4], row[5]
+        code = code.strip()
+        if not tdcc_date and date_str.strip():
+            tdcc_date = date_str.strip()
+        try:
+            level = int(level_str.strip())
+            shares = int(shares_str.strip().replace(",", ""))
+        except ValueError:
+            continue
+        if code not in stock_shares:
+            stock_shares[code] = {}
+        stock_shares[code][level] = shares
+
+    if not tdcc_date:
+        print("  ⚠️ 集保 CSV 解析失敗（無日期）")
+        return {}
+
+    # 計算大戶% (分級 >= 13 = 持股 50 張以上)
+    BIG_LEVEL = 13
+    code_set = set(codes)
+    result = {}
+    for code, level_map in stock_shares.items():
+        if code not in code_set:
+            continue
+        total = sum(level_map.values())
+        if total <= 0:
+            continue
+        big = sum(v for k, v in level_map.items() if k >= BIG_LEVEL)
+        big_pct = round(big / total * 100, 2)
+        result[code] = (big_pct, 0.0, tdcc_date)  # weekly_chg 由 fetch_tdcc_if_needed 補算
+
+    print(f"  📊 集保 CSV 解析完成（日期：{tdcc_date}，命中 {len(result)}/{len(codes)} 支）")
     return result
 
 
@@ -553,33 +578,37 @@ def update_tdcc_cache(ss, codes, new_data):
 
 def fetch_tdcc_if_needed(ss, codes):
     """
-    比對快取最新集保日期，有新資料才打 API。
+    比對快取最新集保日期，有新資料才下載 CSV。
+    weekly_chg 由本函式計算（新 big_pct - 快取舊 big_pct）。
     回傳 dict：{code: (big_pct, weekly_chg, tdcc_date)}（含快取舊值）
     """
     existing = load_tdcc_cache(ss)
     cached_dates = [v[2] for v in existing.values() if v[2]]
     latest_cached = max(cached_dates) if cached_dates else ""
 
-    probe_codes = [c for c in codes if c in existing][:1] or list(codes)[:1]
-    latest_tdcc = ""
-    if probe_codes:
-        probe = fetch_tdcc_data(list(probe_codes)[:1])
-        if probe:
-            latest_tdcc = list(probe.values())[0][2]
+    # 直接下載 CSV 取得最新日期（CSV 本身很輕，不需要 probe）
+    new_data = fetch_tdcc_data(codes)
 
-    if latest_tdcc and latest_tdcc == latest_cached:
+    if not new_data:
+        print(f"  ℹ️ 集保 CSV 無法取得，使用快取")
+        return existing
+
+    latest_tdcc = list(new_data.values())[0][2]
+
+    if latest_tdcc == latest_cached:
         print(f"  ℹ️ 集保日期未更新（{latest_cached}），使用快取")
         return existing
 
-    if latest_tdcc:
-        print(f"  📡 集保有新資料（{latest_tdcc}），開始抓取 {len(codes)} 支...")
-        new_data = fetch_tdcc_data(codes)
-        new_data.update(probe)
-        merged = update_tdcc_cache(ss, codes, new_data)
-        return merged
-    else:
-        print(f"  ℹ️ 集保 API 無回應，使用快取")
-        return existing
+    # 補算 weekly_chg：新 big_pct - 快取舊 big_pct
+    for code in new_data:
+        new_pct, _, date = new_data[code]
+        old_pct = existing[code][0] if code in existing else new_pct
+        weekly_chg = round(new_pct - old_pct, 2)
+        new_data[code] = (new_pct, weekly_chg, date)
+
+    print(f"  📡 集保有新資料（{latest_tdcc}），更新快取...")
+    merged = update_tdcc_cache(ss, codes, new_data)
+    return merged
 
 
 # ═══════════════════════════════════════════════
@@ -697,6 +726,134 @@ def _fetch_stock_day_rows(code, date_str):
             pass
 
     return [], None
+
+
+def fetch_ma5_batch(codes, date_str):
+    """
+    ★ v11.16 批次計算所有股票的5日均線，取代逐支打 STOCK_DAY。
+    策略：抓過去 N 個交易日的 STOCK_DAY_ALL（上市）+ OTC（上櫃），
+          組成每支股票的收盤序列，一次計算全部 ma5。
+    回傳 dict：{code: (close, ma5, label)}
+    label = \"⬆ 突破5日線\" / \"➡ 站穩5日線\" / \"⬇ 跌破5日線\" / \"\"（資料不足）
+    """
+    import calendar
+
+    def _prev_trading_dates(base_date_str, n=8):
+        """往前推 n 個日曆日，取出有效交易日（去除六日），回傳 date_str list（含 base）"""
+        base = datetime.strptime(base_date_str, "%Y%m%d")
+        dates = []
+        cur = base
+        while len(dates) < n:
+            if cur.weekday() < 5:  # 非週六日
+                dates.append(cur.strftime("%Y%m%d"))
+            cur -= timedelta(days=1)
+        return list(reversed(dates))  # 舊 → 新
+
+    # 需要哪幾個月的資料（可能跨月）
+    trading_days = _prev_trading_dates(date_str, n=9)  # 取 9 個交易日確保夠用
+    months_needed = sorted(set(d[:6] for d in trading_days))  # e.g. ["202605", "202606"]
+
+    # 抓每個月的 STOCK_DAY_ALL（上市）
+    twse_by_date = {}  # {date_str: {code: close}}
+    for ym in months_needed:
+        # 抓該月最後一個交易日（帶 date 參數會回傳該月資料）
+        last_day = f"{ym}28"  # 任意該月日期即可（API 回傳整月）
+        url = f"https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY_ALL?date={last_day}&response=json"
+        print(f"  [ma5-batch] TWSE {ym}...")
+        text = curl_get(url)
+        if not text or text.startswith("<"):
+            continue
+        try:
+            data = json.loads(text)
+        except Exception:
+            continue
+        # STOCK_DAY_ALL with date returns stat="OK" but data is empty historically
+        # Use without date for current month, with date for previous month
+        if data.get("stat") != "OK" or not data.get("data"):
+            # 嘗試不帶 date（只適用今天/當月）
+            if ym == date_str[:6]:
+                url2 = "https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY_ALL?response=json"
+                text2 = curl_get(url2)
+                try:
+                    data = json.loads(text2) if text2 else {}
+                except Exception:
+                    data = {}
+            if data.get("stat") != "OK" or not data.get("data"):
+                continue
+
+        # 這個 API 回傳的是當日全市場，不是月資料
+        # date 欄位在 data["date"]
+        api_date = str(data.get("date", ""))
+        if api_date and api_date in trading_days:
+            close_map = {}
+            for row in data.get("data", []):
+                try:
+                    code = str(row[0]).strip()
+                    close = float(str(row[7]).replace(",", ""))
+                    close_map[code] = close
+                except Exception:
+                    continue
+            twse_by_date[api_date] = close_map
+            print(f"  [ma5-batch] TWSE {api_date} → {len(close_map)} 支")
+
+    # 抓每個月的 OTC（上櫃）
+    otc_by_date = {}  # {date_str: {code: close}}
+    for d in trading_days:
+        year = int(d[:4]) - 1911
+        d_fmt = f"{year}/{d[4:6]}/{d[6:]}"
+        url = (f"https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes"
+               f"/stk_quote_result.php?d={d_fmt}&output=json")
+        text = curl_get(url)
+        if not text or text.startswith("<") or text.startswith("Host"):
+            continue
+        try:
+            data = json.loads(text)
+            rows = data["tables"][0].get("data", data["tables"][0].get("aaData", []))
+            close_map = {}
+            for row in rows:
+                try:
+                    code = str(row[0]).strip()
+                    close = float(str(row[2]).replace(",", ""))
+                    close_map[code] = close
+                except Exception:
+                    continue
+            if close_map:
+                otc_by_date[d] = close_map
+        except Exception:
+            continue
+    if otc_by_date:
+        print(f"  [ma5-batch] OTC {len(otc_by_date)} 天資料")
+
+    # 組合每支股票的收盤序列，計算 ma5
+    code_set = set(codes)
+    result = {}
+    for code in code_set:
+        closes = []
+        for d in trading_days:
+            close = None
+            if d in twse_by_date and code in twse_by_date[d]:
+                close = twse_by_date[d][code]
+            elif d in otc_by_date and code in otc_by_date[d]:
+                close = otc_by_date[d][code]
+            if close is not None:
+                closes.append(close)
+
+        if len(closes) < 5:
+            continue
+        today_close = closes[-1]
+        ma5 = round(sum(closes[-5:]) / 5, 2)
+        if today_close >= ma5:
+            if len(closes) >= 6:
+                prev_close = closes[-2]
+                prev_ma5 = round(sum(closes[-6:-1]) / 5, 2)
+                label = "⬆ 突破5日線" if prev_close < prev_ma5 else "➡ 站穩5日線"
+            else:
+                label = "➡ 站穩5日線"
+        else:
+            label = "⬇ 跌破5日線"
+        result[code] = (today_close, ma5, label)
+
+    return result
 
 
 def fetch_ma5(code, date_str):
@@ -1799,17 +1956,12 @@ def _calc_analysis_rows(ss, date_str, current_prices, current_margin, cache_pric
     else:
         print("  ⚠️ 大盤指數取得失敗，相對強弱欄留空")
 
-    # ★ v11.11 抓5日均線（對 buy_map 所有代號，逐支打 STOCK_DAY）
+    # ★ v11.16 抓5日均線（batch 版：幾次請求取代逐支打 STOCK_DAY）
     ma5_map = {}
     if not fast_mode:
         _ma5_codes = list(buy_map.keys())
         print(f"  📡 抓取5日均線（{len(_ma5_codes)} 支）...")
-        for i, code in enumerate(_ma5_codes):
-            c, m, lbl = fetch_ma5(code, date_str)
-            if lbl:
-                ma5_map[code] = (c, m, lbl)
-            if i < len(_ma5_codes) - 1:
-                time.sleep(0.3)
+        ma5_map = fetch_ma5_batch(_ma5_codes, date_str)
         _hit = sum(1 for v in ma5_map.values() if v[2])
         print(f"  ✅ 5日線計算完成（{_hit}/{len(_ma5_codes)} 支有效）")
     else:
