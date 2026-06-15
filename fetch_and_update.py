@@ -16,7 +16,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.14"  # ← 每次 commit 只改這裡
+VERSION = "v11.15"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -458,6 +458,128 @@ def fetch_futures_two_days(date_str):
         delta_str = ""
 
     return net, signal, delta_str
+
+
+# ═══════════════════════════════════════════════
+# ★ v11.15 集保庫存變化（TDCC）
+# ═══════════════════════════════════════════════
+
+def fetch_tdcc_data(codes):
+    """
+    逐支抓集保股東結構（大戶持股%、週變化）。
+    API：https://www.tdcc.com.tw/portal/smWeb/qryStockAjax?REQ_OPR=qryStockNo
+    回傳 dict：{code: (big_pct: float, weekly_chg: float, tdcc_date: str)}
+    無法取得的股票不會出現在 dict 裡。
+    """
+    result = {}
+    for code in codes:
+        try:
+            url = "https://www.tdcc.com.tw/portal/smWeb/qryStockAjax?REQ_OPR=qryStockNo"
+            payload = (
+                f"SCA_DATE=&SqlMethod=StockNo&StockNo={code}"
+                f"&StockName=&REQ_BASE_DATE=&REQ_TYPE="
+            )
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Referer": "https://www.tdcc.com.tw/portal/zh/smWeb/qryStock",
+                "Origin": "https://www.tdcc.com.tw",
+            }
+            import urllib.request
+            req = urllib.request.Request(url, data=payload.encode(), headers=headers)
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                raw = resp.read().decode("utf-8")
+            data = json.loads(raw)
+            tdcc_date = data.get("date", "")
+            rows = data.get("list", [])
+            if not rows or not tdcc_date:
+                continue
+            total_shares = sum(int(r.get("shareCount", 0)) for r in rows)
+            big_shares   = sum(int(r.get("shareCount", 0)) for r in rows
+                               if int(r.get("stdNo", "0").replace(",","")) >= 1000)
+            if total_shares <= 0:
+                continue
+            big_pct    = round(big_shares / total_shares * 100, 2)
+            weekly_chg = float(data.get("weeklyChg", 0) or 0)
+            result[code] = (big_pct, weekly_chg, tdcc_date)
+            time.sleep(0.3)
+        except Exception:
+            continue
+    return result
+
+
+def load_tdcc_cache(ss):
+    """
+    讀取「集保快取」工作表，回傳 dict：{code: (big_pct, weekly_chg, tdcc_date)}
+    """
+    try:
+        ws = ss.worksheet("集保快取")
+        rows = ws.get_all_values()
+        result = {}
+        for row in rows[1:]:
+            if len(row) < 4:
+                continue
+            code, big_pct, weekly_chg, tdcc_date = row[0], row[1], row[2], row[3]
+            if not code:
+                continue
+            try:
+                result[code] = (float(big_pct), float(weekly_chg), tdcc_date)
+            except (ValueError, TypeError):
+                continue
+        return result
+    except gspread.exceptions.WorksheetNotFound:
+        return {}
+    except Exception as e:
+        print(f"  ⚠️ 集保快取讀取失敗：{e}")
+        return {}
+
+
+def update_tdcc_cache(ss, codes, new_data):
+    """
+    更新「集保快取」工作表，合併現有快取後整批寫入。
+    """
+    existing = load_tdcc_cache(ss)
+    merged = dict(existing)
+    merged.update(new_data)
+    rows = [["代號", "大戶%", "週變化", "集保日期"]]
+    for code, (big_pct, weekly_chg, tdcc_date) in sorted(merged.items()):
+        rows.append([code, big_pct, weekly_chg, tdcc_date])
+    ws = get_or_create(ss, "集保快取", cols=4)
+    ws.clear()
+    ws.update(range_name="A1", values=rows)
+    print(f"  💾 集保快取 更新 {len(new_data)} 筆（共 {len(merged)} 筆）")
+    return merged
+
+
+def fetch_tdcc_if_needed(ss, codes):
+    """
+    比對快取最新集保日期，有新資料才打 API。
+    回傳 dict：{code: (big_pct, weekly_chg, tdcc_date)}（含快取舊值）
+    """
+    existing = load_tdcc_cache(ss)
+    cached_dates = [v[2] for v in existing.values() if v[2]]
+    latest_cached = max(cached_dates) if cached_dates else ""
+
+    probe_codes = [c for c in codes if c in existing][:1] or list(codes)[:1]
+    latest_tdcc = ""
+    if probe_codes:
+        probe = fetch_tdcc_data(list(probe_codes)[:1])
+        if probe:
+            latest_tdcc = list(probe.values())[0][2]
+
+    if latest_tdcc and latest_tdcc == latest_cached:
+        print(f"  ℹ️ 集保日期未更新（{latest_cached}），使用快取")
+        return existing
+
+    if latest_tdcc:
+        print(f"  📡 集保有新資料（{latest_tdcc}），開始抓取 {len(codes)} 支...")
+        new_data = fetch_tdcc_data(codes)
+        new_data.update(probe)
+        merged = update_tdcc_cache(ss, codes, new_data)
+        return merged
+    else:
+        print(f"  ℹ️ 集保 API 無回應，使用快取")
+        return existing
 
 
 # ═══════════════════════════════════════════════
@@ -1361,7 +1483,7 @@ def _consecutive_days(entries, code, all_dates, net_by_date):
 
 
 def build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net_by_date,
-              short_hist=None, market_pct=None, ma5_map=None):
+              short_hist=None, market_pct=None, ma5_map=None, tdcc_map=None):
     """
     ★ 優化：從 inner function 獨立為模組層函式。
     建立對照分析 / 每日快照 的單列資料。
@@ -1421,6 +1543,16 @@ def build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net
     # ★ v11.11 5日均線突破標記
     ma5_label = (ma5_map or {}).get(code, ("", "", ""))[2] if ma5_map else ""
 
+    # ★ v11.15 集保大戶%
+    tdcc_entry    = (tdcc_map or {}).get(code)
+    tdcc_big_pct  = tdcc_entry[0] if tdcc_entry else None
+    tdcc_weekly   = tdcc_entry[1] if tdcc_entry else None
+    if tdcc_big_pct is not None:
+        arrow = "↑" if (tdcc_weekly or 0) > 0 else ("↓" if (tdcc_weekly or 0) < 0 else "➡")
+        tdcc_label = f"{tdcc_big_pct:.1f}%（{arrow}{abs(tdcc_weekly or 0):.1f}）"
+    else:
+        tdcc_label = ""
+
     return [
         code, s["name"],
         f_total, f_consec, f_net, f_wavg or "", f_trend,
@@ -1431,10 +1563,11 @@ def build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net
         chip_pct, chip_lbl,
         mb or "", mc if (mb or mc) else "", sb or "", margin_health,
         volume_ratio,
-        short_trend,
-        ma5_label,        # ★ v11.11 [32]
+        tdcc_label,       # ★ v11.15 [31]
+        short_trend,      # [32]
+        ma5_label,        # ★ v11.11 [33]
         relative_strength,
-        s["last"]
+        s["last"],
     ]
 
 
@@ -1446,11 +1579,12 @@ ANALYSIS_HEADERS = [
     "合計累計天數","現價","當日漲跌%","漲幅%","出貨風險","訊號","買超加速度",
     "籌碼集中度%","籌碼集中度評級",
     "融資餘額(張)","融資增減(張)","融券餘額(張)","融資健康度",
-    "量比",
-    "融券趨勢",
-    "5日線",       # ★ v11.11 [32]
-    "相對強弱%",   # ★ v11.9  [33]
-    "最近出現日"   # [34]
+    "量比",         # [31]
+    "集保大戶",     # ★ v11.15 [32]
+    "融券趨勢",     # [33]
+    "5日線",        # ★ v11.11 [34]
+    "相對強弱%",    # ★ v11.9  [35]
+    "最近出現日",   # [36]
 ]
 
 
@@ -1579,7 +1713,7 @@ def update_sector_heatmap(ss, date_str, ss_hist_rows=None):
 
 
 
-def _calc_analysis_rows(ss, date_str, current_prices, current_margin, cache_prices=None, fast_mode=False):
+def _calc_analysis_rows(ss, date_str, current_prices, current_margin, cache_prices=None, fast_mode=False, tdcc_map=None):
     """
     從歷史紀錄計算 all_rows（純計算，不寫 Sheets）。
     選4（對照分析）和選6（明日關注）共用此函式。
@@ -1683,7 +1817,7 @@ def _calc_analysis_rows(ss, date_str, current_prices, current_margin, cache_pric
 
     all_rows = [
         build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net_by_date,
-                  short_hist=short_hist, market_pct=market_pct, ma5_map=ma5_map)
+                  short_hist=short_hist, market_pct=market_pct, ma5_map=ma5_map, tdcc_map=tdcc_map)
         for s in buy_map.values()
     ]
 
@@ -1718,12 +1852,26 @@ def update_analysis(ss, date_str, current_prices, current_margin):
     """
     更新「對照分析」與「每日快照」工作表。
     計算部分委由 _calc_analysis_rows()，本函式只負責寫入 Sheets。
+    ★ v11.15：加入集保查詢。
     """
-    disp     = fmt_date(date_str)
-    all_rows = _calc_analysis_rows(ss, date_str, current_prices, current_margin, cache_prices=current_prices)
+    disp = fmt_date(date_str)
+
+    # ★ v11.15 集保：收集歷史紀錄中出現過的股票，比對快取日期決定是否重抓
+    try:
+        hist_ws    = get_or_create(ss, "歷史紀錄")
+        hist_rows  = hist_ws.get_all_values()[1:]
+        hist_codes = {r[2] for r in hist_rows if len(r) > 2 and r[2]}
+        tdcc_map   = fetch_tdcc_if_needed(ss, hist_codes)
+    except Exception as e:
+        print(f"  ⚠️ 集保資料取得失敗，略過：{e}")
+        tdcc_map = {}
+
+    all_rows = _calc_analysis_rows(ss, date_str, current_prices, current_margin,
+                                   cache_prices=current_prices, tdcc_map=tdcc_map)
     if not all_rows:
         print("  ⚠️ 歷史紀錄無資料，跳過對照分析")
         return []
+
 
     n_cols = len(ANALYSIS_HEADERS)
 
@@ -1873,6 +2021,29 @@ def _score_accel(accel_label):
     return 1
 
 
+def _score_tdcc(big_pct, weekly_chg):
+    """
+    集保大戶評分（-5 ~ +5 分）。★ v11.15
+    big_pct:    float，大戶持股比例（0~100）
+    weekly_chg: float，本週 vs 上週變化百分點（正=增加）
+    """
+    if big_pct is None:
+        return 0
+    if big_pct >= 70:    base = 3
+    elif big_pct >= 50:  base = 2
+    elif big_pct >= 30:  base = 1
+    else:                base = 0
+
+    if weekly_chg is None:     delta = 0
+    elif weekly_chg >= 1.0:    delta = 2
+    elif weekly_chg >= 0.3:    delta = 1
+    elif weekly_chg <= -1.0:   delta = -3
+    elif weekly_chg <= -0.3:   delta = -2
+    else:                       delta = 0
+
+    return max(-5, min(base + delta, 5))
+
+
 def _dealer_label(d_consec):
     """自營商連續買超標記"""
     if d_consec >= 5:  return f"🔥 自營{d_consec}天"
@@ -1888,7 +2059,8 @@ def score_stock(row):
       [3]=外資連續, [8]=投信連續, [13]=自營連續
       [19]=現價, [20]=當日漲跌%, [21]=漲幅%, [22]=出貨風險, [23]=訊號
       [24]=買超加速度, [25]=籌碼集中度%, [26]=籌碼集中度評級
-      [29]=融資健康度, [30]=量比, [31]=融券趨勢
+      [29]=融資健康度, [30]=量比 → [31]=集保大戶
+      [32]=融券趨勢, [33]=5日線（v11.11）, [34]=相對強弱%, [35]=最近出現日
       [32]=5日線（v11.11）, [33]=相對強弱%, [34]=最近出現日
 
     v11.2 過濾邏輯：
@@ -1903,11 +2075,23 @@ def score_stock(row):
     chip_lbl     = row[26]
     health       = row[29]
     vr_raw = row[30] if len(row) > 30 else None
-    short_trend  = row[31] if len(row) > 31 else ""
+    tdcc_raw     = row[32] if len(row) > 32 else ""   # ★ v11.15 [32]
+    short_trend  = row[33] if len(row) > 33 else ""   # [33]
     try:
         volume_ratio = float(vr_raw) if (vr_raw is not None and vr_raw != "") else None
     except (ValueError, TypeError):
         volume_ratio = None
+
+    # ★ v11.15 解析集保大戶欄位（格式：「72.3%（↑0.8）」）
+    tdcc_big_pct, tdcc_weekly_chg = None, None
+    if tdcc_raw:
+        m_pct = re.search(r"([\d.]+)%", str(tdcc_raw))
+        m_chg = re.search(r"[↑↓➡]([\d.]+)", str(tdcc_raw))
+        if m_pct:
+            tdcc_big_pct = float(m_pct.group(1))
+        if m_chg:
+            sign = 1 if "↑" in str(tdcc_raw) else (-1 if "↓" in str(tdcc_raw) else 0)
+            tdcc_weekly_chg = sign * float(m_chg.group(1))
 
     # ── 過濾條件 ──────────────────────────────────────
     _finance_codes = set(SECTOR_MAP.get("金融", []))
@@ -1946,7 +2130,8 @@ def score_stock(row):
         _score_risk(risk) +                    # 15分
         _score_volume_ratio(volume_ratio) +    # 7分
         _score_accel(accel_label) +            # 3分
-        _score_short_trend(short_trend)        # -8 ~ +8分
+        _score_short_trend(short_trend) +      # -8 ~ +8分
+        _score_tdcc(tdcc_big_pct, tdcc_weekly_chg)  # ★ v11.15 -5 ~ +5分
     )
     return max(0, min(score, 100))
 
@@ -3000,8 +3185,16 @@ def main():
         nonlocal _analysis_rows, _cached_futures
         if not _analysis_rows:
             print("  ℹ️ 自動計算分析資料（不更新對照分析工作表）...")
+            try:
+                hist_ws    = get_or_create(ss, "歷史紀錄")
+                hist_rows  = hist_ws.get_all_values()[1:]
+                hist_codes = {r[2] for r in hist_rows if len(r) > 2 and r[2]}
+                _tdcc_map  = fetch_tdcc_if_needed(ss, hist_codes)
+            except Exception:
+                _tdcc_map = {}
             _analysis_rows = _calc_analysis_rows(ss, date_str, current_prices, current_margin,
-                                                  cache_prices=current_prices, fast_mode=True)
+                                                  cache_prices=current_prices, fast_mode=True,
+                                                  tdcc_map=_tdcc_map)
         if not _analysis_rows:
             print("  ⚠️ 歷史紀錄無資料，無法計算推薦")
             return
