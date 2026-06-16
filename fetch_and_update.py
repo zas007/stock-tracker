@@ -16,7 +16,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.16"  # ← 每次 commit 只改這裡
+VERSION = "v11.18"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -1687,6 +1687,8 @@ def build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net
     accel_ratio, accel_label = _calc_buy_accel(all_entries, all_dates)
 
     today_net           = sum(e[1] for e in all_entries if e[0] == disp)
+    # ★ v11.18 今日三法人買超金額（元）= 買超張數 × 均價 × 1000
+    today_amount        = sum(e[1] * e[2] * 1000 for e in all_entries if e[0] == disp and e[2] > 0)
     chip_pct, chip_lbl  = calc_chip_concentration(today_net, volume, code)
     mb, mc, sb          = current_margin.get(code, (0, 0, 0))
     margin_health       = calc_margin_health(mc, today_net)
@@ -1725,6 +1727,7 @@ def build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net
         ma5_label,        # ★ v11.11 [33]
         relative_strength,
         s["last"],
+        today_amount,      # ★ v11.18 [37] 今日買超金額（元）
     ]
 
 
@@ -1742,6 +1745,7 @@ ANALYSIS_HEADERS = [
     "5日線",        # ★ v11.11 [34]
     "相對強弱%",    # ★ v11.9  [35]
     "最近出現日",   # [36]
+    "今日買超金額", # ★ v11.18 [37]
 ]
 
 
@@ -2204,6 +2208,21 @@ def _dealer_label(d_consec):
     return ""
 
 
+def _score_net_amount(amount):
+    """
+    今日法人買超金額評分（0~8分）。★ v11.18
+    amount: 今日三法人買超張數 × 均價 × 1000（元）
+    門檻以台灣股市常見法人操作規模設定，大型/小型股皆適用。
+    """
+    if not amount or amount <= 0:
+        return 0
+    if amount >= 500_000_000:   return 8   # 5億以上
+    if amount >= 200_000_000:   return 6   # 2億以上
+    if amount >= 100_000_000:   return 4   # 1億以上
+    if amount >= 30_000_000:    return 2   # 3千萬以上
+    return 1                               # 未達3千萬
+
+
 def score_stock(row):
     """
     輸入 build_row 產出的 row，回傳綜合評分（0~100）。
@@ -2229,6 +2248,11 @@ def score_stock(row):
     vr_raw = row[30] if len(row) > 30 else None
     tdcc_raw     = row[32] if len(row) > 32 else ""   # ★ v11.15 [32]
     short_trend  = row[33] if len(row) > 33 else ""   # [33]
+    today_amount = row[37] if len(row) > 37 else 0    # ★ v11.18 [37]
+    try:
+        today_amount = float(today_amount) if today_amount else 0
+    except (ValueError, TypeError):
+        today_amount = 0
     try:
         volume_ratio = float(vr_raw) if (vr_raw is not None and vr_raw != "") else None
     except (ValueError, TypeError):
@@ -2283,7 +2307,8 @@ def score_stock(row):
         _score_volume_ratio(volume_ratio) +    # 7分
         _score_accel(accel_label) +            # 3分
         _score_short_trend(short_trend) +      # -8 ~ +8分
-        _score_tdcc(tdcc_big_pct, tdcc_weekly_chg)  # ★ v11.15 -5 ~ +5分
+        _score_tdcc(tdcc_big_pct, tdcc_weekly_chg) +  # ★ v11.15 -5 ~ +5分
+        _score_net_amount(today_amount)        # ★ v11.18 0~8分
     )
     return max(0, min(score, 100))
 
@@ -3320,7 +3345,16 @@ def main():
 
     # ── fetch-only：存完就結束 ──
     if args.fetch_only:
-        print(f"\n✅ fetch-only 完成，快取已儲存至 Sheets（含價格與融資券）。")
+        # ★ v11.17 集保 CSV 也在 fetch-only 階段更新快取
+        try:
+            hist_ws    = get_or_create(ss, "歷史紀錄")
+            hist_rows  = hist_ws.get_all_values()[1:]
+            hist_codes = {r[2] for r in hist_rows if len(r) > 2 and r[2]}
+            if hist_codes:
+                fetch_tdcc_if_needed(ss, hist_codes)
+        except Exception as e:
+            print(f"  ⚠️ 集保快取更新失敗（不影響快取儲存）：{e}")
+        print(f"\n✅ fetch-only 完成，快取已儲存至 Sheets（含價格與融資券與集保）。")
         print(f"   執行 --sheet-only 可直接寫入 Sheets，不重打 API。")
         input("按 Enter 關閉...")
         return
