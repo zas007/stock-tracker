@@ -16,7 +16,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.20"  # ← 每次 commit 只改這裡
+VERSION = "v11.15"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -466,70 +466,45 @@ def fetch_futures_two_days(date_str):
 
 def fetch_tdcc_data(codes):
     """
-    批次下載集保股東結構（大戶持股%）。
-    來源：opendata.tdcc.com.tw/getOD.ashx?id=1-5（全市場 CSV，每週五更新）
-    CSV 欄位：資料日期, 證券代號, 持股分級(1~15), 人數, 股數, 占集保庫存數比例%
-    大戶定義：持股分級 >= 13（持股 50,000 股 / 50 張以上）
-    weekly_chg：與快取舊值比較（呼叫端計算），此函式回傳 weekly_chg=0.0 佔位。
+    逐支抓集保股東結構（大戶持股%、週變化）。
+    API：https://www.tdcc.com.tw/portal/smWeb/qryStockAjax?REQ_OPR=qryStockNo
     回傳 dict：{code: (big_pct: float, weekly_chg: float, tdcc_date: str)}
+    無法取得的股票不會出現在 dict 裡。
     """
-    import urllib.request
-    import csv
-    import io
-
-    url = "https://opendata.tdcc.com.tw/getOD.ashx?id=1-5"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-        "Referer": "https://www.tdcc.com.tw/portal/zh/smWeb/qryStock",
-    }
-    try:
-        req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            raw = resp.read().decode("utf-8-sig")  # 處理 BOM
-    except Exception as e:
-        print(f"  ⚠️ 集保 CSV 下載失敗：{e}")
-        return {}
-
-    # 解析 CSV：{code: {level: shares}}
-    stock_shares = {}   # {code: {level(int): shares(int)}}
-    tdcc_date = ""
-    reader = csv.reader(io.StringIO(raw))
-    next(reader, None)  # 跳過 header
-    for row in reader:
-        if len(row) < 6:
-            continue
-        date_str, code, level_str, _, shares_str, _ = row[0], row[1], row[2], row[3], row[4], row[5]
-        code = code.strip()
-        if not tdcc_date and date_str.strip():
-            tdcc_date = date_str.strip()
-        try:
-            level = int(level_str.strip())
-            shares = int(shares_str.strip().replace(",", ""))
-        except ValueError:
-            continue
-        if code not in stock_shares:
-            stock_shares[code] = {}
-        stock_shares[code][level] = shares
-
-    if not tdcc_date:
-        print("  ⚠️ 集保 CSV 解析失敗（無日期）")
-        return {}
-
-    # 計算大戶% (分級 >= 13 = 持股 50 張以上)
-    BIG_LEVEL = 13
-    code_set = set(codes)
     result = {}
-    for code, level_map in stock_shares.items():
-        if code not in code_set:
+    for code in codes:
+        try:
+            url = "https://www.tdcc.com.tw/portal/smWeb/qryStockAjax?REQ_OPR=qryStockNo"
+            payload = (
+                f"SCA_DATE=&SqlMethod=StockNo&StockNo={code}"
+                f"&StockName=&REQ_BASE_DATE=&REQ_TYPE="
+            )
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Referer": "https://www.tdcc.com.tw/portal/zh/smWeb/qryStock",
+                "Origin": "https://www.tdcc.com.tw",
+            }
+            import urllib.request
+            req = urllib.request.Request(url, data=payload.encode(), headers=headers)
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                raw = resp.read().decode("utf-8")
+            data = json.loads(raw)
+            tdcc_date = data.get("date", "")
+            rows = data.get("list", [])
+            if not rows or not tdcc_date:
+                continue
+            total_shares = sum(int(r.get("shareCount", 0)) for r in rows)
+            big_shares   = sum(int(r.get("shareCount", 0)) for r in rows
+                               if int(r.get("stdNo", "0").replace(",","")) >= 1000)
+            if total_shares <= 0:
+                continue
+            big_pct    = round(big_shares / total_shares * 100, 2)
+            weekly_chg = float(data.get("weeklyChg", 0) or 0)
+            result[code] = (big_pct, weekly_chg, tdcc_date)
+            time.sleep(0.3)
+        except Exception:
             continue
-        total = sum(level_map.values())
-        if total <= 0:
-            continue
-        big = sum(v for k, v in level_map.items() if k >= BIG_LEVEL)
-        big_pct = round(big / total * 100, 2)
-        result[code] = (big_pct, 0.0, tdcc_date)  # weekly_chg 由 fetch_tdcc_if_needed 補算
-
-    print(f"  📊 集保 CSV 解析完成（日期：{tdcc_date}，命中 {len(result)}/{len(codes)} 支）")
     return result
 
 
@@ -578,37 +553,33 @@ def update_tdcc_cache(ss, codes, new_data):
 
 def fetch_tdcc_if_needed(ss, codes):
     """
-    比對快取最新集保日期，有新資料才下載 CSV。
-    weekly_chg 由本函式計算（新 big_pct - 快取舊 big_pct）。
+    比對快取最新集保日期，有新資料才打 API。
     回傳 dict：{code: (big_pct, weekly_chg, tdcc_date)}（含快取舊值）
     """
     existing = load_tdcc_cache(ss)
     cached_dates = [v[2] for v in existing.values() if v[2]]
     latest_cached = max(cached_dates) if cached_dates else ""
 
-    # 直接下載 CSV 取得最新日期（CSV 本身很輕，不需要 probe）
-    new_data = fetch_tdcc_data(codes)
+    probe_codes = [c for c in codes if c in existing][:1] or list(codes)[:1]
+    latest_tdcc = ""
+    if probe_codes:
+        probe = fetch_tdcc_data(list(probe_codes)[:1])
+        if probe:
+            latest_tdcc = list(probe.values())[0][2]
 
-    if not new_data:
-        print(f"  ℹ️ 集保 CSV 無法取得，使用快取")
-        return existing
-
-    latest_tdcc = list(new_data.values())[0][2]
-
-    if latest_tdcc == latest_cached:
+    if latest_tdcc and latest_tdcc == latest_cached:
         print(f"  ℹ️ 集保日期未更新（{latest_cached}），使用快取")
         return existing
 
-    # 補算 weekly_chg：新 big_pct - 快取舊 big_pct
-    for code in new_data:
-        new_pct, _, date = new_data[code]
-        old_pct = existing[code][0] if code in existing else new_pct
-        weekly_chg = round(new_pct - old_pct, 2)
-        new_data[code] = (new_pct, weekly_chg, date)
-
-    print(f"  📡 集保有新資料（{latest_tdcc}），更新快取...")
-    merged = update_tdcc_cache(ss, codes, new_data)
-    return merged
+    if latest_tdcc:
+        print(f"  📡 集保有新資料（{latest_tdcc}），開始抓取 {len(codes)} 支...")
+        new_data = fetch_tdcc_data(codes)
+        new_data.update(probe)
+        merged = update_tdcc_cache(ss, codes, new_data)
+        return merged
+    else:
+        print(f"  ℹ️ 集保 API 無回應，使用快取")
+        return existing
 
 
 # ═══════════════════════════════════════════════
@@ -727,151 +698,6 @@ def _fetch_stock_day_rows(code, date_str):
 
     return [], None
 
-
-def fetch_ma5_batch(codes, date_str, ss=None):
-    """
-    ★ v11.19 批次計算5日均線。
-    策略：
-      1. 先從每日快照工作表讀近 9 個交易日的 {date: {code: close}}
-      2. 每支股票收集快照有的天數
-      3. 不足的股票（快照覆蓋不到）用 _fetch_stock_day_rows 逐支補底
-    回傳 dict：{code: (close, ma5, label)}
-    """
-
-    def _prev_trading_dates(base_date_str, n=9):
-        base = datetime.strptime(base_date_str, "%Y%m%d")
-        dates = []
-        cur = base
-        while len(dates) < n:
-            if cur.weekday() < 5:
-                dates.append(cur.strftime("%Y%m%d"))
-            cur -= timedelta(days=1)
-        return list(reversed(dates))  # 舊 → 新
-
-    trading_days = _prev_trading_dates(date_str, n=9)
-    code_set = set(codes)
-    # {date_str(YYYYMMDD): {code: close}}
-    snapshot_by_date = {}
-
-    # ── Step 1：從每日快照讀歷史收盤 ──
-    if ss is not None:
-        try:
-            ws_snap = get_or_create(ss, "每日快照")
-            snap_rows = ws_snap.get_all_values()
-            # 每個快照區塊第一列是「統計截至：YYYY/MM/DD」，第二列是 HEADERS，之後是資料
-            # 找出所有區塊的日期與資料列
-            current_date = None
-            for row in snap_rows:
-                if not row:
-                    continue
-                cell = str(row[0]).strip()
-                if cell.startswith("統計截至："):
-                    # 取日期，格式 YYYY/MM/DD → YYYYMMDD
-                    d = cell.replace("統計截至：", "").strip().replace("/", "")
-                    current_date = d if len(d) == 8 else None
-                    continue
-                if cell == "代號" or cell == "":
-                    continue
-                if current_date and current_date in trading_days:
-                    code = cell
-                    if code in code_set and len(row) > 19:
-                        try:
-                            close = float(str(row[19]).replace(",", ""))
-                            if current_date not in snapshot_by_date:
-                                snapshot_by_date[current_date] = {}
-                            snapshot_by_date[current_date][code] = close
-                        except (ValueError, TypeError):
-                            pass
-            print(f"  [ma5-batch] 快照覆蓋 {len(snapshot_by_date)} 天")
-        except Exception as e:
-            print(f"  [ma5-batch] 快照讀取失敗：{e}")
-
-    # ── Step 2：組合每支股票的 closes，找出需要補底的股票 ──
-    code_closes = {}  # {code: [close, ...]}（按 trading_days 順序，None=缺）
-    for code in code_set:
-        closes = []
-        for d in trading_days:
-            c = snapshot_by_date.get(d, {}).get(code)
-            closes.append(c)
-        code_closes[code] = closes
-
-    # 需要補底：有效天數 < 5
-    need_fallback = [
-        code for code, closes in code_closes.items()
-        if sum(1 for c in closes if c is not None) < 5
-    ]
-    print(f"  [ma5-batch] 快照不足5天，補底 {len(need_fallback)} 支...")
-
-    # ── Step 3：逐支 API 補底（只補不足的股票）──
-    for code in need_fallback:
-        try:
-            rows, source = _fetch_stock_day_rows(code, date_str)
-            if not rows:
-                continue
-            close_idx = 2 if source == "tpex" else 6
-            year = int(date_str[:4]) - 1911
-            target_fmt = f"{year}/{date_str[4:6]}/{date_str[6:]}"
-
-            target_idx = None
-            for idx2, row in enumerate(rows):
-                if str(row[0]).strip() == target_fmt:
-                    target_idx = idx2
-                    break
-            if target_idx is None:
-                continue
-
-            start = max(0, target_idx - 8)
-            window = rows[start: target_idx + 1]
-            # 月初補抓上個月
-            if target_idx < 5:
-                d_prev = datetime.strptime(date_str, "%Y%m%d").replace(day=1) - timedelta(days=1)
-                prev_rows, _ = _fetch_stock_day_rows(code, d_prev.strftime("%Y%m%d"))
-                need = 5 - target_idx
-                supplement = prev_rows[-need:] if len(prev_rows) >= need else prev_rows
-                window = supplement + window
-
-            api_closes = []
-            for row in window:
-                try:
-                    api_closes.append(float(str(row[close_idx]).replace(",", "")))
-                except Exception:
-                    pass
-            if api_closes:
-                # 用 API 結果覆蓋（比快照更完整）
-                # 轉成 trading_days 對齊格式：最後一筆對齊今日，往前填
-                aligned = [None] * len(trading_days)
-                for i, c in enumerate(reversed(api_closes)):
-                    pos = len(trading_days) - 1 - i
-                    if pos >= 0:
-                        aligned[pos] = c
-                code_closes[code] = aligned
-        except Exception:
-            pass
-
-    # ── Step 4：計算 ma5 ──
-    result = {}
-    valid = 0
-    for code in code_set:
-        closes_raw = code_closes.get(code, [])
-        closes = [c for c in closes_raw if c is not None]
-        if len(closes) < 5:
-            continue
-        today_close = closes[-1]
-        ma5 = round(sum(closes[-5:]) / 5, 2)
-        if today_close >= ma5:
-            if len(closes) >= 6:
-                prev_close = closes[-2]
-                prev_ma5 = round(sum(closes[-6:-1]) / 5, 2)
-                label = "⬆ 突破5日線" if prev_close < prev_ma5 else "➡ 站穩5日線"
-            else:
-                label = "➡ 站穩5日線"
-        else:
-            label = "⬇ 跌破5日線"
-        result[code] = (today_close, ma5, label)
-        valid += 1
-
-    print(f"  [ma5-batch] 5日線計算完成（{valid}/{len(code_set)} 支有效）")
-    return result
 
 def fetch_ma5(code, date_str):
     """
@@ -1704,8 +1530,6 @@ def build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net
     accel_ratio, accel_label = _calc_buy_accel(all_entries, all_dates)
 
     today_net           = sum(e[1] for e in all_entries if e[0] == disp)
-    # ★ v11.18 今日三法人買超金額（元）= 買超張數 × 均價 × 1000
-    today_amount        = sum(e[1] * e[2] * 1000 for e in all_entries if e[0] == disp and e[2] > 0)
     chip_pct, chip_lbl  = calc_chip_concentration(today_net, volume, code)
     mb, mc, sb          = current_margin.get(code, (0, 0, 0))
     margin_health       = calc_margin_health(mc, today_net)
@@ -1744,7 +1568,6 @@ def build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net
         ma5_label,        # ★ v11.11 [33]
         relative_strength,
         s["last"],
-        today_amount,      # ★ v11.18 [37] 今日買超金額（元）
     ]
 
 
@@ -1762,7 +1585,6 @@ ANALYSIS_HEADERS = [
     "5日線",        # ★ v11.11 [34]
     "相對強弱%",    # ★ v11.9  [35]
     "最近出現日",   # [36]
-    "今日買超金額", # ★ v11.18 [37]
 ]
 
 
@@ -1891,22 +1713,17 @@ def update_sector_heatmap(ss, date_str, ss_hist_rows=None):
 
 
 
-def _calc_analysis_rows(ss, date_str, current_prices, current_margin, cache_prices=None, fast_mode=False, tdcc_map=None, hist_rows=None):
+def _calc_analysis_rows(ss, date_str, current_prices, current_margin, cache_prices=None, fast_mode=False, tdcc_map=None):
     """
     從歷史紀錄計算 all_rows（純計算，不寫 Sheets）。
     選4（對照分析）和選6（明日關注）共用此函式。
     cache_prices: 快取載入的原始 current_prices，batch 不適用時作為保底來源。
     fast_mode: True 時跳過保底補抓 API，只用 current_prices/current_margin 內已有的資料。
                適用於只選明日關注推薦、不需要完整歷史股票資料的情境。
-    hist_rows: 外部傳入歷史紀錄列表（已去除 header），None 時自行抓取。
-               ★ v11.20 避免重複打 API 讀到空值。
     """
+    hist = get_or_create(ss, "歷史紀錄")
     disp = fmt_date(date_str)
-    if hist_rows is None:
-        hist = get_or_create(ss, "歷史紀錄")
-        rows = hist.get_all_values()[1:]
-    else:
-        rows = hist_rows
+    rows = hist.get_all_values()[1:]
     if not rows:
         return []
 
@@ -1982,14 +1799,19 @@ def _calc_analysis_rows(ss, date_str, current_prices, current_margin, cache_pric
     else:
         print("  ⚠️ 大盤指數取得失敗，相對強弱欄留空")
 
-    # ★ v11.16 抓5日均線（batch 版：幾次請求取代逐支打 STOCK_DAY）
+    # ★ v11.11 抓5日均線（對 buy_map 所有代號，逐支打 STOCK_DAY）
     ma5_map = {}
     if not fast_mode:
         _ma5_codes = list(buy_map.keys())
         print(f"  📡 抓取5日均線（{len(_ma5_codes)} 支）...")
-        ma5_map = fetch_ma5_batch(_ma5_codes, date_str, ss=ss)
+        for i, code in enumerate(_ma5_codes):
+            c, m, lbl = fetch_ma5(code, date_str)
+            if lbl:
+                ma5_map[code] = (c, m, lbl)
+            if i < len(_ma5_codes) - 1:
+                time.sleep(0.3)
         _hit = sum(1 for v in ma5_map.values() if v[2])
-        # 命中數已在 fetch_ma5_batch 內印出，這裡不重複
+        print(f"  ✅ 5日線計算完成（{_hit}/{len(_ma5_codes)} 支有效）")
     else:
         print("  ℹ️ fast_mode：跳過5日均線抓取")
 
@@ -2016,15 +1838,13 @@ def _calc_analysis_rows(ss, date_str, current_prices, current_margin, cache_pric
                 count += 1
         return count
 
-    # ★ v11.20 修正：v11.18 新增 r[37]（今日買超金額）後，r[-1] 不再是最近出現日
-    #   改用明確 index r[36]（最近出現日）
     all_rows = [
         r for r in all_rows
-        if len(r) > 36 and r[36] and _trading_days_diff(r[36], disp) <= 5
+        if r[-1] and _trading_days_diff(r[-1], disp) <= 5
     ]
 
     all_rows.sort(key=lambda r: r[18])
-    all_rows.sort(key=lambda r: r[36] if len(r) > 36 and r[36] else "", reverse=True)
+    all_rows.sort(key=lambda r: r[-1] if r[-1] else "", reverse=True)
     return all_rows
 
 
@@ -2036,21 +1856,18 @@ def update_analysis(ss, date_str, current_prices, current_margin):
     """
     disp = fmt_date(date_str)
 
-    # ★ v11.20 修正：歷史紀錄讀取獨立於集保 try/except 之外，
-    #   避免集保 CSV 下載失敗時 exception 把 hist_rows 一起吃掉，
-    #   導致 _calc_analysis_rows 讀不到歷史紀錄而跳過對照分析。
-    hist_ws    = get_or_create(ss, "歷史紀錄")
-    hist_rows  = hist_ws.get_all_values()[1:]
-    hist_codes = {r[2] for r in hist_rows if len(r) > 2 and r[2]}
+    # ★ v11.15 集保：收集歷史紀錄中出現過的股票，比對快取日期決定是否重抓
     try:
-        tdcc_map = fetch_tdcc_if_needed(ss, hist_codes)
+        hist_ws    = get_or_create(ss, "歷史紀錄")
+        hist_rows  = hist_ws.get_all_values()[1:]
+        hist_codes = {r[2] for r in hist_rows if len(r) > 2 and r[2]}
+        tdcc_map   = fetch_tdcc_if_needed(ss, hist_codes)
     except Exception as e:
         print(f"  ⚠️ 集保資料取得失敗，略過：{e}")
         tdcc_map = {}
 
     all_rows = _calc_analysis_rows(ss, date_str, current_prices, current_margin,
-                                   cache_prices=current_prices, tdcc_map=tdcc_map,
-                                   hist_rows=hist_rows)
+                                   cache_prices=current_prices, tdcc_map=tdcc_map)
     if not all_rows:
         print("  ⚠️ 歷史紀錄無資料，跳過對照分析")
         return []
@@ -2235,21 +2052,6 @@ def _dealer_label(d_consec):
     return ""
 
 
-def _score_net_amount(amount):
-    """
-    今日法人買超金額評分（0~8分）。★ v11.18
-    amount: 今日三法人買超張數 × 均價 × 1000（元）
-    門檻以台灣股市常見法人操作規模設定，大型/小型股皆適用。
-    """
-    if not amount or amount <= 0:
-        return 0
-    if amount >= 500_000_000:   return 8   # 5億以上
-    if amount >= 200_000_000:   return 6   # 2億以上
-    if amount >= 100_000_000:   return 4   # 1億以上
-    if amount >= 30_000_000:    return 2   # 3千萬以上
-    return 1                               # 未達3千萬
-
-
 def score_stock(row):
     """
     輸入 build_row 產出的 row，回傳綜合評分（0~100）。
@@ -2275,11 +2077,6 @@ def score_stock(row):
     vr_raw = row[30] if len(row) > 30 else None
     tdcc_raw     = row[32] if len(row) > 32 else ""   # ★ v11.15 [32]
     short_trend  = row[33] if len(row) > 33 else ""   # [33]
-    today_amount = row[37] if len(row) > 37 else 0    # ★ v11.18 [37]
-    try:
-        today_amount = float(today_amount) if today_amount else 0
-    except (ValueError, TypeError):
-        today_amount = 0
     try:
         volume_ratio = float(vr_raw) if (vr_raw is not None and vr_raw != "") else None
     except (ValueError, TypeError):
@@ -2334,8 +2131,7 @@ def score_stock(row):
         _score_volume_ratio(volume_ratio) +    # 7分
         _score_accel(accel_label) +            # 3分
         _score_short_trend(short_trend) +      # -8 ~ +8分
-        _score_tdcc(tdcc_big_pct, tdcc_weekly_chg) +  # ★ v11.15 -5 ~ +5分
-        _score_net_amount(today_amount)        # ★ v11.18 0~8分
+        _score_tdcc(tdcc_big_pct, tdcc_weekly_chg)  # ★ v11.15 -5 ~ +5分
     )
     return max(0, min(score, 100))
 
@@ -3372,16 +3168,7 @@ def main():
 
     # ── fetch-only：存完就結束 ──
     if args.fetch_only:
-        # ★ v11.17 集保 CSV 也在 fetch-only 階段更新快取
-        try:
-            hist_ws    = get_or_create(ss, "歷史紀錄")
-            hist_rows  = hist_ws.get_all_values()[1:]
-            hist_codes = {r[2] for r in hist_rows if len(r) > 2 and r[2]}
-            if hist_codes:
-                fetch_tdcc_if_needed(ss, hist_codes)
-        except Exception as e:
-            print(f"  ⚠️ 集保快取更新失敗（不影響快取儲存）：{e}")
-        print(f"\n✅ fetch-only 完成，快取已儲存至 Sheets（含價格與融資券與集保）。")
+        print(f"\n✅ fetch-only 完成，快取已儲存至 Sheets（含價格與融資券）。")
         print(f"   執行 --sheet-only 可直接寫入 Sheets，不重打 API。")
         input("按 Enter 關閉...")
         return
@@ -3398,16 +3185,16 @@ def main():
         nonlocal _analysis_rows, _cached_futures
         if not _analysis_rows:
             print("  ℹ️ 自動計算分析資料（不更新對照分析工作表）...")
-            _rec_hist_ws   = get_or_create(ss, "歷史紀錄")
-            _rec_hist_rows = _rec_hist_ws.get_all_values()[1:]
-            _rec_hist_codes = {r[2] for r in _rec_hist_rows if len(r) > 2 and r[2]}
             try:
-                _tdcc_map = fetch_tdcc_if_needed(ss, _rec_hist_codes)
+                hist_ws    = get_or_create(ss, "歷史紀錄")
+                hist_rows  = hist_ws.get_all_values()[1:]
+                hist_codes = {r[2] for r in hist_rows if len(r) > 2 and r[2]}
+                _tdcc_map  = fetch_tdcc_if_needed(ss, hist_codes)
             except Exception:
                 _tdcc_map = {}
             _analysis_rows = _calc_analysis_rows(ss, date_str, current_prices, current_margin,
                                                   cache_prices=current_prices, fast_mode=True,
-                                                  tdcc_map=_tdcc_map, hist_rows=_rec_hist_rows)
+                                                  tdcc_map=_tdcc_map)
         if not _analysis_rows:
             print("  ⚠️ 歷史紀錄無資料，無法計算推薦")
             return

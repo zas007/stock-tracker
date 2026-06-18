@@ -16,7 +16,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.20"  # ← 每次 commit 只改這裡
+VERSION = "v11.19"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -1891,22 +1891,17 @@ def update_sector_heatmap(ss, date_str, ss_hist_rows=None):
 
 
 
-def _calc_analysis_rows(ss, date_str, current_prices, current_margin, cache_prices=None, fast_mode=False, tdcc_map=None, hist_rows=None):
+def _calc_analysis_rows(ss, date_str, current_prices, current_margin, cache_prices=None, fast_mode=False, tdcc_map=None):
     """
     從歷史紀錄計算 all_rows（純計算，不寫 Sheets）。
     選4（對照分析）和選6（明日關注）共用此函式。
     cache_prices: 快取載入的原始 current_prices，batch 不適用時作為保底來源。
     fast_mode: True 時跳過保底補抓 API，只用 current_prices/current_margin 內已有的資料。
                適用於只選明日關注推薦、不需要完整歷史股票資料的情境。
-    hist_rows: 外部傳入歷史紀錄列表（已去除 header），None 時自行抓取。
-               ★ v11.20 避免重複打 API 讀到空值。
     """
+    hist = get_or_create(ss, "歷史紀錄")
     disp = fmt_date(date_str)
-    if hist_rows is None:
-        hist = get_or_create(ss, "歷史紀錄")
-        rows = hist.get_all_values()[1:]
-    else:
-        rows = hist_rows
+    rows = hist.get_all_values()[1:]
     if not rows:
         return []
 
@@ -2016,15 +2011,13 @@ def _calc_analysis_rows(ss, date_str, current_prices, current_margin, cache_pric
                 count += 1
         return count
 
-    # ★ v11.20 修正：v11.18 新增 r[37]（今日買超金額）後，r[-1] 不再是最近出現日
-    #   改用明確 index r[36]（最近出現日）
     all_rows = [
         r for r in all_rows
-        if len(r) > 36 and r[36] and _trading_days_diff(r[36], disp) <= 5
+        if r[-1] and _trading_days_diff(r[-1], disp) <= 5
     ]
 
     all_rows.sort(key=lambda r: r[18])
-    all_rows.sort(key=lambda r: r[36] if len(r) > 36 and r[36] else "", reverse=True)
+    all_rows.sort(key=lambda r: r[-1] if r[-1] else "", reverse=True)
     return all_rows
 
 
@@ -2036,21 +2029,18 @@ def update_analysis(ss, date_str, current_prices, current_margin):
     """
     disp = fmt_date(date_str)
 
-    # ★ v11.20 修正：歷史紀錄讀取獨立於集保 try/except 之外，
-    #   避免集保 CSV 下載失敗時 exception 把 hist_rows 一起吃掉，
-    #   導致 _calc_analysis_rows 讀不到歷史紀錄而跳過對照分析。
-    hist_ws    = get_or_create(ss, "歷史紀錄")
-    hist_rows  = hist_ws.get_all_values()[1:]
-    hist_codes = {r[2] for r in hist_rows if len(r) > 2 and r[2]}
+    # ★ v11.15 集保：收集歷史紀錄中出現過的股票，比對快取日期決定是否重抓
     try:
-        tdcc_map = fetch_tdcc_if_needed(ss, hist_codes)
+        hist_ws    = get_or_create(ss, "歷史紀錄")
+        hist_rows  = hist_ws.get_all_values()[1:]
+        hist_codes = {r[2] for r in hist_rows if len(r) > 2 and r[2]}
+        tdcc_map   = fetch_tdcc_if_needed(ss, hist_codes)
     except Exception as e:
         print(f"  ⚠️ 集保資料取得失敗，略過：{e}")
         tdcc_map = {}
 
     all_rows = _calc_analysis_rows(ss, date_str, current_prices, current_margin,
-                                   cache_prices=current_prices, tdcc_map=tdcc_map,
-                                   hist_rows=hist_rows)
+                                   cache_prices=current_prices, tdcc_map=tdcc_map)
     if not all_rows:
         print("  ⚠️ 歷史紀錄無資料，跳過對照分析")
         return []
@@ -3398,16 +3388,16 @@ def main():
         nonlocal _analysis_rows, _cached_futures
         if not _analysis_rows:
             print("  ℹ️ 自動計算分析資料（不更新對照分析工作表）...")
-            _rec_hist_ws   = get_or_create(ss, "歷史紀錄")
-            _rec_hist_rows = _rec_hist_ws.get_all_values()[1:]
-            _rec_hist_codes = {r[2] for r in _rec_hist_rows if len(r) > 2 and r[2]}
             try:
-                _tdcc_map = fetch_tdcc_if_needed(ss, _rec_hist_codes)
+                hist_ws    = get_or_create(ss, "歷史紀錄")
+                hist_rows  = hist_ws.get_all_values()[1:]
+                hist_codes = {r[2] for r in hist_rows if len(r) > 2 and r[2]}
+                _tdcc_map  = fetch_tdcc_if_needed(ss, hist_codes)
             except Exception:
                 _tdcc_map = {}
             _analysis_rows = _calc_analysis_rows(ss, date_str, current_prices, current_margin,
                                                   cache_prices=current_prices, fast_mode=True,
-                                                  tdcc_map=_tdcc_map, hist_rows=_rec_hist_rows)
+                                                  tdcc_map=_tdcc_map)
         if not _analysis_rows:
             print("  ⚠️ 歷史紀錄無資料，無法計算推薦")
             return
