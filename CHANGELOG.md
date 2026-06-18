@@ -5,6 +5,55 @@ Google Sheets ID：`1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g`
 
 ---
 
+## v11.21 — 2026/06/17
+
+### 新增
+
+- **動能評分（`_score_momentum`，-2 ~ +5 分）**
+  * 當日漲跌% 納入評分：漲 ≥5% → +5；漲 ≥3% → +4；漲 ≥1.5% → +3；漲 ≥0.5% → +2；平盤 → +1；跌 ≥-1.5% → 0；跌 ≥-3% → -1；跌更多 → -2
+  * 目的：法人持續買進 + 當日股價強勢 → 加分，避免過度追高的評分失真
+
+- **振幅% 欄位（`ANALYSIS_HEADERS[38]`）**
+  * 公式：`(當日最高 - 當日最低) / 最低 × 100%`
+  * 來源：STOCK_DAY_ALL batch `row[5]`（最高）、`row[6]`（最低），原本未解析
+  * 振幅 ≥5% 顯示 `⚡5.2%`，提示短線機會與風險並存
+  * `fetch_price_map_batch` 回傳改為 tuple `(price_map, amp_map)`，所有呼叫點同步更新（共 6 處）
+
+- **高風險觀察組（明日關注下方）**
+  * 主榜被過濾掉的股票（出貨風險🔴、現價 > 400 等）另列「⚠️ 高風險觀察組」前5名
+  * 條件放鬆：允許出貨風險🔴/🟡、允許高股價；保留：非ETF、非今日賣超、連續天數 ≥1 天
+  * 新增 `score_stock_relaxed(row)`，邏輯同主榜但移除硬過濾門檻
+  * 觀察組不與主榜重複（排除已在主榜的代號）
+
+- **推薦成效記錄觀察組**
+  * `PERFORMANCE_HEADERS` 新增第 9 欄「組別」（`主榜` / `觀察組`）
+  * `_parse_rec_sheet` 和 `update_performance` 今日 block 解析均識別觀察組 header，正確記錄組別
+  * 後續回測可用「組別」欄分開計算主榜 vs 觀察組勝率
+
+---
+
+## v11.20 — 2026/06/17
+
+### 修正
+
+- **對照分析全部跳過（根本原因：`r[-1]` 欄位錯位）**
+  * v11.18 新增 `r[37]`（今日買超金額）後，過濾邏輯 `r[-1]` 從「最近出現日」變成「今日買超金額（數字）」
+  * `_trading_days_diff` 用數字當日期 parse 失敗回傳 999，`> 5` 導致全部被過濾掉
+  * 修正：改用明確 index `r[36]`（最近出現日），排序同步修正
+  * 此 bug 自 v11.18 起存在；v11.15 因只有 37 欄（`r[-1]` 剛好是 `r[36]`）不受影響
+
+- **歷史紀錄讀取被集保 exception 拖走**
+  * `update_analysis` 原本把歷史紀錄讀取與集保 `fetch_tdcc_if_needed` 包在同一個 try/except 裡
+  * 集保 CSV 下載失敗時 exception 把 `hist_rows` 一起吃掉，導致 `_calc_analysis_rows` 拿到 None
+  * 修正：歷史紀錄讀取移出 try/except，只有集保呼叫包在 try 裡
+
+- **`_calc_analysis_rows` 重複打 API 可能讀到空值**
+  * `update_analysis` 已讀好 `hist_rows` 但未傳入，`_calc_analysis_rows` 自己再打一次 `get_all_values()`
+  * 兩次請求之間若遇 rate limit 或延遲，第二次讀到空，對照分析被跳過
+  * 修正：`_calc_analysis_rows` 加 `hist_rows=None` 參數，有傳入時直接用；兩個呼叫點均傳入已讀好的資料
+
+---
+
 ## v11.18 — 2026/06/16
 
 ### 新增

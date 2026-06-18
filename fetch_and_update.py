@@ -16,7 +16,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.20"  # ← 每次 commit 只改這裡
+VERSION = "v11.21"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -296,11 +296,14 @@ def fetch_price_map_batch(date_str):
 
     rows = data.get("data", [])
     price_map = {}
+    amp_map   = {}   # ★ v11.21 {code: amplitude_pct}  (高-低)/低
     for row in rows:
         try:
             code   = str(row[0]).strip()
             shares = float(str(row[2]).replace(",", ""))
             amount = float(str(row[3]).replace(",", ""))
+            high   = float(str(row[5]).replace(",", ""))  # ★ v11.21
+            low    = float(str(row[6]).replace(",", ""))  # ★ v11.21
             close  = float(str(row[7]).replace(",", ""))
             diff_str = str(row[8]).replace(",", "").strip()
             diff = float(diff_str) if diff_str not in ("", "--", "X0.00") else 0.0
@@ -311,11 +314,13 @@ def fetch_price_map_batch(date_str):
             sign = "+" if pct >= 0 else ""
             pct_str = f"{sign}{pct:.2f}%"
             price_map[code] = (avg, close, vol, pct_str, None)  # 量比 None
+            if low > 0:
+                amp_map[code] = round((high - low) / low * 100, 2)
         except Exception:
             continue
 
     print(f"  [batch] ✅ {len(price_map)} 支")
-    return price_map
+    return price_map, amp_map
 
 
 def fetch_price_map_otc(date_str):
@@ -973,7 +978,10 @@ def enrich_with_prices(groups, date_str, prefetched_map=None):
     total = len(all_codes)
 
     # 第一段：TWSE batch（若外部已抓則直接用）
-    batch_map = prefetched_map if prefetched_map is not None else fetch_price_map_batch(date_str)
+    if prefetched_map is not None:
+        batch_map = prefetched_map
+    else:
+        batch_map, _ = fetch_price_map_batch(date_str)
     hit, miss_codes = 0, []
     for code in all_codes:
         if code in batch_map:
@@ -1657,13 +1665,14 @@ def _consecutive_days(entries, code, all_dates, net_by_date):
 
 
 def build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net_by_date,
-              short_hist=None, market_pct=None, ma5_map=None, tdcc_map=None):
+              short_hist=None, market_pct=None, ma5_map=None, tdcc_map=None, amp_map=None):
     """
     ★ 優化：從 inner function 獨立為模組層函式。
     建立對照分析 / 每日快照 的單列資料。
     ★ v11.6：新增 short_hist 參數，輸出融券趨勢欄。
     ★ v11.9：新增 market_pct 參數，輸出相對強弱欄。
     ★ v11.11：新增 ma5_map 參數，輸出5日線欄。
+    ★ v11.21：新增 amp_map 參數，輸出振幅%欄。
     """
     code = s["code"]
 
@@ -1729,6 +1738,9 @@ def build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net
     else:
         tdcc_label = ""
 
+    # ★ v11.21 振幅%
+    amplitude = (amp_map or {}).get(code, "")
+
     return [
         code, s["name"],
         f_total, f_consec, f_net, f_wavg or "", f_trend,
@@ -1745,6 +1757,7 @@ def build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net
         relative_strength,
         s["last"],
         today_amount,      # ★ v11.18 [37] 今日買超金額（元）
+        amplitude,         # ★ v11.21 [38] 振幅% = (高-低)/低
     ]
 
 
@@ -1763,6 +1776,7 @@ ANALYSIS_HEADERS = [
     "相對強弱%",    # ★ v11.9  [35]
     "最近出現日",   # [36]
     "今日買超金額", # ★ v11.18 [37]
+    "振幅%",        # ★ v11.21 [38] (高-低)/低
 ]
 
 
@@ -1891,7 +1905,7 @@ def update_sector_heatmap(ss, date_str, ss_hist_rows=None):
 
 
 
-def _calc_analysis_rows(ss, date_str, current_prices, current_margin, cache_prices=None, fast_mode=False, tdcc_map=None, hist_rows=None):
+def _calc_analysis_rows(ss, date_str, current_prices, current_margin, cache_prices=None, fast_mode=False, tdcc_map=None, hist_rows=None, amp_map=None):
     """
     從歷史紀錄計算 all_rows（純計算，不寫 Sheets）。
     選4（對照分析）和選6（明日關注）共用此函式。
@@ -1917,7 +1931,7 @@ def _calc_analysis_rows(ss, date_str, current_prices, current_margin, cache_pric
     if missing_price and not fast_mode:
         print(f"  📡 保底補抓現價（{len(missing_price)} 支，快取未涵蓋）...")
         # 第一段：TWSE batch
-        batch_map = fetch_price_map_batch(date_str)
+        batch_map, amp_map = fetch_price_map_batch(date_str)
         still_missing = []
         for code in missing_price:
             if code in batch_map:
@@ -1995,7 +2009,8 @@ def _calc_analysis_rows(ss, date_str, current_prices, current_margin, cache_pric
 
     all_rows = [
         build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net_by_date,
-                  short_hist=short_hist, market_pct=market_pct, ma5_map=ma5_map, tdcc_map=tdcc_map)
+                  short_hist=short_hist, market_pct=market_pct, ma5_map=ma5_map, tdcc_map=tdcc_map,
+                  amp_map=amp_map)
         for s in buy_map.values()
     ]
 
@@ -2028,7 +2043,7 @@ def _calc_analysis_rows(ss, date_str, current_prices, current_margin, cache_pric
     return all_rows
 
 
-def update_analysis(ss, date_str, current_prices, current_margin):
+def update_analysis(ss, date_str, current_prices, current_margin, amp_map=None):
     """
     更新「對照分析」與「每日快照」工作表。
     計算部分委由 _calc_analysis_rows()，本函式只負責寫入 Sheets。
@@ -2047,10 +2062,11 @@ def update_analysis(ss, date_str, current_prices, current_margin):
     except Exception as e:
         print(f"  ⚠️ 集保資料取得失敗，略過：{e}")
         tdcc_map = {}
+    amp_map = amp_map or {}   # ★ v11.21 振幅表：由呼叫端傳入，沒傳就空 dict
 
     all_rows = _calc_analysis_rows(ss, date_str, current_prices, current_margin,
                                    cache_prices=current_prices, tdcc_map=tdcc_map,
-                                   hist_rows=hist_rows)
+                                   hist_rows=hist_rows, amp_map=amp_map)
     if not all_rows:
         print("  ⚠️ 歷史紀錄無資料，跳過對照分析")
         return []
@@ -2092,12 +2108,13 @@ RECOMMEND_HEADERS = [
     "排名", "代號", "股票名稱", "評分",
     "連續天數", "籌碼集中度%", "籌碼集中度評級",
     "出貨風險", "融資健康度",
-    "現價", "當日漲跌%", "自營商標記",
+    "現價", "當日漲跌%", "振幅%", "自營商標記",
 ]
 
 PERFORMANCE_HEADERS = [
     "推薦日", "代號", "股票名稱", "推薦評分",
     "推薦收盤", "T+1收盤", "T+2收盤", "T+3收盤",
+    "組別",   # ★ v11.21 主榜/觀察組
 ]
 
 
@@ -2250,6 +2267,22 @@ def _score_net_amount(amount):
     return 1                               # 未達3千萬
 
 
+def _score_momentum(chg_pct):
+    """
+    當日漲跌% 動能評分（-2 ~ +5 分）。★ v11.21
+    法人持續買進 + 當日股價也強 → 加分；弱勢下跌 → 小扣分。
+    避免給太高分以免過度追高，上限 +5。
+    """
+    if chg_pct >= 5.0:  return 5   # 強勢大漲
+    if chg_pct >= 3.0:  return 4
+    if chg_pct >= 1.5:  return 3
+    if chg_pct >= 0.5:  return 2
+    if chg_pct >= 0.0:  return 1   # 小漲或平盤
+    if chg_pct >= -1.5: return 0   # 小跌，中性
+    if chg_pct >= -3.0: return -1
+    return -2                       # 大跌
+
+
 def score_stock(row):
     """
     輸入 build_row 產出的 row，回傳綜合評分（0~100）。
@@ -2276,6 +2309,7 @@ def score_stock(row):
     tdcc_raw     = row[32] if len(row) > 32 else ""   # ★ v11.15 [32]
     short_trend  = row[33] if len(row) > 33 else ""   # [33]
     today_amount = row[37] if len(row) > 37 else 0    # ★ v11.18 [37]
+    amplitude    = row[38] if len(row) > 38 else ""   # ★ v11.21 [38]
     try:
         today_amount = float(today_amount) if today_amount else 0
     except (ValueError, TypeError):
@@ -2327,6 +2361,12 @@ def score_stock(row):
     )
     if consec == 0: return None
 
+    # ★ v11.21 當日漲跌%→動能分
+    try:
+        chg_val = float(str(row[20]).replace("%", "").replace("+", "").strip())
+    except (ValueError, TypeError):
+        chg_val = 0.0
+
     score = (
         _score_matrix(consec, chip_lbl) +      # 40分
         _score_margin(health) +                # 25分
@@ -2335,7 +2375,78 @@ def score_stock(row):
         _score_accel(accel_label) +            # 3分
         _score_short_trend(short_trend) +      # -8 ~ +8分
         _score_tdcc(tdcc_big_pct, tdcc_weekly_chg) +  # ★ v11.15 -5 ~ +5分
-        _score_net_amount(today_amount)        # ★ v11.18 0~8分
+        _score_net_amount(today_amount) +      # ★ v11.18 0~8分
+        _score_momentum(chg_val)               # ★ v11.21 -2 ~ +5分
+    )
+    return max(0, min(score, 100))
+
+
+def score_stock_relaxed(row):
+    """
+    ★ v11.21 觀察組用：放鬆過濾條件的評分版本。
+    取消：出貨風險🔴過濾、現價>400過濾。
+    保留：ETF過濾、今日賣超過濾、consec==0過濾。
+    評分邏輯與 score_stock 相同（包含動能分）。
+    """
+    code         = row[0]
+    signal       = row[23]
+    risk         = row[22]
+    accel_label  = row[24] if len(row) > 24 else ""
+    chip_lbl     = row[26]
+    health       = row[29]
+    vr_raw = row[30] if len(row) > 30 else None
+    tdcc_raw     = row[32] if len(row) > 32 else ""
+    short_trend  = row[33] if len(row) > 33 else ""
+    today_amount = row[37] if len(row) > 37 else 0
+    try:
+        today_amount = float(today_amount) if today_amount else 0
+    except (ValueError, TypeError):
+        today_amount = 0
+    try:
+        volume_ratio = float(vr_raw) if (vr_raw is not None and vr_raw != "") else None
+    except (ValueError, TypeError):
+        volume_ratio = None
+
+    tdcc_big_pct, tdcc_weekly_chg = None, None
+    if tdcc_raw:
+        m_pct = re.search(r"([\d.]+)%", str(tdcc_raw))
+        m_chg = re.search(r"[↑↓➡]([\d.]+)", str(tdcc_raw))
+        if m_pct:
+            tdcc_big_pct = float(m_pct.group(1))
+        if m_chg:
+            sign = 1 if "↑" in str(tdcc_raw) else (-1 if "↓" in str(tdcc_raw) else 0)
+            tdcc_weekly_chg = sign * float(m_chg.group(1))
+
+    # 放鬆版過濾（只過濾 ETF、今日賣超、無集中度、consec==0）
+    _finance_codes = set(SECTOR_MAP.get("金融", []))
+    if is_etf_code(code):              return None
+    if code in _finance_codes:         return None
+    if "🔴 今日賣超" in str(signal):    return None
+    if not chip_lbl:                    return None
+    # 不過濾出貨風險🔴、不過濾現價>400、不過濾漲幅>8%
+
+    consec = max(
+        int(row[3])  if str(row[3]).isdigit()  else 0,
+        int(row[8])  if str(row[8]).isdigit()  else 0,
+        int(row[13]) if str(row[13]).isdigit() else 0,
+    )
+    if consec == 0: return None
+
+    try:
+        chg_val = float(str(row[20]).replace("%", "").replace("+", "").strip())
+    except (ValueError, TypeError):
+        chg_val = 0.0
+
+    score = (
+        _score_matrix(consec, chip_lbl) +
+        _score_margin(health) +
+        _score_risk(risk) +
+        _score_volume_ratio(volume_ratio) +
+        _score_accel(accel_label) +
+        _score_short_trend(short_trend) +
+        _score_tdcc(tdcc_big_pct, tdcc_weekly_chg) +
+        _score_net_amount(today_amount) +
+        _score_momentum(chg_val)
     )
     return max(0, min(score, 100))
 
@@ -2365,12 +2476,18 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
             futures_line = "外資大台指淨部位：⚠️ 資料取得失敗"
         print(f"  {futures_line}")
 
+    # ★ v11.21 振幅標記輔助
+    def _amp_label(row):
+        try:
+            amp = float(row[38]) if len(row) > 38 and row[38] != "" else 0.0
+        except (ValueError, TypeError):
+            amp = 0.0
+        return f"⚡{amp:.1f}%" if amp >= 5.0 else (f"{amp:.1f}%" if amp > 0 else "")
+
     # 計算評分，過濾不合格
     scored = []
+    watch_scored = []   # ★ v11.21 觀察組（放鬆限制）
     for row in all_rows:
-        s = score_stock(row)
-        if s is None:
-            continue
         code     = row[0]
         name     = row[1]
         consec   = max(
@@ -2386,14 +2503,31 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
         close    = row[19]
         chg_pct  = row[20]
         dealer   = _dealer_label(d_consec)
-        # 出貨風險高時加標記
+        amp_lbl  = _amp_label(row)
         risk_disp = f"{risk} ⚠️" if risk == "🔴 高" else risk
-        scored.append((s, [code, name, s, consec, chip_pct, chip_lbl,
-                           risk_disp, health, close, chg_pct, dealer]))
 
-    # 依評分降冪，取前5
+        s = score_stock(row)
+        if s is not None:
+            scored.append((s, [code, name, s, consec, chip_pct, chip_lbl,
+                               risk_disp, health, close, chg_pct, dealer, amp_lbl]))
+
+        # ★ v11.21 觀察組：放鬆過濾（允許風險中/高、允許>400元、允許ETF外其他）
+        # 只要 consec >= 1，有集中度資料，今日非賣超，且非ETF
+        if (not is_etf_code(code) and consec >= 1 and chip_lbl and
+                "🔴 今日賣超" not in str(row[23]) and s is None):
+            # s is None 代表被主榜過濾掉的（高風險/高價等），重算放鬆版評分
+            sw = score_stock_relaxed(row)
+            if sw is not None:
+                watch_scored.append((sw, [code, name, sw, consec, chip_pct, chip_lbl,
+                                          risk_disp, health, close, chg_pct, dealer, amp_lbl]))
+
+    # 依評分降冪，取前5；觀察組另取前5（排除已在主榜的代號）
     scored.sort(key=lambda x: x[0], reverse=True)
     top5 = scored[:5]
+    top5_codes = {r[0] for _, r in top5}
+
+    watch_scored.sort(key=lambda x: x[0], reverse=True)
+    watch5 = [x for x in watch_scored if x[1][0] not in top5_codes][:5]
 
     n_cols = len(RECOMMEND_HEADERS)
     ws = get_or_create(ss, "明日關注", n_cols)
@@ -2405,14 +2539,29 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
     for rank, (score, r) in enumerate(top5, 1):
         rec_rows.append([rank] + r)
 
+    # ★ v11.21 觀察組區塊
+    watch_rows = []
+    for rank, (score, r) in enumerate(watch5, 1):
+        watch_rows.append([rank] + r)
+
     block = [
         [f"資料日期：{disp} ｜ 明日關注推薦（綜合評分前5名）"] + [""] * (n_cols - 1),
         [futures_line] + [""] * (n_cols - 1),
         RECOMMEND_HEADERS,
     ] + rec_rows
 
+    if watch_rows:
+        block += [
+            [f"── ⚠️ 高風險觀察組（條件放寬，僅供參考）"] + [""] * (n_cols - 1),
+            RECOMMEND_HEADERS,
+        ] + watch_rows
+
     prepend_block(ws, block, disp, "資料日期：", n_cols)
-    print(f"  ✅ 明日關注 更新完成（Top5：{', '.join(r[1] for _, r in top5)}）")
+    top5_names = ', '.join(r[1] for _, r in top5)
+    watch_names = ', '.join(r[1] for _, r in watch5)
+    print(f"  ✅ 明日關注 更新完成（Top5：{top5_names}）")
+    if watch_names:
+        print(f"  ⚠️ 觀察組：{watch_names}")
     return futures_line
 
 
@@ -2423,8 +2572,9 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
 def _parse_rec_sheet(all_vals, disp_today):
     """
     解析「明日關注」工作表，回傳所有 block：
-    { disp: [(代號, 名稱, 評分, 推薦收盤), ...] }
+    { disp: [(代號, 名稱, 評分, 推薦收盤, 組別), ...] }
     跳過今日 block。
+    ★ v11.21：識別觀察組 header，記錄 group="觀察組" / "主榜"
     """
     result = {}
     i = 0
@@ -2433,20 +2583,33 @@ def _parse_rec_sheet(all_vals, disp_today):
         if cell.startswith("資料日期：") and disp_today not in cell:
             disp = cell.replace("資料日期：", "").split("｜")[0].strip()
             stocks = []
+            group = "主榜"   # ★ v11.21 預設主榜
             i += 1
+            # 跳過外資期貨行
+            if i < len(all_vals) and all_vals[i] and all_vals[i][0].startswith("外資大台"):
+                i += 1
             if i < len(all_vals) and all_vals[i] and all_vals[i][0] == "排名":
                 i += 1
             while i < len(all_vals):
                 row = all_vals[i]
                 c0  = row[0] if row else ""
-                if c0.startswith("─") or c0.startswith("資料日期："):
+                if c0.startswith("資料日期：") or c0.startswith("─────"):
                     break
+                if "高風險觀察組" in c0:     # ★ v11.21 觀察組 header
+                    group = "觀察組"
+                    i += 1
+                    if i < len(all_vals) and all_vals[i] and all_vals[i][0] == "排名":
+                        i += 1
+                    continue
+                if c0.startswith("── "):     # 其他分隔行跳過
+                    i += 1
+                    continue
                 if len(row) >= 4 and row[1] and row[1].strip().isdigit():
                     try:
                         close = float(row[9].strip()) if len(row) > 9 and row[9].strip() else 0.0
                     except ValueError:
                         close = 0.0
-                    stocks.append((row[1].strip(), row[2].strip(), row[3].strip(), close))
+                    stocks.append((row[1].strip(), row[2].strip(), row[3].strip(), close, group))
                 i += 1
             if stocks:
                 result[disp] = stocks
@@ -2583,28 +2746,41 @@ def update_performance(ss, date_str, current_prices):
         cell = row[0] if row else ""
         if cell.startswith("資料日期：") and disp_today in cell:
             j = i + 1
+            # 跳過外資期貨行
+            if j < len(rec_vals) and rec_vals[j] and rec_vals[j][0].startswith("外資大台"):
+                j += 1
             if j < len(rec_vals) and rec_vals[j] and rec_vals[j][0] == "排名":
                 j += 1
+            group = "主榜"   # ★ v11.21
             while j < len(rec_vals):
                 r = rec_vals[j]
                 c0 = r[0] if r else ""
-                if c0.startswith("─") or c0.startswith("資料日期："):
+                if c0.startswith("資料日期：") or c0.startswith("─────"):
                     break
+                if "高風險觀察組" in c0:    # ★ v11.21
+                    group = "觀察組"
+                    j += 1
+                    if j < len(rec_vals) and rec_vals[j] and rec_vals[j][0] == "排名":
+                        j += 1
+                    continue
+                if c0.startswith("── "):
+                    j += 1
+                    continue
                 if len(r) >= 4 and r[1] and r[1].strip().isdigit():
                     try:
                         close = float(r[9].strip()) if len(r) > 9 and r[9].strip() else 0.0
                     except ValueError:
                         close = 0.0
-                    today_stocks.append((r[1].strip(), r[2].strip(), r[3].strip(), close))
+                    today_stocks.append((r[1].strip(), r[2].strip(), r[3].strip(), close, group))
                 j += 1
             break
 
     new_rows = []
-    for code, name, score, base_close in today_stocks:
+    for code, name, score, base_close, group in today_stocks:
         if code not in today_codes_in_rows:
             new_rows.append([disp_today, code, name, score,
                              base_close if base_close > 0 else "",
-                             "", "", ""])
+                             "", "", "", group])   # ★ v11.21 加 group
 
     rows = new_rows + rows
 
@@ -2869,7 +3045,7 @@ def update_sector_sheet(ss, date_str, all_buy_codes, all_buy_names, current_pric
     if missing and not sheet_only:
         print(f"  補抓族群成員行情（{len(missing)} 支不在快取中）...")
         # ★ v11.0 三段式：TWSE batch → OTC batch → 逐支補抓
-        batch_map = fetch_price_map_batch(date_str)
+        batch_map, amp_map = fetch_price_map_batch(date_str)
         still_missing = []
         for code in missing:
             if code in batch_map:
@@ -3094,7 +3270,7 @@ def prefetch_history_codes(ss, date_str, current_prices, current_margin):
     if missing:
         print(f"  📡 補抓歷史股票現價（{len(missing)} 支）...")
         # 三段式：TWSE batch → OTC batch → 逐支
-        batch_map = fetch_price_map_batch(date_str)
+        batch_map, amp_map = fetch_price_map_batch(date_str)
         still_missing = []
         for code in missing:
             if code in batch_map:
@@ -3286,7 +3462,8 @@ def main():
             try:
                 # 先抓全市場 batch，賣超和買超共用，不重打 API
                 sell_price_map = {}
-                sell_price_map.update(fetch_price_map_batch(date_str))
+                _step2_batch, amp_map = fetch_price_map_batch(date_str)  # ★ v11.21
+                sell_price_map.update(_step2_batch)
                 sell_price_map.update(fetch_price_map_otc(date_str))
                 # 買超：完整三段式（含量比），直接傳入已抓好的 batch，不重打
                 enrich_with_prices([foreign, trust, dealer], date_str, prefetched_map=sell_price_map)
@@ -3355,7 +3532,8 @@ def main():
         # 快取命中時 sell_price_map = current_prices（僅 300 支），需重新抓全市場
         if sell_price_map is current_prices:
             _full_map = {}
-            _full_map.update(fetch_price_map_batch(date_str))
+            _full_batch, amp_map = fetch_price_map_batch(date_str)  # ★ v11.21
+            _full_map.update(_full_batch)
             _full_map.update(fetch_price_map_otc(date_str))
             sell_price_map = _full_map
         for code, val in sell_price_map.items():
@@ -3392,7 +3570,7 @@ def main():
 
     def _run_analysis():
         nonlocal _analysis_rows
-        _analysis_rows = update_analysis(ss, date_str, current_prices, current_margin)
+        _analysis_rows = update_analysis(ss, date_str, current_prices, current_margin, amp_map=amp_map)
 
     def _run_recommendation():
         nonlocal _analysis_rows, _cached_futures
@@ -3407,7 +3585,8 @@ def main():
                 _tdcc_map = {}
             _analysis_rows = _calc_analysis_rows(ss, date_str, current_prices, current_margin,
                                                   cache_prices=current_prices, fast_mode=True,
-                                                  tdcc_map=_tdcc_map, hist_rows=_rec_hist_rows)
+                                                  tdcc_map=_tdcc_map, hist_rows=_rec_hist_rows,
+                                                  amp_map=amp_map)
         if not _analysis_rows:
             print("  ⚠️ 歷史紀錄無資料，無法計算推薦")
             return
