@@ -5,6 +5,34 @@ Google Sheets ID：`1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g`
 
 ---
 
+## v11.24 — 2026/06/23
+
+### fetch_and_update.py
+- **`fetch_holidays_from_twse(year)`（新增）**：呼叫 TWSE 假日月曆 API，解析民國年日期，回傳 `set of "YYYYMMDD"`
+- **`ensure_holidays_loaded(year)`（新增）**：檢查 `HOLIDAYS` 是否已含指定年度資料；若無則呼叫 API 查詢，並用 regex 寫回 config.py 永久記錄
+- **`_is_trading_day(d)`（新增）**：判斷是否為交易日（非週末且不在 `HOLIDAYS`）
+- **`_n_trading_days_after`（修正）**：改用 `_is_trading_day`，國定假日不再被計入交易日，修正推薦成效 T+1/T+2/T+3 欄位在連假後對齊錯誤的問題
+- **`find_trading_day`（修正）**：改用 `_is_trading_day`，國定假日不再嘗試抓法人資料
+- 全域載入：`HOLIDAYS = getattr(_cfg, "HOLIDAYS", set())`
+
+### config.py
+- **`HOLIDAYS`（新增）**：新增國定假日 set，預填 2026 年已知休市日（含端午 6/19、6/22）；程式首次跑到新年度時自動查 TWSE 補入，不需手動維護
+- **`其他` 族群整理**：16 支移出，只保留漢唐(2404)
+  - → PCB：精成科(6191)、廣宇(2328)
+  - → 電子代工：瑞軒(2489)
+  - → 半導體：全新(2455)
+  - → 網通：兆赫(2485)、智易(3596)
+  - → 面板：TPK-KY(3673)
+  - → 電源供應：飛宏(2457)
+  - → 傳產：寶成(9904)、復盛應用(6670)、億豐(8464)
+  - → 被動元件（現有）：立隆電(2472)、凱美(2375)
+  - → 生技醫療（現有）：康霈(6919)
+  - → **新建「LED」族群**：富采(3714)、宏齊(6168)
+- **`CODE_NAME_MAP` 補入** 16 支新歸類股票名稱
+- 族群總數：21 → 22；CODE_NAME_MAP：168 → 184 筆
+
+---
+
 ## v11.23 — 2026/06/22
 
 ### fetch_and_update.py

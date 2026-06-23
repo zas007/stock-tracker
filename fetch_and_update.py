@@ -35,12 +35,14 @@ try:
     LARGE_BUY_RATIO = getattr(_cfg, "LARGE_BUY_RATIO", 1.5)
     SECTOR_MAP  = _cfg.SECTOR_MAP
     CODE_NAME_MAP = _cfg.CODE_NAME_MAP
+    HOLIDAYS    = getattr(_cfg, "HOLIDAYS", set())
     print("✅ 已載入 config.py")
 except ImportError:
     print("⚠️ 找不到 config.py，使用主程式內建預設值")
     CODE_NAME_MAP   = {}
     LARGE_BUY_DAYS  = 3
     LARGE_BUY_RATIO = 1.5
+    HOLIDAYS        = set()
 
 # ═══════════════════════════════════════════════
 # ★ 固定系統設定
@@ -2631,16 +2633,102 @@ def _parse_rec_sheet(all_vals, disp_today):
     return result
 
 
+def fetch_holidays_from_twse(year: int) -> set:
+    """
+    ★ v11.24：從 TWSE 假日月曆 API 查詢指定年度的非週末休市日，
+    回傳 set of "YYYYMMDD"。查詢失敗回傳空 set。
+    """
+    url = f"https://www.twse.com.tw/rwd/zh/holidaySchedule/holidaySchedule?response=json&queryYear={year}"
+    try:
+        text = curl_get(url)
+        if not text:
+            return set()
+        data = json.loads(text)
+        holidays = set()
+        for row in data.get("data", []):
+            # row[0] = 日期（民國年 MM/DD 或 YYYY/MM/DD 視 API 版本）
+            # row[2] = 說明（如「休市」「補假」）
+            date_raw = row[0].strip()
+            # TWSE 回傳民國年，如 "115/06/19"
+            if "/" in date_raw:
+                parts = date_raw.split("/")
+                if len(parts) == 3:
+                    roc_year = int(parts[0])
+                    ad_year = roc_year + 1911
+                    date_str = f"{ad_year}{parts[1]}{parts[2]}"
+                    holidays.add(date_str)
+        return holidays
+    except Exception as e:
+        print(f"  ⚠️ 無法查詢 TWSE 假日月曆（{year}）：{e}")
+        return set()
+
+
+def ensure_holidays_loaded(year: int) -> None:
+    """
+    ★ v11.24：確認 HOLIDAYS 包含指定年度的假日資料。
+    若該年度尚未載入，從 TWSE 查詢後寫回 config.py 並更新全域 HOLIDAYS。
+    """
+    global HOLIDAYS
+    # 判斷該年度是否已有資料（用任一該年份日期判斷）
+    year_str = str(year)
+    has_year = any(d.startswith(year_str) for d in HOLIDAYS)
+    if has_year:
+        return
+
+    print(f"  📅 查詢 {year} 年 TWSE 假日月曆...")
+    new_holidays = fetch_holidays_from_twse(year)
+    if not new_holidays:
+        print(f"  ⚠️ 查詢失敗或無資料，略過 {year} 年假日更新")
+        return
+
+    HOLIDAYS = HOLIDAYS | new_holidays
+    print(f"  ✅ 新增 {len(new_holidays)} 個假日，寫回 config.py")
+
+    # 找到 config.py 路徑並更新 HOLIDAYS
+    try:
+        cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.py")
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        # 將新假日合併後重新寫入 HOLIDAYS = { ... } 區塊
+        sorted_days = sorted(HOLIDAYS)
+        lines = [f'    "{d}",  # 自動補入\n' for d in sorted_days]
+        new_block = "HOLIDAYS = {\n" + "".join(lines) + "}\n"
+
+        import re as _re
+        # 替換原有的 HOLIDAYS = { ... } 區塊
+        content = _re.sub(
+            r"HOLIDAYS\s*=\s*\{[^}]*\}",
+            new_block.rstrip("\n"),
+            content,
+            flags=_re.DOTALL
+        )
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        print(f"  ✅ config.py HOLIDAYS 已更新（共 {len(sorted_days)} 筆）")
+    except Exception as e:
+        print(f"  ⚠️ 寫回 config.py 失敗：{e}（HOLIDAYS 本次仍生效）")
+
+
+def _is_trading_day(d: "datetime") -> bool:
+    """回傳 d 是否為交易日（非週末且非國定假日）。"""
+    return d.weekday() < 5 and d.strftime("%Y%m%d") not in HOLIDAYS
+
+
 def _n_trading_days_after(base_disp, n):
     """
-    回傳 base_disp（YYYY/MM/DD）之後第 n 個交易日的 disp 字串（跳週末）。
+    ★ v11.24：回傳 base_disp（YYYY/MM/DD）之後第 n 個交易日的 disp 字串。
+    跳過週末 + 國定假日（HOLIDAYS）。
     """
     from datetime import datetime, timedelta
     d = datetime.strptime(base_disp, "%Y/%m/%d")
+    # 確保該年度假日已載入
+    ensure_holidays_loaded(d.year)
+    ensure_holidays_loaded(d.year + 1)  # 跨年保險
     count = 0
     while count < n:
         d += timedelta(days=1)
-        if d.weekday() < 5:
+        if _is_trading_day(d):
             count += 1
     return d.strftime("%Y/%m/%d")
 
@@ -3142,16 +3230,19 @@ def find_trading_day():
     """
     ★ v11.7：16:30 前自動使用前一交易日（三大法人資料 16:30 後才釋出）；
     16:30 後先嘗試今天，沒資料再往前找。執行時間顯示於 Step 1。
+    ★ v11.24：跳過週末 + 國定假日（HOLIDAYS）。
     """
     warm_up_cookie()
     now = datetime.now()
     d = now
     print(f"  執行時間：{now.strftime('%Y/%m/%d %H:%M')}")
+    ensure_holidays_loaded(now.year)
+    ensure_holidays_loaded(now.year - 1)  # 年初保險
     if now.hour < 16 or (now.hour == 16 and now.minute < 30):
         print(f"  16:30 前自動使用前一交易日（三大法人資料 16:30 後才釋出）")
         d -= timedelta(days=1)
-    for _ in range(7):
-        if d.weekday() < 5:
+    for _ in range(10):
+        if _is_trading_day(d):
             date_str = d.strftime("%Y%m%d")
             try:
                 print(f"  嘗試 {date_str}...")
