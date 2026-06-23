@@ -100,14 +100,17 @@ def load_perf_history(ss):
         if not row or not date_pat.match(str(row[0]).strip()):
             continue
         result.append({
-            "rec_date":   row[0].strip(),
-            "code":       row[1].strip() if len(row) > 1 else "",
-            "name":       row[2].strip() if len(row) > 2 else "",
-            "score":      _f(row[3])     if len(row) > 3 else None,
-            "base_close": _f(row[4])     if len(row) > 4 else None,
-            "t1":         _f(row[5])     if len(row) > 5 else None,
-            "t2":         _f(row[6])     if len(row) > 6 else None,
-            "t3":         _f(row[7])     if len(row) > 7 else None,
+            "rec_date":     row[0].strip(),
+            "code":         row[1].strip() if len(row) > 1 else "",
+            "name":         row[2].strip() if len(row) > 2 else "",
+            "score":        _f(row[3])     if len(row) > 3 else None,
+            "base_close":   _f(row[4])     if len(row) > 4 else None,
+            "t1":           _f(row[5])     if len(row) > 5 else None,
+            "t2":           _f(row[6])     if len(row) > 6 else None,
+            "t3":           _f(row[7])     if len(row) > 7 else None,
+            "group":        row[8].strip() if len(row) > 8 else "",
+            "risk":         row[9].strip() if len(row) > 9 else "",   # ★ v11.23
+            "margin_health":row[10].strip() if len(row) > 10 else "", # ★ v11.23
         })
     print(f"  ✅ 推薦歷史讀取 {len(result)} 筆")
     return result
@@ -263,10 +266,9 @@ def _rebuild_features(rec, hist_map):
         "chip_pct":      chip_pct_disp,
         "chip_lbl":      chip_lbl,
         "accel_lbl":     accel_lbl,
-        # TODO 欄位（需額外 API）
-        "margin_health": "TODO",
-        "risk":          "TODO",
-        "short_trend":   "TODO",
+        "margin_health": rec.get("margin_health", ""),  # ★ v11.23 從推薦歷史直接取
+        "risk":          rec.get("risk", ""),            # ★ v11.23 從推薦歷史直接取
+        "short_trend":   "TODO",   # 仍待補
     }
 
 
@@ -338,7 +340,28 @@ def calc_win_rate_matrix(detail_rows):
     sections.append(("【推薦評分分桶 × T+1 勝率】",
         _stats(detail_rows, _score_bucket, "t1_pnl")))
 
-    # 切面 5：整體 T+1/T+2/T+3 勝率
+    # 切面 5：出貨風險
+    def _risk_lbl(r):
+        v = str(r.get("risk", "")).strip()
+        return v if v and v != "TODO" else "未知"
+    sections.append(("【出貨風險 × T+1 勝率】",
+        _stats(detail_rows, _risk_lbl, "t1_pnl")))
+
+    # 切面 6：融資健康度
+    def _margin_lbl(r):
+        v = str(r.get("margin_health", "")).strip()
+        return v if v and v != "TODO" else "未知"
+    sections.append(("【融資健康度 × T+1 勝率】",
+        _stats(detail_rows, _margin_lbl, "t1_pnl")))
+
+    # 切面 7：主榜 vs 觀察組
+    def _group_lbl(r):
+        v = str(r.get("group", "")).strip()
+        return v if v else "未知"
+    sections.append(("【主榜 vs 觀察組 × T+1 勝率】",
+        _stats(detail_rows, _group_lbl, "t1_pnl")))
+
+    # 切面 8：整體 T+1/T+2/T+3 勝率
     overall = []
     for t_key, label in [("t1_pnl","T+1"),("t2_pnl","T+2"),("t3_pnl","T+3")]:
         pnls = [r[t_key] for r in detail_rows if r.get(t_key) is not None]
@@ -352,7 +375,7 @@ def calc_win_rate_matrix(detail_rows):
             "rate": f"{rate}%{suffix}" if rate is not None else "N/A",
             "avg":  avg,
         })
-    sections.append(("【整體 T+1 / T+2 / T+3 勝率】", overall))
+    sections.append(("【整體 T+1 / T+2 / T+3 勝率（總覽）】", overall))
 
     return sections
 
@@ -501,6 +524,7 @@ def main():
             "t1": t1, "t1_pnl": calc_pnl(base, t1),
             "t2": t2, "t2_pnl": calc_pnl(base, t2),
             "t3": t3, "t3_pnl": calc_pnl(base, t3),
+            "group": rec.get("group", ""),  # ★ v11.23
         }
         detail_rows.append(row)
 

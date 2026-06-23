@@ -16,7 +16,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.21"  # ← 每次 commit 只改這裡
+VERSION = "v11.23"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -2114,14 +2114,19 @@ RECOMMEND_HEADERS = [
 PERFORMANCE_HEADERS = [
     "推薦日", "代號", "股票名稱", "推薦評分",
     "推薦收盤", "T+1收盤", "T+2收盤", "T+3收盤",
-    "組別",   # ★ v11.21 主榜/觀察組
+    "組別",       # ★ v11.21 主榜/觀察組
+    "出貨風險",   # ★ v11.23 推薦當日出貨風險
+    "融資健康度", # ★ v11.23 推薦當日融資健康度
 ]
 
 
-def _score_matrix(consec, chip_lbl):
+def _score_matrix(consec, chip_lbl, today_amount=0):
     """
     連續天數 × 籌碼集中度 矩陣評分（40分）
     天數越長代表法人持續買進，分數越高。
+    ★ v11.22 大型股補償：籌碼偏低但買超金額 ≥1億時，偏低分 ×1.5（無條件進位）
+      原因：大型股成交量大，法人買1萬張也只佔2%，籌碼集中度天生偏低
+      但絕對金額大代表法人認真佈局，不應被 matrix 嚴重懲罰
     """
     if chip_lbl == "🔵 高度集中":
         if consec <= 3:   return 26
@@ -2132,9 +2137,17 @@ def _score_matrix(consec, chip_lbl):
         elif consec <= 7: return 21
         else:             return 27
     else:  # 偏低
-        if consec <= 3:   return 4
-        elif consec <= 7: return 7
-        else:             return 10
+        base = 4 if consec <= 3 else (7 if consec <= 7 else 10)
+        # ★ v11.22 大型股補償：買超金額 ≥1億 → ×1.5，≥3億 → ×2（上限比照中度集中）
+        try:
+            amt = float(today_amount) if today_amount else 0
+        except (ValueError, TypeError):
+            amt = 0
+        if amt >= 300_000_000:
+            return min(int(base * 2 + 0.5), 27)   # 上限比照中度集中最高分
+        elif amt >= 100_000_000:
+            return min(int(base * 1.5 + 0.5), 20)
+        return base
 
 
 def _score_margin(health):
@@ -2368,7 +2381,7 @@ def score_stock(row):
         chg_val = 0.0
 
     score = (
-        _score_matrix(consec, chip_lbl) +      # 40分
+        _score_matrix(consec, chip_lbl, today_amount) +  # 40分（★v11.22 大型股補償）
         _score_margin(health) +                # 25分
         _score_risk(risk) +                    # 15分
         _score_volume_ratio(volume_ratio) +    # 7分
@@ -2438,7 +2451,7 @@ def score_stock_relaxed(row):
         chg_val = 0.0
 
     score = (
-        _score_matrix(consec, chip_lbl) +
+        _score_matrix(consec, chip_lbl, today_amount) +  # ★ v11.22
         _score_margin(health) +
         _score_risk(risk) +
         _score_volume_ratio(volume_ratio) +
@@ -2771,16 +2784,19 @@ def update_performance(ss, date_str, current_prices):
                         close = float(r[9].strip()) if len(r) > 9 and r[9].strip() else 0.0
                     except ValueError:
                         close = 0.0
-                    today_stocks.append((r[1].strip(), r[2].strip(), r[3].strip(), close, group))
+                    risk          = r[7].strip() if len(r) > 7 else ""
+                    margin_health = r[8].strip() if len(r) > 8 else ""
+                    today_stocks.append((r[1].strip(), r[2].strip(), r[3].strip(), close, group, risk, margin_health))  # ★ v11.23
                 j += 1
             break
 
     new_rows = []
-    for code, name, score, base_close, group in today_stocks:
+    for code, name, score, base_close, group, risk, margin_health in today_stocks:
         if code not in today_codes_in_rows:
             new_rows.append([disp_today, code, name, score,
                              base_close if base_close > 0 else "",
-                             "", "", "", group])   # ★ v11.21 加 group
+                             "", "", "", group,
+                             risk, margin_health])   # ★ v11.23 出貨風險/融資健康度
 
     rows = new_rows + rows
 
