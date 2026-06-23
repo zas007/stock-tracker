@@ -36,6 +36,7 @@ try:
     SECTOR_MAP  = _cfg.SECTOR_MAP
     CODE_NAME_MAP = _cfg.CODE_NAME_MAP
     HOLIDAYS    = getattr(_cfg, "HOLIDAYS", set())
+    _HOLIDAYS_ATTEMPTED = set()  # ★ v11.25 已嘗試查詢的年度（不重試）
     print("✅ 已載入 config.py")
 except ImportError:
     print("⚠️ 找不到 config.py，使用主程式內建預設值")
@@ -43,6 +44,7 @@ except ImportError:
     LARGE_BUY_DAYS  = 3
     LARGE_BUY_RATIO = 1.5
     HOLIDAYS        = set()
+    _HOLIDAYS_ATTEMPTED = set()
 
 # ═══════════════════════════════════════════════
 # ★ 固定系統設定
@@ -2667,14 +2669,19 @@ def ensure_holidays_loaded(year: int) -> None:
     """
     ★ v11.24：確認 HOLIDAYS 包含指定年度的假日資料。
     若該年度尚未載入，從 TWSE 查詢後寫回 config.py 並更新全域 HOLIDAYS。
+    ★ v11.25：加入 _HOLIDAYS_ATTEMPTED 記錄，查詢失敗後不再重試。
     """
-    global HOLIDAYS
-    # 判斷該年度是否已有資料（用任一該年份日期判斷）
+    global HOLIDAYS, _HOLIDAYS_ATTEMPTED
     year_str = str(year)
+    # 已有資料或已嘗試過（無論成功失敗）→ 直接返回
+    if year_str in _HOLIDAYS_ATTEMPTED:
+        return
     has_year = any(d.startswith(year_str) for d in HOLIDAYS)
     if has_year:
+        _HOLIDAYS_ATTEMPTED.add(year_str)
         return
 
+    _HOLIDAYS_ATTEMPTED.add(year_str)  # 先標記，避免失敗後重試
     print(f"  📅 查詢 {year} 年 TWSE 假日月曆...")
     new_holidays = fetch_holidays_from_twse(year)
     if not new_holidays:
@@ -2690,13 +2697,11 @@ def ensure_holidays_loaded(year: int) -> None:
         with open(cfg_path, "r", encoding="utf-8") as f:
             content = f.read()
 
-        # 將新假日合併後重新寫入 HOLIDAYS = { ... } 區塊
         sorted_days = sorted(HOLIDAYS)
         lines = [f'    "{d}",  # 自動補入\n' for d in sorted_days]
         new_block = "HOLIDAYS = {\n" + "".join(lines) + "}\n"
 
         import re as _re
-        # 替換原有的 HOLIDAYS = { ... } 區塊
         content = _re.sub(
             r"HOLIDAYS\s*=\s*\{[^}]*\}",
             new_block.rstrip("\n"),
@@ -2722,9 +2727,7 @@ def _n_trading_days_after(base_disp, n):
     """
     from datetime import datetime, timedelta
     d = datetime.strptime(base_disp, "%Y/%m/%d")
-    # 確保該年度假日已載入
     ensure_holidays_loaded(d.year)
-    ensure_holidays_loaded(d.year + 1)  # 跨年保險
     count = 0
     while count < n:
         d += timedelta(days=1)
@@ -2887,6 +2890,12 @@ def update_performance(ss, date_str, current_prices):
                              risk, margin_health])   # ★ v11.23 出貨風險/融資健康度
 
     rows = new_rows + rows
+
+    # ── 年度假日預載（避免迴圈內重複查詢）★ v11.25 ──
+    from datetime import datetime as _dt
+    _years = {int(r[0][:4]) for r in rows if r and r[0] and r[0][:4].isdigit()}
+    for _y in _years:
+        ensure_holidays_loaded(_y)
 
     # ── 步驟2：填入今日收盤到 T+1 / T+2 / T+3 欄 ──
     # col index: 推薦日[0] 代號[1] 名稱[2] 評分[3]
@@ -3237,7 +3246,6 @@ def find_trading_day():
     d = now
     print(f"  執行時間：{now.strftime('%Y/%m/%d %H:%M')}")
     ensure_holidays_loaded(now.year)
-    ensure_holidays_loaded(now.year - 1)  # 年初保險
     if now.hour < 16 or (now.hour == 16 and now.minute < 30):
         print(f"  16:30 前自動使用前一交易日（三大法人資料 16:30 後才釋出）")
         d -= timedelta(days=1)

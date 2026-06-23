@@ -15,6 +15,11 @@ Google Sheets ID：`1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g`
 - **`find_trading_day`（修正）**：改用 `_is_trading_day`，國定假日不再嘗試抓法人資料
 - 全域載入：`HOLIDAYS = getattr(_cfg, "HOLIDAYS", set())`
 
+### v11.24 → v11.25 修正（同日）
+- **`ensure_holidays_loaded` 無限重查 bug 修正**：加入 `_HOLIDAYS_ATTEMPTED` set，查詢失敗後不再重試，避免 44 筆推薦成效觸發 44+ 次 TWSE API 呼叫
+- **移除多餘的跨年預載**：`_n_trading_days_after` 的 `ensure_holidays_loaded(d.year + 1)`、`find_trading_day` 的 `ensure_holidays_loaded(now.year - 1)` 均為不必要呼叫，直接移除；T+3 跨年時 `d.year` 自然觸發正確年度
+- **`update_performance` 迴圈前統一 warm up**：從 rows 收集所有涉及年度，一次預載，迴圈內不再觸發查詢
+
 ### config.py
 - **`HOLIDAYS`（新增）**：新增國定假日 set，預填 2026 年已知休市日（含端午 6/19、6/22）；程式首次跑到新年度時自動查 TWSE 補入，不需手動維護
 - **`其他` 族群整理**：16 支移出，只保留漢唐(2404)
