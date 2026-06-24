@@ -16,7 +16,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.22"  # ← 每次 commit 只改這裡
+VERSION = "v11.23"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -35,12 +35,16 @@ try:
     LARGE_BUY_RATIO = getattr(_cfg, "LARGE_BUY_RATIO", 1.5)
     SECTOR_MAP  = _cfg.SECTOR_MAP
     CODE_NAME_MAP = _cfg.CODE_NAME_MAP
+    HOLIDAYS    = getattr(_cfg, "HOLIDAYS", set())
+    _HOLIDAYS_ATTEMPTED = set()  # ★ v11.25 已嘗試查詢的年度（不重試）
     print("✅ 已載入 config.py")
 except ImportError:
     print("⚠️ 找不到 config.py，使用主程式內建預設值")
     CODE_NAME_MAP   = {}
     LARGE_BUY_DAYS  = 3
     LARGE_BUY_RATIO = 1.5
+    HOLIDAYS        = set()
+    _HOLIDAYS_ATTEMPTED = set()
 
 # ═══════════════════════════════════════════════
 # ★ 固定系統設定
@@ -2114,7 +2118,9 @@ RECOMMEND_HEADERS = [
 PERFORMANCE_HEADERS = [
     "推薦日", "代號", "股票名稱", "推薦評分",
     "推薦收盤", "T+1收盤", "T+2收盤", "T+3收盤",
-    "組別",   # ★ v11.21 主榜/觀察組
+    "組別",       # ★ v11.21 主榜/觀察組
+    "出貨風險",   # ★ v11.23 推薦當日出貨風險
+    "融資健康度", # ★ v11.23 推薦當日融資健康度
 ]
 
 
@@ -2629,16 +2635,103 @@ def _parse_rec_sheet(all_vals, disp_today):
     return result
 
 
+def fetch_holidays_from_twse(year: int) -> set:
+    """
+    ★ v11.24：從 TWSE 假日月曆 API 查詢指定年度的非週末休市日，
+    回傳 set of "YYYYMMDD"。查詢失敗回傳空 set。
+    """
+    url = f"https://www.twse.com.tw/rwd/zh/holidaySchedule/holidaySchedule?response=json&queryYear={year}"
+    try:
+        text = curl_get(url)
+        if not text:
+            return set()
+        data = json.loads(text)
+        holidays = set()
+        for row in data.get("data", []):
+            # row[0] = 日期（民國年 MM/DD 或 YYYY/MM/DD 視 API 版本）
+            # row[2] = 說明（如「休市」「補假」）
+            date_raw = row[0].strip()
+            # TWSE 回傳民國年，如 "115/06/19"
+            if "/" in date_raw:
+                parts = date_raw.split("/")
+                if len(parts) == 3:
+                    roc_year = int(parts[0])
+                    ad_year = roc_year + 1911
+                    date_str = f"{ad_year}{parts[1]}{parts[2]}"
+                    holidays.add(date_str)
+        return holidays
+    except Exception as e:
+        print(f"  ⚠️ 無法查詢 TWSE 假日月曆（{year}）：{e}")
+        return set()
+
+
+def ensure_holidays_loaded(year: int) -> None:
+    """
+    ★ v11.24：確認 HOLIDAYS 包含指定年度的假日資料。
+    若該年度尚未載入，從 TWSE 查詢後寫回 config.py 並更新全域 HOLIDAYS。
+    ★ v11.25：加入 _HOLIDAYS_ATTEMPTED 記錄，查詢失敗後不再重試。
+    """
+    global HOLIDAYS, _HOLIDAYS_ATTEMPTED
+    year_str = str(year)
+    # 已有資料或已嘗試過（無論成功失敗）→ 直接返回
+    if year_str in _HOLIDAYS_ATTEMPTED:
+        return
+    has_year = any(d.startswith(year_str) for d in HOLIDAYS)
+    if has_year:
+        _HOLIDAYS_ATTEMPTED.add(year_str)
+        return
+
+    _HOLIDAYS_ATTEMPTED.add(year_str)  # 先標記，避免失敗後重試
+    print(f"  📅 查詢 {year} 年 TWSE 假日月曆...")
+    new_holidays = fetch_holidays_from_twse(year)
+    if not new_holidays:
+        print(f"  ⚠️ 查詢失敗或無資料，略過 {year} 年假日更新")
+        return
+
+    HOLIDAYS = HOLIDAYS | new_holidays
+    print(f"  ✅ 新增 {len(new_holidays)} 個假日，寫回 config.py")
+
+    # 找到 config.py 路徑並更新 HOLIDAYS
+    try:
+        cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.py")
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        sorted_days = sorted(HOLIDAYS)
+        lines = [f'    "{d}",  # 自動補入\n' for d in sorted_days]
+        new_block = "HOLIDAYS = {\n" + "".join(lines) + "}\n"
+
+        import re as _re
+        content = _re.sub(
+            r"HOLIDAYS\s*=\s*\{[^}]*\}",
+            new_block.rstrip("\n"),
+            content,
+            flags=_re.DOTALL
+        )
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        print(f"  ✅ config.py HOLIDAYS 已更新（共 {len(sorted_days)} 筆）")
+    except Exception as e:
+        print(f"  ⚠️ 寫回 config.py 失敗：{e}（HOLIDAYS 本次仍生效）")
+
+
+def _is_trading_day(d: "datetime") -> bool:
+    """回傳 d 是否為交易日（非週末且非國定假日）。"""
+    return d.weekday() < 5 and d.strftime("%Y%m%d") not in HOLIDAYS
+
+
 def _n_trading_days_after(base_disp, n):
     """
-    回傳 base_disp（YYYY/MM/DD）之後第 n 個交易日的 disp 字串（跳週末）。
+    ★ v11.24：回傳 base_disp（YYYY/MM/DD）之後第 n 個交易日的 disp 字串。
+    跳過週末 + 國定假日（HOLIDAYS）。
     """
     from datetime import datetime, timedelta
     d = datetime.strptime(base_disp, "%Y/%m/%d")
+    ensure_holidays_loaded(d.year)
     count = 0
     while count < n:
         d += timedelta(days=1)
-        if d.weekday() < 5:
+        if _is_trading_day(d):
             count += 1
     return d.strftime("%Y/%m/%d")
 
@@ -2782,18 +2875,27 @@ def update_performance(ss, date_str, current_prices):
                         close = float(r[9].strip()) if len(r) > 9 and r[9].strip() else 0.0
                     except ValueError:
                         close = 0.0
-                    today_stocks.append((r[1].strip(), r[2].strip(), r[3].strip(), close, group))
+                    risk          = r[7].strip() if len(r) > 7 else ""
+                    margin_health = r[8].strip() if len(r) > 8 else ""
+                    today_stocks.append((r[1].strip(), r[2].strip(), r[3].strip(), close, group, risk, margin_health))  # ★ v11.23
                 j += 1
             break
 
     new_rows = []
-    for code, name, score, base_close, group in today_stocks:
+    for code, name, score, base_close, group, risk, margin_health in today_stocks:
         if code not in today_codes_in_rows:
             new_rows.append([disp_today, code, name, score,
                              base_close if base_close > 0 else "",
-                             "", "", "", group])   # ★ v11.21 加 group
+                             "", "", "", group,
+                             risk, margin_health])   # ★ v11.23 出貨風險/融資健康度
 
     rows = new_rows + rows
+
+    # ── 年度假日預載（避免迴圈內重複查詢）★ v11.25 ──
+    from datetime import datetime as _dt
+    _years = {int(r[0][:4]) for r in rows if r and r[0] and r[0][:4].isdigit()}
+    for _y in _years:
+        ensure_holidays_loaded(_y)
 
     # ── 步驟2：填入今日收盤到 T+1 / T+2 / T+3 欄 ──
     # col index: 推薦日[0] 代號[1] 名稱[2] 評分[3]
@@ -3137,16 +3239,18 @@ def find_trading_day():
     """
     ★ v11.7：16:30 前自動使用前一交易日（三大法人資料 16:30 後才釋出）；
     16:30 後先嘗試今天，沒資料再往前找。執行時間顯示於 Step 1。
+    ★ v11.24：跳過週末 + 國定假日（HOLIDAYS）。
     """
     warm_up_cookie()
     now = datetime.now()
     d = now
     print(f"  執行時間：{now.strftime('%Y/%m/%d %H:%M')}")
+    ensure_holidays_loaded(now.year)
     if now.hour < 16 or (now.hour == 16 and now.minute < 30):
         print(f"  16:30 前自動使用前一交易日（三大法人資料 16:30 後才釋出）")
         d -= timedelta(days=1)
-    for _ in range(7):
-        if d.weekday() < 5:
+    for _ in range(10):
+        if _is_trading_day(d):
             date_str = d.strftime("%Y%m%d")
             try:
                 print(f"  嘗試 {date_str}...")
