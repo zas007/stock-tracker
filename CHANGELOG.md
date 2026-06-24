@@ -5,6 +5,86 @@ Google Sheets ID：`1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g`
 
 ---
 
+## v11.27 — 2026/06/24
+
+### fetch_and_update.py
+- **`fetch_price_map_batch` retry 機制（新增）**：TWSE STOCK_DAY_ALL 失敗時不再直接跳逐支，改為最多重試 2 次（每次間隔 60 秒）；日期不符的情況不重試直接放棄（資料本就不適用）；重試 2 次仍失敗才改逐支補抓
+
+---
+
+## v11.26 — 2026/06/24
+
+### fetch_and_update.py
+- **`fetch_news_announcements(date_str)`（新增）**：POST MOPS `ajax_t51sb10`，一次撈全市場當日重大訊息公告；對每筆主旨做關鍵字比對，回傳利多/利空清單（中性略過）
+- **`update_news_history(ss, date_str, news_items)`（新增）**：將命中公告寫入「重大訊息歷史」工作表（欄位：日期/代號/名稱/標籤/主旨），保留 31 天，重跑自動覆蓋
+- **`load_news_for_codes(ss, codes, date_str, days=3)`（新增）**：讀取近 N 天重大訊息，回傳 `{code: [tag, ...]}` 供明日關注標記使用
+- **`update_recommendation` 修改**：推薦計算前預載 `_news_map`；推薦股若近 3 天有命中公告，在「自營商標記」欄附加 `📢利多` / `📢利空`（不影響評分）
+- **`SHEET_OPTIONS` 新增**：`0) 重大訊息歷史`
+- **`NEWS_KEYWORDS` 全域載入**：`getattr(_cfg, "NEWS_KEYWORDS", {"利多": [], "利空": []})`
+- **`fetch_price_map_batch` 修正**：4 個提前 return 從 `return {}` 改為 `return {}, {}`，與正常路徑 tuple 回傳一致，消除潛在 `TypeError`
+
+### config.py
+- **`NEWS_KEYWORDS`（新增）**：利多關鍵字 10 組（重大合約、法說會、營收創新高等）、利空關鍵字 12 組（獲利預警、財報重編、停工等）；可自行調整，不需動主程式
+
+---
+
+## v11.24 — 2026/06/23
+
+### fetch_and_update.py
+- **`fetch_holidays_from_twse(year)`（新增）**：呼叫 TWSE 假日月曆 API，解析民國年日期，回傳 `set of "YYYYMMDD"`
+- **`ensure_holidays_loaded(year)`（新增）**：檢查 `HOLIDAYS` 是否已含指定年度資料；若無則呼叫 API 查詢，並用 regex 寫回 config.py 永久記錄
+- **`_is_trading_day(d)`（新增）**：判斷是否為交易日（非週末且不在 `HOLIDAYS`）
+- **`_n_trading_days_after`（修正）**：改用 `_is_trading_day`，國定假日不再被計入交易日，修正推薦成效 T+1/T+2/T+3 欄位在連假後對齊錯誤的問題
+- **`find_trading_day`（修正）**：改用 `_is_trading_day`，國定假日不再嘗試抓法人資料
+- 全域載入：`HOLIDAYS = getattr(_cfg, "HOLIDAYS", set())`
+
+### v11.24 → v11.25 修正（同日）
+- **`ensure_holidays_loaded` 無限重查 bug 修正**：加入 `_HOLIDAYS_ATTEMPTED` set，查詢失敗後不再重試，避免 44 筆推薦成效觸發 44+ 次 TWSE API 呼叫
+- **移除多餘的跨年預載**：`_n_trading_days_after` 的 `ensure_holidays_loaded(d.year + 1)`、`find_trading_day` 的 `ensure_holidays_loaded(now.year - 1)` 均為不必要呼叫，直接移除；T+3 跨年時 `d.year` 自然觸發正確年度
+- **`update_performance` 迴圈前統一 warm up**：從 rows 收集所有涉及年度，一次預載，迴圈內不再觸發查詢
+
+### config.py
+- **`HOLIDAYS`（新增）**：新增國定假日 set，預填 2026 年已知休市日（含端午 6/19、6/22）；程式首次跑到新年度時自動查 TWSE 補入，不需手動維護
+- **`其他` 族群整理**：16 支移出，只保留漢唐(2404)
+  - → PCB：精成科(6191)、廣宇(2328)
+  - → 電子代工：瑞軒(2489)
+  - → 半導體：全新(2455)
+  - → 網通：兆赫(2485)、智易(3596)
+  - → 面板：TPK-KY(3673)
+  - → 電源供應：飛宏(2457)
+  - → 傳產：寶成(9904)、復盛應用(6670)、億豐(8464)
+  - → 被動元件（現有）：立隆電(2472)、凱美(2375)
+  - → 生技醫療（現有）：康霈(6919)
+  - → **新建「LED」族群**：富采(3714)、宏齊(6168)
+- **`CODE_NAME_MAP` 補入** 16 支新歸類股票名稱
+- 族群總數：21 → 22；CODE_NAME_MAP：168 → 184 筆
+
+---
+
+## v11.23 — 2026/06/22
+
+### fetch_and_update.py
+- **`PERFORMANCE_HEADERS` 新增「出貨風險」「融資健康度」兩欄（col[9], col[10]）**
+  * 推薦成效寫入時從明日關注工作表 `r[7]`（出貨風險）、`r[8]`（融資健康度）取值
+  * 往後 T+3 封存至推薦歷史時會帶入這兩欄，供 backtest.py 切面分析使用
+  * 舊資料（45 筆）欄位為空，新切面需等新版跑幾天後才有數值
+
+### config.py
+- **IC封測族群新增成員**：精材(3374)、景碩(3189)、頎邦(6147)、南茂(8150)
+- **CODE_NAME_MAP 補上**：尖點(8021)、南茂(8150)、精材(3374)
+- IC封測族群從 7 支擴充至 11 支
+
+### backtest.py
+- **`load_perf_history` 新增讀取**：col[8]=組別、col[9]=出貨風險、col[10]=融資健康度
+- **`_rebuild_features` 改從推薦歷史直接取**出貨風險/融資健康度，不再填 "TODO"
+- **勝率矩陣新增三個切面**：
+  * 出貨風險 × T+1 勝率
+  * 融資健康度 × T+1 勝率
+  * 主榜 vs 觀察組 × T+1 勝率
+- 切面總數：5 → 8
+
+---
+
 ## v11.22 — 2026/06/18
 
 ### 修正 / 調整

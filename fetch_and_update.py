@@ -16,7 +16,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.22"  # ← 每次 commit 只改這裡
+VERSION = "v11.27"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -35,12 +35,18 @@ try:
     LARGE_BUY_RATIO = getattr(_cfg, "LARGE_BUY_RATIO", 1.5)
     SECTOR_MAP  = _cfg.SECTOR_MAP
     CODE_NAME_MAP = _cfg.CODE_NAME_MAP
+    HOLIDAYS    = getattr(_cfg, "HOLIDAYS", set())
+    NEWS_KEYWORDS = getattr(_cfg, "NEWS_KEYWORDS", {"利多": [], "利空": []})
+    _HOLIDAYS_ATTEMPTED = set()  # ★ v11.25 已嘗試查詢的年度（不重試）
     print("✅ 已載入 config.py")
 except ImportError:
     print("⚠️ 找不到 config.py，使用主程式內建預設值")
     CODE_NAME_MAP   = {}
     LARGE_BUY_DAYS  = 3
     LARGE_BUY_RATIO = 1.5
+    HOLIDAYS        = set()
+    NEWS_KEYWORDS   = {"利多": [], "利空": []}
+    _HOLIDAYS_ATTEMPTED = set()
 
 # ═══════════════════════════════════════════════
 # ★ 固定系統設定
@@ -269,58 +275,68 @@ def fetch_price_map_batch(date_str):
     用 STOCK_DAY_ALL 一次抓全市場當日行情，回傳查表：
     { code: (avg_price, close, volume_lots, change_pct_str, None) }
     量比固定回傳 None（無前10日資料，只有當日）。
-    失敗時回傳空 dict，由 enrich_with_prices 回退逐支補抓。
+    失敗時最多 retry 2 次（間隔 60 秒），仍失敗才回傳空 dict。
     """
-    # 不帶 date 參數，抓最新一日；帶日期時歷史資料為空
     url = "https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY_ALL?response=json"
-    print(f"  [batch] STOCK_DAY_ALL {date_str}...")
-    text = curl_get(url)
-    if not text or text.startswith("<"):
-        print("  [batch] ❌ 無回應，改逐支抓取")
-        return {}
-    try:
-        data = json.loads(text)
-    except Exception as e:
-        print(f"  [batch] ❌ JSON 解析失敗：{e}，改逐支抓取")
-        return {}
 
-    if data.get("stat") != "OK":
-        print(f"  [batch] ❌ stat={data.get('stat')}，改逐支抓取")
-        return {}
+    for attempt in range(1, 4):   # 最多 3 次（1 + retry 2）
+        if attempt > 1:
+            print(f"  [batch] ⏳ 等待 60 秒後重試（{attempt - 1}/2）...")
+            time.sleep(60)
 
-    # 驗證回傳日期是否吻合目標日期
-    api_date = str(data.get("date", ""))
-    if api_date and api_date != date_str:
-        print(f"  [batch] ⚠️ 回傳日期 {api_date} ≠ 目標 {date_str}，batch 不適用")
-        return {}
+        print(f"  [batch] STOCK_DAY_ALL {date_str}{'（重試）' if attempt > 1 else ''}...")
+        text = curl_get(url)
 
-    rows = data.get("data", [])
-    price_map = {}
-    amp_map   = {}   # ★ v11.21 {code: amplitude_pct}  (高-低)/低
-    for row in rows:
-        try:
-            code   = str(row[0]).strip()
-            shares = float(str(row[2]).replace(",", ""))
-            amount = float(str(row[3]).replace(",", ""))
-            high   = float(str(row[5]).replace(",", ""))  # ★ v11.21
-            low    = float(str(row[6]).replace(",", ""))  # ★ v11.21
-            close  = float(str(row[7]).replace(",", ""))
-            diff_str = str(row[8]).replace(",", "").strip()
-            diff = float(diff_str) if diff_str not in ("", "--", "X0.00") else 0.0
-            vol    = int(shares / 1000)
-            avg    = round(amount / shares, 2) if shares > 0 else 0.0
-            prev_close = close - diff
-            pct = (close - prev_close) / prev_close * 100 if prev_close > 0 else 0.0
-            sign = "+" if pct >= 0 else ""
-            pct_str = f"{sign}{pct:.2f}%"
-            price_map[code] = (avg, close, vol, pct_str, None)  # 量比 None
-            if low > 0:
-                amp_map[code] = round((high - low) / low * 100, 2)
-        except Exception:
+        if not text or text.startswith("<"):
+            print(f"  [batch] ❌ 無回應")
             continue
 
-    print(f"  [batch] ✅ {len(price_map)} 支")
-    return price_map, amp_map
+        try:
+            data = json.loads(text)
+        except Exception as e:
+            print(f"  [batch] ❌ JSON 解析失敗：{e}")
+            continue
+
+        if data.get("stat") != "OK":
+            print(f"  [batch] ❌ stat={data.get('stat')}")
+            continue
+
+        # 驗證回傳日期是否吻合目標日期
+        api_date = str(data.get("date", ""))
+        if api_date and api_date != date_str:
+            print(f"  [batch] ⚠️ 回傳日期 {api_date} ≠ 目標 {date_str}，batch 不適用")
+            return {}, {}   # 日期不符不重試，直接放棄
+
+        rows = data.get("data", [])
+        price_map = {}
+        amp_map   = {}   # ★ v11.21 {code: amplitude_pct}  (高-低)/低
+        for row in rows:
+            try:
+                code   = str(row[0]).strip()
+                shares = float(str(row[2]).replace(",", ""))
+                amount = float(str(row[3]).replace(",", ""))
+                high   = float(str(row[5]).replace(",", ""))  # ★ v11.21
+                low    = float(str(row[6]).replace(",", ""))  # ★ v11.21
+                close  = float(str(row[7]).replace(",", ""))
+                diff_str = str(row[8]).replace(",", "").strip()
+                diff = float(diff_str) if diff_str not in ("", "--", "X0.00") else 0.0
+                vol    = int(shares / 1000)
+                avg    = round(amount / shares, 2) if shares > 0 else 0.0
+                prev_close = close - diff
+                pct = (close - prev_close) / prev_close * 100 if prev_close > 0 else 0.0
+                sign = "+" if pct >= 0 else ""
+                pct_str = f"{sign}{pct:.2f}%"
+                price_map[code] = (avg, close, vol, pct_str, None)  # 量比 None
+                if low > 0:
+                    amp_map[code] = round((high - low) / low * 100, 2)
+            except Exception:
+                continue
+
+        print(f"  [batch] ✅ {len(price_map)} 支")
+        return price_map, amp_map
+
+    print("  [batch] ❌ 重試 2 次仍失敗，改逐支抓取")
+    return {}, {}
 
 
 def fetch_price_map_otc(date_str):
@@ -1102,7 +1118,184 @@ def enrich_with_margin(groups, date_str):
 # ★ v11.6 融券歷史工作表（獨立工作表，方案B）
 # ═══════════════════════════════════════════════
 
-def update_short_history(ss, date_str, current_margin):
+
+# ─────────────────────────────────────────────
+# ★ v11.26 重大訊息公告（#27）
+# ─────────────────────────────────────────────
+
+def fetch_news_announcements(date_str):
+    """
+    從 MOPS ajax_t51sb10 一次撈當日全市場重大訊息公告。
+    回傳 list of dict：[{code, name, date, subject, tag}, ...]
+    tag = "利多" / "利空" / "中性"
+    """
+    import urllib.request, urllib.parse
+
+    # MOPS 日期格式：民國年 + 月日（如 1150624）
+    dt = datetime.strptime(date_str, "%Y%m%d")
+    roc_date = f"{dt.year - 1911}{dt.strftime('%m%d')}"
+
+    url  = "https://mops.twse.com.tw/mops/web/ajax_t51sb10"
+    body = urllib.parse.urlencode({
+        "encodeURIComponent": "1",
+        "step":      "1",
+        "firstin":   "true",
+        "KIND":      "C",
+        "TYPEK":     "",
+        "year":      str(dt.year - 1911),
+        "month1":    str(dt.month).zfill(2),
+        "begin_day": str(dt.day).zfill(2),
+        "end_day":   str(dt.day).zfill(2),
+        "Orderby":   "1",
+        "go":        "false",
+    }).encode("utf-8")
+
+    try:
+        req = urllib.request.Request(
+            url, data=body,
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "User-Agent":   "Mozilla/5.0",
+                "Referer":      "https://mops.twse.com.tw/mops/web/t51sb10",
+            }
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+    except Exception as e:
+        print(f"  ⚠️ 重大訊息抓取失敗：{e}")
+        return []
+
+    # 解析 HTML table（不依賴 pandas，用內建 html.parser）
+    from html.parser import HTMLParser
+
+    class TableParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.in_table = False
+            self.in_cell  = False
+            self.rows, self.cur_row, self.cur_cell = [], [], []
+
+        def handle_starttag(self, tag, attrs):
+            if tag == "table": self.in_table = True
+            if self.in_table and tag in ("td", "th"):
+                self.in_cell = True; self.cur_cell = []
+            if self.in_table and tag == "tr" and self.cur_row:
+                self.rows.append(self.cur_row); self.cur_row = []
+
+        def handle_endtag(self, tag):
+            if tag == "table": self.in_table = False
+            if tag in ("td", "th"):
+                self.cur_row.append("".join(self.cur_cell).strip())
+                self.in_cell = False
+            if tag == "tr" and self.cur_row:
+                self.rows.append(self.cur_row); self.cur_row = []
+
+        def handle_data(self, data):
+            if self.in_cell: self.cur_cell.append(data)
+
+    parser = TableParser()
+    parser.feed(raw)
+
+    results = []
+    disp = fmt_date(date_str)
+
+    for row in parser.rows:
+        if len(row) < 5:
+            continue
+        # 典型欄位：序號 | 公司代號 | 公司名稱 | 發言日期 | 主旨 | ...
+        # 跳過標題列
+        if row[0] in ("序號", "編號", "") or not row[1].strip().isdigit():
+            continue
+        code    = row[1].strip()
+        name    = row[2].strip()
+        subject = row[4].strip() if len(row) > 4 else ""
+
+        # 關鍵字比對
+        tag = "中性"
+        for kw in NEWS_KEYWORDS.get("利多", []):
+            if kw in subject:
+                tag = "利多"; break
+        if tag == "中性":
+            for kw in NEWS_KEYWORDS.get("利空", []):
+                if kw in subject:
+                    tag = "利空"; break
+
+        # 中性公告不記錄（節省工作表空間）
+        if tag == "中性":
+            continue
+
+        results.append({
+            "code": code, "name": name,
+            "date": disp, "subject": subject, "tag": tag
+        })
+
+    print(f"  📢 重大訊息：今日命中 {len(results)} 筆（利多/利空）")
+    return results
+
+
+def update_news_history(ss, date_str, news_items):
+    """
+    將當日命中的重大訊息寫入「重大訊息歷史」工作表。
+    格式：日期 | 代號 | 名稱 | 標籤 | 主旨
+    保留 31 天，超過自動清除。重跑當日時自動覆蓋。
+    """
+    ws   = get_or_create(ss, "重大訊息歷史", 5)
+    disp = fmt_date(date_str)
+
+    _cutoff = (datetime.strptime(date_str, "%Y%m%d") - timedelta(days=31)).strftime("%Y/%m/%d")
+    purge_old_rows(ws, _cutoff)
+
+    headers  = ["日期", "代號", "名稱", "標籤", "主旨"]
+    existing = ws.get_all_values()
+    if not existing:
+        existing = [headers]
+
+    # 重跑保護：過濾掉今天已寫入的列
+    if existing and existing[0] == headers:
+        kept = [existing[0]] + [r for r in existing[1:] if not (r and r[0] == disp)]
+    else:
+        kept = [r for r in existing if not (r and r[0] == disp)]
+        kept = [headers] + kept
+
+    new_rows = [
+        [item["date"], item["code"], item["name"], item["tag"], item["subject"]]
+        for item in news_items
+    ]
+
+    full = kept + new_rows
+    ws.clear()
+    if ws.row_count < len(full) + 10:
+        ws.add_rows(len(full) + 10 - ws.row_count)
+    ws.update(range_name="A1", values=full)
+    print(f"  ✅ 重大訊息歷史 寫入 {len(new_rows)} 筆（{disp}）")
+
+
+def load_news_for_codes(ss, codes, date_str, days=3):
+    """
+    讀取近 N 天的重大訊息，回傳 {code: [tag, ...]} 供明日關注標記用。
+    """
+    try:
+        ws   = ss.worksheet("重大訊息歷史")
+        rows = ws.get_all_values()
+    except Exception:
+        return {}
+
+    from datetime import datetime, timedelta
+    cutoff = (datetime.strptime(date_str, "%Y%m%d") - timedelta(days=days)).strftime("%Y/%m/%d")
+
+    result = {}
+    for row in rows[1:]:
+        if len(row) < 5 or not row[1]:
+            continue
+        d, code, name, tag, subject = row[0], row[1].strip(), row[2], row[3], row[4]
+        if d < cutoff:
+            continue
+        if code in codes:
+            result.setdefault(code, []).append(tag)
+    return result
+
+
+
     """
     將本次執行中的融券餘額寫入「融券歷史」工作表（每日一批）。
     格式：日期, 代號, 融券餘額(張)
@@ -2114,7 +2307,9 @@ RECOMMEND_HEADERS = [
 PERFORMANCE_HEADERS = [
     "推薦日", "代號", "股票名稱", "推薦評分",
     "推薦收盤", "T+1收盤", "T+2收盤", "T+3收盤",
-    "組別",   # ★ v11.21 主榜/觀察組
+    "組別",       # ★ v11.21 主榜/觀察組
+    "出貨風險",   # ★ v11.23 推薦當日出貨風險
+    "融資健康度", # ★ v11.23 推薦當日融資健康度
 ]
 
 
@@ -2495,6 +2690,13 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
             amp = 0.0
         return f"⚡{amp:.1f}%" if amp >= 5.0 else (f"{amp:.1f}%" if amp > 0 else "")
 
+    # ★ v11.26 重大訊息：預載近3天命中代號
+    _all_codes = {row[0] for row in all_rows}
+    try:
+        _news_map = load_news_for_codes(ss, _all_codes, date_str, days=3)
+    except Exception:
+        _news_map = {}
+
     # 計算評分，過濾不合格
     scored = []
     watch_scored = []   # ★ v11.21 觀察組（放鬆限制）
@@ -2514,6 +2716,12 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
         close    = row[19]
         chg_pct  = row[20]
         dealer   = _dealer_label(d_consec)
+        # ★ v11.26 重大訊息標記
+        news_tags = _news_map.get(code, [])
+        if "利多" in news_tags:
+            dealer = (dealer + " 📢利多").strip()
+        elif "利空" in news_tags:
+            dealer = (dealer + " 📢利空").strip()
         amp_lbl  = _amp_label(row)
         risk_disp = f"{risk} ⚠️" if risk == "🔴 高" else risk
 
@@ -2629,16 +2837,103 @@ def _parse_rec_sheet(all_vals, disp_today):
     return result
 
 
+def fetch_holidays_from_twse(year: int) -> set:
+    """
+    ★ v11.24：從 TWSE 假日月曆 API 查詢指定年度的非週末休市日，
+    回傳 set of "YYYYMMDD"。查詢失敗回傳空 set。
+    """
+    url = f"https://www.twse.com.tw/rwd/zh/holidaySchedule/holidaySchedule?response=json&queryYear={year}"
+    try:
+        text = curl_get(url)
+        if not text:
+            return set()
+        data = json.loads(text)
+        holidays = set()
+        for row in data.get("data", []):
+            # row[0] = 日期（民國年 MM/DD 或 YYYY/MM/DD 視 API 版本）
+            # row[2] = 說明（如「休市」「補假」）
+            date_raw = row[0].strip()
+            # TWSE 回傳民國年，如 "115/06/19"
+            if "/" in date_raw:
+                parts = date_raw.split("/")
+                if len(parts) == 3:
+                    roc_year = int(parts[0])
+                    ad_year = roc_year + 1911
+                    date_str = f"{ad_year}{parts[1]}{parts[2]}"
+                    holidays.add(date_str)
+        return holidays
+    except Exception as e:
+        print(f"  ⚠️ 無法查詢 TWSE 假日月曆（{year}）：{e}")
+        return set()
+
+
+def ensure_holidays_loaded(year: int) -> None:
+    """
+    ★ v11.24：確認 HOLIDAYS 包含指定年度的假日資料。
+    若該年度尚未載入，從 TWSE 查詢後寫回 config.py 並更新全域 HOLIDAYS。
+    ★ v11.25：加入 _HOLIDAYS_ATTEMPTED 記錄，查詢失敗後不再重試。
+    """
+    global HOLIDAYS, _HOLIDAYS_ATTEMPTED
+    year_str = str(year)
+    # 已有資料或已嘗試過（無論成功失敗）→ 直接返回
+    if year_str in _HOLIDAYS_ATTEMPTED:
+        return
+    has_year = any(d.startswith(year_str) for d in HOLIDAYS)
+    if has_year:
+        _HOLIDAYS_ATTEMPTED.add(year_str)
+        return
+
+    _HOLIDAYS_ATTEMPTED.add(year_str)  # 先標記，避免失敗後重試
+    print(f"  📅 查詢 {year} 年 TWSE 假日月曆...")
+    new_holidays = fetch_holidays_from_twse(year)
+    if not new_holidays:
+        print(f"  ⚠️ 查詢失敗或無資料，略過 {year} 年假日更新")
+        return
+
+    HOLIDAYS = HOLIDAYS | new_holidays
+    print(f"  ✅ 新增 {len(new_holidays)} 個假日，寫回 config.py")
+
+    # 找到 config.py 路徑並更新 HOLIDAYS
+    try:
+        cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.py")
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        sorted_days = sorted(HOLIDAYS)
+        lines = [f'    "{d}",  # 自動補入\n' for d in sorted_days]
+        new_block = "HOLIDAYS = {\n" + "".join(lines) + "}\n"
+
+        import re as _re
+        content = _re.sub(
+            r"HOLIDAYS\s*=\s*\{[^}]*\}",
+            new_block.rstrip("\n"),
+            content,
+            flags=_re.DOTALL
+        )
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        print(f"  ✅ config.py HOLIDAYS 已更新（共 {len(sorted_days)} 筆）")
+    except Exception as e:
+        print(f"  ⚠️ 寫回 config.py 失敗：{e}（HOLIDAYS 本次仍生效）")
+
+
+def _is_trading_day(d: "datetime") -> bool:
+    """回傳 d 是否為交易日（非週末且非國定假日）。"""
+    return d.weekday() < 5 and d.strftime("%Y%m%d") not in HOLIDAYS
+
+
 def _n_trading_days_after(base_disp, n):
     """
-    回傳 base_disp（YYYY/MM/DD）之後第 n 個交易日的 disp 字串（跳週末）。
+    ★ v11.24：回傳 base_disp（YYYY/MM/DD）之後第 n 個交易日的 disp 字串。
+    跳過週末 + 國定假日（HOLIDAYS）。
     """
     from datetime import datetime, timedelta
     d = datetime.strptime(base_disp, "%Y/%m/%d")
+    ensure_holidays_loaded(d.year)
     count = 0
     while count < n:
         d += timedelta(days=1)
-        if d.weekday() < 5:
+        if _is_trading_day(d):
             count += 1
     return d.strftime("%Y/%m/%d")
 
@@ -2782,18 +3077,27 @@ def update_performance(ss, date_str, current_prices):
                         close = float(r[9].strip()) if len(r) > 9 and r[9].strip() else 0.0
                     except ValueError:
                         close = 0.0
-                    today_stocks.append((r[1].strip(), r[2].strip(), r[3].strip(), close, group))
+                    risk          = r[7].strip() if len(r) > 7 else ""
+                    margin_health = r[8].strip() if len(r) > 8 else ""
+                    today_stocks.append((r[1].strip(), r[2].strip(), r[3].strip(), close, group, risk, margin_health))  # ★ v11.23
                 j += 1
             break
 
     new_rows = []
-    for code, name, score, base_close, group in today_stocks:
+    for code, name, score, base_close, group, risk, margin_health in today_stocks:
         if code not in today_codes_in_rows:
             new_rows.append([disp_today, code, name, score,
                              base_close if base_close > 0 else "",
-                             "", "", "", group])   # ★ v11.21 加 group
+                             "", "", "", group,
+                             risk, margin_health])   # ★ v11.23 出貨風險/融資健康度
 
     rows = new_rows + rows
+
+    # ── 年度假日預載（避免迴圈內重複查詢）★ v11.25 ──
+    from datetime import datetime as _dt
+    _years = {int(r[0][:4]) for r in rows if r and r[0] and r[0][:4].isdigit()}
+    for _y in _years:
+        ensure_holidays_loaded(_y)
 
     # ── 步驟2：填入今日收盤到 T+1 / T+2 / T+3 欄 ──
     # col index: 推薦日[0] 代號[1] 名稱[2] 評分[3]
@@ -3137,16 +3441,18 @@ def find_trading_day():
     """
     ★ v11.7：16:30 前自動使用前一交易日（三大法人資料 16:30 後才釋出）；
     16:30 後先嘗試今天，沒資料再往前找。執行時間顯示於 Step 1。
+    ★ v11.24：跳過週末 + 國定假日（HOLIDAYS）。
     """
     warm_up_cookie()
     now = datetime.now()
     d = now
     print(f"  執行時間：{now.strftime('%Y/%m/%d %H:%M')}")
+    ensure_holidays_loaded(now.year)
     if now.hour < 16 or (now.hour == 16 and now.minute < 30):
         print(f"  16:30 前自動使用前一交易日（三大法人資料 16:30 後才釋出）")
         d -= timedelta(days=1)
-    for _ in range(7):
-        if d.weekday() < 5:
+    for _ in range(10):
+        if _is_trading_day(d):
             date_str = d.strftime("%Y%m%d")
             try:
                 print(f"  嘗試 {date_str}...")
@@ -3627,6 +3933,7 @@ def main():
         ("7", "推薦成效追蹤",  lambda: update_performance(ss, date_str, current_prices)),
         ("8", "融券歷史",      lambda: update_short_history(ss, date_str, current_margin)),
         ("9", "族群熱度排行",   lambda: update_sector_heatmap(ss, date_str)),
+        ("0", "重大訊息歷史",   lambda: update_news_history(ss, date_str, fetch_news_announcements(date_str))),
     ]
 
     if args.sheet_only:
