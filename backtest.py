@@ -108,9 +108,11 @@ def load_perf_history(ss):
             "t1":           _f(row[5])     if len(row) > 5 else None,
             "t2":           _f(row[6])     if len(row) > 6 else None,
             "t3":           _f(row[7])     if len(row) > 7 else None,
-            "group":        row[8].strip() if len(row) > 8 else "",
-            "risk":         row[9].strip() if len(row) > 9 else "",   # ★ v11.23
-            "margin_health":row[10].strip() if len(row) > 10 else "", # ★ v11.23
+            "t4":           _f(row[8])     if len(row) > 8 else None,
+            "t5":           _f(row[9])     if len(row) > 9 else None,
+            "group":        row[10].strip() if len(row) > 10 else "",
+            "risk":         row[11].strip() if len(row) > 11 else "",   # ★ v11.23
+            "margin_health":row[12].strip() if len(row) > 12 else "", # ★ v11.23
         })
     print(f"  ✅ 推薦歷史讀取 {len(result)} 筆")
     return result
@@ -361,9 +363,20 @@ def calc_win_rate_matrix(detail_rows):
     sections.append(("【主榜 vs 觀察組 × T+1 勝率】",
         _stats(detail_rows, _group_lbl, "t1_pnl")))
 
-    # 切面 8：整體 T+1/T+2/T+3 勝率
+    # 切面 8：推薦日星期幾
+    _WEEKDAY_ZH = ["週一", "週二", "週三", "週四", "週五", "週六", "週日"]
+    def _weekday_lbl(r):
+        try:
+            return _WEEKDAY_ZH[datetime.strptime(r["rec_date"], "%Y/%m/%d").weekday()]
+        except Exception:
+            return "未知"
+    sections.append(("【推薦日星期幾 × T+1 勝率】",
+        _stats(detail_rows, _weekday_lbl, "t1_pnl")))
+
+    # 切面 9：整體 T+1/T+2/T+3/T+4/T+5 勝率
     overall = []
-    for t_key, label in [("t1_pnl","T+1"),("t2_pnl","T+2"),("t3_pnl","T+3")]:
+    for t_key, label in [("t1_pnl","T+1"),("t2_pnl","T+2"),("t3_pnl","T+3"),
+                          ("t4_pnl","T+4"),("t5_pnl","T+5")]:
         pnls = [r[t_key] for r in detail_rows if r.get(t_key) is not None]
         n    = len(pnls)
         wins = sum(1 for p in pnls if p > 0)
@@ -375,7 +388,7 @@ def calc_win_rate_matrix(detail_rows):
             "rate": f"{rate}%{suffix}" if rate is not None else "N/A",
             "avg":  avg,
         })
-    sections.append(("【整體 T+1 / T+2 / T+3 勝率（總覽）】", overall))
+    sections.append(("【整體 T+1 / T+2 / T+3 / T+4 / T+5 勝率（總覽）】", overall))
 
     return sections
 
@@ -383,10 +396,12 @@ def calc_win_rate_matrix(detail_rows):
 # ── 輸出到 Sheets ──────────────────────────────────────────────
 
 DETAIL_HEADERS = [
-    "推薦日", "代號", "股票名稱", "推薦評分",
+    "推薦日", "推薦星期", "代號", "股票名稱", "推薦評分",
     "連續天數", "籌碼集中度%", "籌碼集中度評級", "買超加速度",
-    "推薦收盤", "T+1收盤", "T+1漲跌%", "T+2收盤", "T+2漲跌%", "T+3收盤", "T+3漲跌%",
-    "T+1勝負", "T+2勝負", "T+3勝負",
+    "推薦收盤",
+    "T+1收盤", "T+1漲跌%", "T+2收盤", "T+2漲跌%", "T+3收盤", "T+3漲跌%",
+    "T+4收盤", "T+4漲跌%", "T+5收盤", "T+5漲跌%",
+    "T+1勝負", "T+2勝負", "T+3勝負", "T+4勝負", "T+5勝負",
     "融資健康度", "出貨風險", "融券趨勢",
 ]
 
@@ -401,18 +416,29 @@ def write_detail_sheet(ss, detail_rows, dry_run=False):
         [f"回測明細（產出時間：{now}，共 {len(detail_rows)} 筆）"] + [""]*(n-1),
         DETAIL_HEADERS,
     ]
+    _WEEKDAY_ZH = ["週一", "週二", "週三", "週四", "週五", "週六", "週日"]
     for r in detail_rows:
+        rec_date = r.get("rec_date", "")
+        try:
+            weekday_zh = _WEEKDAY_ZH[datetime.strptime(rec_date, "%Y/%m/%d").weekday()]
+        except Exception:
+            weekday_zh = ""
         data.append([
-            r.get("rec_date",""),   r.get("code",""),      r.get("name",""),
+            rec_date,               weekday_zh,
+            r.get("code",""),       r.get("name",""),
             r.get("rec_score",""),  r.get("consec",""),
             r.get("chip_pct",""),   r.get("chip_lbl",""),  r.get("accel_lbl",""),
             r.get("base_close",""),
             r.get("t1",""),         r.get("t1_pnl","待補"),
             r.get("t2",""),         r.get("t2_pnl","待補"),
             r.get("t3",""),         r.get("t3_pnl","待補"),
+            r.get("t4",""),         r.get("t4_pnl","待補"),
+            r.get("t5",""),         r.get("t5_pnl","待補"),
             _win_label(r.get("t1_pnl")),
             _win_label(r.get("t2_pnl")),
             _win_label(r.get("t3_pnl")),
+            _win_label(r.get("t4_pnl")),
+            _win_label(r.get("t5_pnl")),
             r.get("margin_health",""), r.get("risk",""), r.get("short_trend",""),
         ])
 
@@ -515,15 +541,14 @@ def main():
     for rec in perf_records:
         features = _rebuild_features(rec, hist_map)
         base     = rec.get("base_close")
-        t1       = rec.get("t1")
-        t2       = rec.get("t2")
-        t3       = rec.get("t3")
         row = {
             **features,
             "base_close": base,
-            "t1": t1, "t1_pnl": calc_pnl(base, t1),
-            "t2": t2, "t2_pnl": calc_pnl(base, t2),
-            "t3": t3, "t3_pnl": calc_pnl(base, t3),
+            "t1": rec.get("t1"), "t1_pnl": calc_pnl(base, rec.get("t1")),
+            "t2": rec.get("t2"), "t2_pnl": calc_pnl(base, rec.get("t2")),
+            "t3": rec.get("t3"), "t3_pnl": calc_pnl(base, rec.get("t3")),
+            "t4": rec.get("t4"), "t4_pnl": calc_pnl(base, rec.get("t4")),
+            "t5": rec.get("t5"), "t5_pnl": calc_pnl(base, rec.get("t5")),
             "group": rec.get("group", ""),  # ★ v11.23
         }
         detail_rows.append(row)
@@ -550,18 +575,24 @@ def _demo_dry_run():
     fake = [
         {"rec_date":"2026/05/20","code":"2330","name":"台積電","rec_score":85,
          "consec":8,"chip_pct":25.3,"chip_lbl":"🔵 高度集中","accel_lbl":"🚀 加速",
-         "base_close":950.0,"t1":960.0,"t1_pnl":1.05,
-         "t2":945.0,"t2_pnl":-0.53,"t3":970.0,"t3_pnl":2.11,
+         "base_close":950.0,
+         "t1":960.0,"t1_pnl":1.05, "t2":945.0,"t2_pnl":-0.53,
+         "t3":970.0,"t3_pnl":2.11, "t4":975.0,"t4_pnl":2.63,
+         "t5":980.0,"t5_pnl":3.16,
          "margin_health":"TODO","risk":"TODO","short_trend":"TODO"},
         {"rec_date":"2026/05/20","code":"6669","name":"緯穎","rec_score":72,
          "consec":4,"chip_pct":15.1,"chip_lbl":"🟦 中度集中","accel_lbl":"📈 溫和加速",
-         "base_close":2500.0,"t1":2480.0,"t1_pnl":-0.80,
-         "t2":2530.0,"t2_pnl":1.20,"t3":2550.0,"t3_pnl":2.00,
+         "base_close":2500.0,
+         "t1":2480.0,"t1_pnl":-0.80, "t2":2530.0,"t2_pnl":1.20,
+         "t3":2550.0,"t3_pnl":2.00,  "t4":2540.0,"t4_pnl":1.60,
+         "t5":2560.0,"t5_pnl":2.40,
          "margin_health":"TODO","risk":"TODO","short_trend":"TODO"},
         {"rec_date":"2026/05/21","code":"3037","name":"欣興","rec_score":65,
          "consec":3,"chip_pct":11.2,"chip_lbl":"🟦 中度集中","accel_lbl":"➡ 持平",
-         "base_close":180.0,"t1":None,"t1_pnl":None,
-         "t2":None,"t2_pnl":None,"t3":None,"t3_pnl":None,
+         "base_close":180.0,
+         "t1":None,"t1_pnl":None, "t2":None,"t2_pnl":None,
+         "t3":None,"t3_pnl":None, "t4":None,"t4_pnl":None,
+         "t5":None,"t5_pnl":None,
          "margin_health":"TODO","risk":"TODO","short_trend":"TODO"},
     ]
     sections = calc_win_rate_matrix(fake)

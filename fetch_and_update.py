@@ -16,7 +16,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.27"  # ← 每次 commit 只改這裡
+VERSION = "v11.28"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -276,67 +276,131 @@ def fetch_price_map_batch(date_str):
     { code: (avg_price, close, volume_lots, change_pct_str, None) }
     量比固定回傳 None（無前10日資料，只有當日）。
     失敗時最多 retry 2 次（間隔 60 秒），仍失敗才回傳空 dict。
+
+    ★ v11.28：TWSE API 格式已從 JSON 改為 CSV，自動偵測兩種格式。
+    CSV 欄位：日期[0] 代號[1] 名稱[2] 成交股數[3] 成交金額[4]
+              開盤[5] 最高[6] 最低[7] 收盤[8] 漲跌價差[9] 成交筆數[10]
     """
     url = "https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY_ALL?response=json"
 
     for attempt in range(1, 4):   # 最多 3 次（1 + retry 2）
         if attempt > 1:
-            print(f"  [batch] ⏳ 等待 60 秒後重試（{attempt - 1}/2）...")
-            time.sleep(60)
+            print(f"  [batch] ⏳ 等待 3 秒後重試（{attempt - 1}/2）...")
+            time.sleep(3)
 
         print(f"  [batch] STOCK_DAY_ALL {date_str}{'（重試）' if attempt > 1 else ''}...")
         text = curl_get(url)
 
-        if not text or text.startswith("<"):
-            print(f"  [batch] ❌ 無回應")
+        if not text:
+            print(f"  [batch] ❌ 無回應（空字串）")
+            continue
+        text = text.strip().lstrip("\ufeff")   # 去掉 BOM / 前後空白
+        if text.startswith("<"):
+            print(f"  [batch] ❌ HTML 回應，略過")
             continue
 
-        try:
-            data = json.loads(text)
-        except Exception as e:
-            print(f"  [batch] ❌ JSON 解析失敗：{e}")
-            continue
-
-        if data.get("stat") != "OK":
-            print(f"  [batch] ❌ stat={data.get('stat')}")
-            continue
-
-        # 驗證回傳日期是否吻合目標日期
-        api_date = str(data.get("date", ""))
-        if api_date and api_date != date_str:
-            print(f"  [batch] ⚠️ 回傳日期 {api_date} ≠ 目標 {date_str}，batch 不適用")
-            return {}, {}   # 日期不符不重試，直接放棄
-
-        rows = data.get("data", [])
         price_map = {}
-        amp_map   = {}   # ★ v11.21 {code: amplitude_pct}  (高-低)/低
-        for row in rows:
+        amp_map   = {}
+
+        # ── 偵測 CSV 格式 ──────────────────────────────────────────
+        if text.startswith("日期,"):
+            import csv, io
+            reader = csv.reader(io.StringIO(text))
+            header = next(reader, None)   # 跳過標題列
+            api_date_seen = None
+            for row in reader:
+                if len(row) < 10:
+                    continue
+                try:
+                    # 驗證日期欄：CSV 回傳民國年 "1150625"，需轉西元再比對
+                    if api_date_seen is None:
+                        api_date_seen = row[0].strip()
+                        if api_date_seen:
+                            # 民國年轉西元：前3碼+1911，後4碼不變
+                            try:
+                                roc_y = int(api_date_seen[:3])
+                                western = str(roc_y + 1911) + api_date_seen[3:]
+                            except Exception:
+                                western = api_date_seen
+                            if western != date_str:
+                                print(f"  [batch] ⚠️ CSV 回傳日期 {api_date_seen}（西元{western}）≠ 目標 {date_str}，batch 不適用")
+                                return {}, {}
+
+                    code   = str(row[1]).strip()
+                    shares = float(row[3].replace(",", ""))
+                    amount = float(row[4].replace(",", ""))
+                    high   = float(row[6].replace(",", ""))
+                    low    = float(row[7].replace(",", ""))
+                    close  = float(row[8].replace(",", ""))
+                    diff_s = row[9].replace(",", "").strip()
+                    diff   = float(diff_s) if diff_s not in ("", "--", "X0.00") else 0.0
+                    vol    = int(shares / 1000)
+                    avg    = round(amount / shares, 2) if shares > 0 else 0.0
+                    prev_close = close - diff
+                    pct = (close - prev_close) / prev_close * 100 if prev_close > 0 else 0.0
+                    sign = "+" if pct >= 0 else ""
+                    pct_str = f"{sign}{pct:.2f}%"
+                    price_map[code] = (avg, close, vol, pct_str, None)
+                    if low > 0:
+                        amp_map[code] = round((high - low) / low * 100, 2)
+                except Exception:
+                    continue
+            if price_map:
+                print(f"  [batch] ✅ CSV 格式，{len(price_map)} 支")
+                return price_map, amp_map
+            print(f"  [batch] ❌ CSV 解析成功但結果為空")
+            continue
+
+        # ── 偵測 JSON 格式（舊版相容）──────────────────────────────
+        if text.startswith("{"):
             try:
-                code   = str(row[0]).strip()
-                shares = float(str(row[2]).replace(",", ""))
-                amount = float(str(row[3]).replace(",", ""))
-                high   = float(str(row[5]).replace(",", ""))  # ★ v11.21
-                low    = float(str(row[6]).replace(",", ""))  # ★ v11.21
-                close  = float(str(row[7]).replace(",", ""))
-                diff_str = str(row[8]).replace(",", "").strip()
-                diff = float(diff_str) if diff_str not in ("", "--", "X0.00") else 0.0
-                vol    = int(shares / 1000)
-                avg    = round(amount / shares, 2) if shares > 0 else 0.0
-                prev_close = close - diff
-                pct = (close - prev_close) / prev_close * 100 if prev_close > 0 else 0.0
-                sign = "+" if pct >= 0 else ""
-                pct_str = f"{sign}{pct:.2f}%"
-                price_map[code] = (avg, close, vol, pct_str, None)  # 量比 None
-                if low > 0:
-                    amp_map[code] = round((high - low) / low * 100, 2)
-            except Exception:
+                data = json.loads(text)
+            except Exception as e:
+                print(f"  [batch] ❌ JSON 解析失敗：{e}")
+                print(f"  [batch]    原始回應前100字：{text[:100]!r}")
                 continue
 
-        print(f"  [batch] ✅ {len(price_map)} 支")
-        return price_map, amp_map
+            if data.get("stat") != "OK":
+                print(f"  [batch] ❌ stat={data.get('stat')}")
+                continue
+
+            api_date = str(data.get("date", ""))
+            if api_date and api_date != date_str:
+                print(f"  [batch] ⚠️ 回傳日期 {api_date} ≠ 目標 {date_str}，batch 不適用")
+                return {}, {}
+
+            for row in data.get("data", []):
+                try:
+                    code   = str(row[0]).strip()
+                    shares = float(str(row[2]).replace(",", ""))
+                    amount = float(str(row[3]).replace(",", ""))
+                    high   = float(str(row[5]).replace(",", ""))
+                    low    = float(str(row[6]).replace(",", ""))
+                    close  = float(str(row[7]).replace(",", ""))
+                    diff_s = str(row[8]).replace(",", "").strip()
+                    diff   = float(diff_s) if diff_s not in ("", "--", "X0.00") else 0.0
+                    vol    = int(shares / 1000)
+                    avg    = round(amount / shares, 2) if shares > 0 else 0.0
+                    prev_close = close - diff
+                    pct = (close - prev_close) / prev_close * 100 if prev_close > 0 else 0.0
+                    sign = "+" if pct >= 0 else ""
+                    pct_str = f"{sign}{pct:.2f}%"
+                    price_map[code] = (avg, close, vol, pct_str, None)
+                    if low > 0:
+                        amp_map[code] = round((high - low) / low * 100, 2)
+                except Exception:
+                    continue
+
+            print(f"  [batch] ✅ JSON 格式，{len(price_map)} 支")
+            return price_map, amp_map
+
+        # ── 無法識別的格式 ─────────────────────────────────────────
+        print(f"  [batch] ❌ 無法識別的格式（前80字）：{text[:80]!r}")
+        continue
 
     print("  [batch] ❌ 重試 2 次仍失敗，改逐支抓取")
     return {}, {}
+
 
 
 def fetch_price_map_otc(date_str):
@@ -1125,111 +1189,115 @@ def enrich_with_margin(groups, date_str):
 
 def fetch_news_announcements(date_str):
     """
-    從 MOPS ajax_t51sb10 一次撈當日全市場重大訊息公告。
+    從 MOPS ajax_t51sb10 一次撈全市場重大訊息公告。
+    同時抓今日與前一交易日，避免 16:30 前今日資料尚未釋出時漏抓。
     回傳 list of dict：[{code, name, date, subject, tag}, ...]
     tag = "利多" / "利空" / "中性"
     """
     import urllib.request, urllib.parse
 
-    # MOPS 日期格式：民國年 + 月日（如 1150624）
-    dt = datetime.strptime(date_str, "%Y%m%d")
-    roc_date = f"{dt.year - 1911}{dt.strftime('%m%d')}"
-
-    url  = "https://mops.twse.com.tw/mops/web/ajax_t51sb10"
-    body = urllib.parse.urlencode({
-        "encodeURIComponent": "1",
-        "step":      "1",
-        "firstin":   "true",
-        "KIND":      "C",
-        "TYPEK":     "",
-        "year":      str(dt.year - 1911),
-        "month1":    str(dt.month).zfill(2),
-        "begin_day": str(dt.day).zfill(2),
-        "end_day":   str(dt.day).zfill(2),
-        "Orderby":   "1",
-        "go":        "false",
-    }).encode("utf-8")
-
-    try:
-        req = urllib.request.Request(
-            url, data=body,
-            headers={
-                "Content-Type": "application/x-www-form-urlencoded",
-                "User-Agent":   "Mozilla/5.0",
-                "Referer":      "https://mops.twse.com.tw/mops/web/t51sb10",
-            }
-        )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            raw = resp.read().decode("utf-8", errors="replace")
-    except Exception as e:
-        print(f"  ⚠️ 重大訊息抓取失敗：{e}")
-        return []
-
-    # 解析 HTML table（不依賴 pandas，用內建 html.parser）
-    from html.parser import HTMLParser
-
-    class TableParser(HTMLParser):
-        def __init__(self):
-            super().__init__()
-            self.in_table = False
-            self.in_cell  = False
-            self.rows, self.cur_row, self.cur_cell = [], [], []
-
-        def handle_starttag(self, tag, attrs):
-            if tag == "table": self.in_table = True
-            if self.in_table and tag in ("td", "th"):
-                self.in_cell = True; self.cur_cell = []
-            if self.in_table and tag == "tr" and self.cur_row:
-                self.rows.append(self.cur_row); self.cur_row = []
-
-        def handle_endtag(self, tag):
-            if tag == "table": self.in_table = False
-            if tag in ("td", "th"):
-                self.cur_row.append("".join(self.cur_cell).strip())
-                self.in_cell = False
-            if tag == "tr" and self.cur_row:
-                self.rows.append(self.cur_row); self.cur_row = []
-
-        def handle_data(self, data):
-            if self.in_cell: self.cur_cell.append(data)
-
-    parser = TableParser()
-    parser.feed(raw)
+    dt      = datetime.strptime(date_str, "%Y%m%d")
+    # 計算前一交易日
+    prev_dt = dt - timedelta(days=1)
+    for _ in range(7):
+        if _is_trading_day(prev_dt):
+            break
+        prev_dt -= timedelta(days=1)
 
     results = []
-    disp = fmt_date(date_str)
+    for target_dt in [prev_dt, dt]:
+        disp = fmt_date(target_dt.strftime("%Y%m%d"))
+        body = urllib.parse.urlencode({
+            "encodeURIComponent": "1",
+            "step":      "1",
+            "firstin":   "true",
+            "KIND":      "C",
+            "TYPEK":     "",
+            "year":      str(target_dt.year - 1911),
+            "month1":    str(target_dt.month).zfill(2),
+            "begin_day": str(target_dt.day).zfill(2),
+            "end_day":   str(target_dt.day).zfill(2),
+            "Orderby":   "1",
+            "go":        "false",
+        }).encode("utf-8")
 
-    for row in parser.rows:
-        if len(row) < 5:
+        url = "https://mops.twse.com.tw/mops/web/ajax_t51sb10"
+        try:
+            req = urllib.request.Request(
+                url, data=body,
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "User-Agent":   "Mozilla/5.0",
+                    "Referer":      "https://mops.twse.com.tw/mops/web/t51sb10",
+                }
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+        except Exception as e:
+            print(f"  ⚠️ 重大訊息抓取失敗（{disp}）：{e}")
             continue
-        # 典型欄位：序號 | 公司代號 | 公司名稱 | 發言日期 | 主旨 | ...
-        # 跳過標題列
-        if row[0] in ("序號", "編號", "") or not row[1].strip().isdigit():
-            continue
-        code    = row[1].strip()
-        name    = row[2].strip()
-        subject = row[4].strip() if len(row) > 4 else ""
 
-        # 關鍵字比對
-        tag = "中性"
-        for kw in NEWS_KEYWORDS.get("利多", []):
-            if kw in subject:
-                tag = "利多"; break
-        if tag == "中性":
-            for kw in NEWS_KEYWORDS.get("利空", []):
+        # 解析 HTML table（不依賴 pandas，用內建 html.parser）
+        from html.parser import HTMLParser
+
+        class TableParser(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.in_table = False
+                self.in_cell  = False
+                self.rows, self.cur_row, self.cur_cell = [], [], []
+
+            def handle_starttag(self, tag, attrs):
+                if tag == "table": self.in_table = True
+                if self.in_table and tag in ("td", "th"):
+                    self.in_cell = True; self.cur_cell = []
+                if self.in_table and tag == "tr" and self.cur_row:
+                    self.rows.append(self.cur_row); self.cur_row = []
+
+            def handle_endtag(self, tag):
+                if tag == "table": self.in_table = False
+                if tag in ("td", "th"):
+                    self.cur_row.append("".join(self.cur_cell).strip())
+                    self.in_cell = False
+                if tag == "tr" and self.cur_row:
+                    self.rows.append(self.cur_row); self.cur_row = []
+
+            def handle_data(self, data):
+                if self.in_cell: self.cur_cell.append(data)
+
+        parser = TableParser()
+        parser.feed(raw)
+
+        day_count = 0
+        for row in parser.rows:
+            if len(row) < 5:
+                continue
+            if row[0] in ("序號", "編號", "") or not row[1].strip().isdigit():
+                continue
+            code    = row[1].strip()
+            name    = row[2].strip()
+            subject = row[4].strip() if len(row) > 4 else ""
+
+            tag = "中性"
+            for kw in NEWS_KEYWORDS.get("利多", []):
                 if kw in subject:
-                    tag = "利空"; break
+                    tag = "利多"; break
+            if tag == "中性":
+                for kw in NEWS_KEYWORDS.get("利空", []):
+                    if kw in subject:
+                        tag = "利空"; break
 
-        # 中性公告不記錄（節省工作表空間）
-        if tag == "中性":
-            continue
+            if tag == "中性":
+                continue
 
-        results.append({
-            "code": code, "name": name,
-            "date": disp, "subject": subject, "tag": tag
-        })
+            results.append({
+                "code": code, "name": name,
+                "date": disp, "subject": subject, "tag": tag
+            })
+            day_count += 1
 
-    print(f"  📢 重大訊息：今日命中 {len(results)} 筆（利多/利空）")
+        print(f"  📢 重大訊息（{disp}）：命中 {day_count} 筆（利多/利空）")
+
     return results
 
 
@@ -1295,7 +1363,7 @@ def load_news_for_codes(ss, codes, date_str, days=3):
     return result
 
 
-
+def update_short_history(ss, date_str, current_margin):
     """
     將本次執行中的融券餘額寫入「融券歷史」工作表（每日一批）。
     格式：日期, 代號, 融券餘額(張)
@@ -2070,8 +2138,9 @@ def update_sector_heatmap(ss, date_str, ss_hist_rows=None):
             "top3":           top3_str,
         })
 
-    # 依熱度分降冪排
-    results.sort(key=lambda x: x["heat_score"], reverse=True)
+    # 依趨勢（升溫→持平→降溫）為第一鍵，熱度分為第二鍵，均降冪
+    _TREND_ORDER = {"↗ 升溫": 2, "➡ 持平": 1, "↘ 降溫": 0}
+    results.sort(key=lambda x: (_TREND_ORDER.get(x["trend"], 1), x["heat_score"]), reverse=True)
 
     # ── 寫入工作表 ──
     headers = ["族群", f"近{SECTOR_HEAT_DAYS}天觸發天數", "不同成員數", "熱度分", "趨勢", "主力成員（近5天買超）", "統計截至"]
@@ -2306,7 +2375,7 @@ RECOMMEND_HEADERS = [
 
 PERFORMANCE_HEADERS = [
     "推薦日", "代號", "股票名稱", "推薦評分",
-    "推薦收盤", "T+1收盤", "T+2收盤", "T+3收盤",
+    "推薦收盤", "T+1收盤", "T+2收盤", "T+3收盤", "T+4收盤", "T+5收盤",
     "組別",       # ★ v11.21 主榜/觀察組
     "出貨風險",   # ★ v11.23 推薦當日出貨風險
     "融資健康度", # ★ v11.23 推薦當日融資健康度
@@ -2356,7 +2425,7 @@ def _score_risk(risk):
 
 def _score_volume_ratio(vr):
     """量比評分（7分）：今日量 ÷ 近10日均量"""
-    if vr is None or vr == "": return 2   # ★ 無資料給基礎分，不全部歸零
+    if vr is None or vr == "": return 3   # ★ 無資料給中間值，避免 batch/逐支路徑差異影響排名
     try:
         vr = float(vr)
     except (ValueError, TypeError):
@@ -3001,10 +3070,10 @@ def update_performance(ss, date_str, current_prices):
     """
     推薦成效追蹤（v10.7 重寫）：
     1. 從「明日關注」解析各日推薦
-    2. 讀取「推薦成效」現有列表（最多保留推薦日距今 ≤ T+3 的筆數）
-    3. 新增今日5筆（T+1/T+2/T+3 留空）
-    4. 對所有現存筆，若今日是其 T+1/T+2/T+3，填入今日收盤
-    5. 移除推薦日距今超過 T+3 的筆
+    2. 讀取「推薦成效」現有列表（最多保留推薦日距今 ≤ T+5 的筆數）
+    3. 新增今日5筆（T+1/T+2/T+3/T+4/T+5 留空）
+    4. 對所有現存筆，若今日是其 T+1~T+5，填入今日收盤
+    5. 移除推薦日距今超過 T+5 的筆
     6. 整表寫回（最新在最上面）
     """
     disp_today = fmt_date(date_str)
@@ -3088,7 +3157,7 @@ def update_performance(ss, date_str, current_prices):
         if code not in today_codes_in_rows:
             new_rows.append([disp_today, code, name, score,
                              base_close if base_close > 0 else "",
-                             "", "", "", group,
+                             "", "", "", "", "", group,
                              risk, margin_health])   # ★ v11.23 出貨風險/融資健康度
 
     rows = new_rows + rows
@@ -3099,9 +3168,10 @@ def update_performance(ss, date_str, current_prices):
     for _y in _years:
         ensure_holidays_loaded(_y)
 
-    # ── 步驟2：填入今日收盤到 T+1 / T+2 / T+3 欄 ──
+    # ── 步驟2：填入今日收盤到 T+1 / T+2 / T+3 / T+4 / T+5 欄 ──
     # col index: 推薦日[0] 代號[1] 名稱[2] 評分[3]
-    #            推薦收盤[4] T+1[5] T+2[6] T+3[7]
+    #            推薦收盤[4] T+1[5] T+2[6] T+3[7] T+4[8] T+5[9]
+    #            組別[10] 出貨風險[11] 融資健康度[12]
     for r in rows:
         rec_disp   = r[0]
         code       = r[1]
@@ -3113,19 +3183,19 @@ def update_performance(ss, date_str, current_prices):
 
         _, today_close, _, _, _ = current_prices.get(code, (0.0, 0.0, 0, "N/A", None))
 
-        for slot, col_idx in [(1, 5), (2, 6), (3, 7)]:
+        for slot, col_idx in [(1, 5), (2, 6), (3, 7), (4, 8), (5, 9)]:
             if _n_trading_days_after(rec_disp, slot) == disp_today:
                 if r[col_idx] == "":   # 尚未填入才寫
                     r[col_idx] = _fmt_close(today_close, base_close)
                 break
 
-    # ── 步驟3：T+3 已填完的筆搬入「推薦歷史」，再從追蹤清單移除 ──
+    # ── 步驟3：T+5 已填完的筆搬入「推薦歷史」，再從追蹤清單移除 ──
     from datetime import datetime
     today_dt = datetime.strptime(disp_today, "%Y/%m/%d")
     def _is_expired(rec_disp):
         try:
-            t3 = datetime.strptime(_n_trading_days_after(rec_disp, 3), "%Y/%m/%d")
-            return t3 < today_dt
+            t5 = datetime.strptime(_n_trading_days_after(rec_disp, 5), "%Y/%m/%d")
+            return t5 < today_dt
         except Exception:
             return False
 
@@ -3446,7 +3516,7 @@ def find_trading_day():
     warm_up_cookie()
     now = datetime.now()
     d = now
-    print(f"  執行時間：{now.strftime('%Y/%m/%d %H:%M')}")
+    print(f"  執行時間：{now.strftime('%Y/%m/%d %H:%M')}  [{VERSION}]")
     ensure_holidays_loaded(now.year)
     if now.hour < 16 or (now.hour == 16 and now.minute < 30):
         print(f"  16:30 前自動使用前一交易日（三大法人資料 16:30 後才釋出）")
@@ -3737,6 +3807,7 @@ def main():
     else:
         # Step 1: 抓法人資料
         print("\n📡 Step 1/5 抓取三大法人資料...")
+        _t1 = time.time()
         try:
             date_str, foreign, trust, dealer, f_sell, t_sell, d_sell = find_trading_day()
             disp = fmt_date(date_str)
@@ -3754,6 +3825,7 @@ def main():
 
         all_groups = [foreign, trust, dealer, f_sell, t_sell, d_sell]
         buy_groups = [foreign, trust, dealer]
+        _ask_continue("Step 1/5 三大法人", start_time=_t1)
 
         # Step 1.5: 快取命中則跳過 Step 2/3，直接用快取的 prices/margin
         _cache_result = load_cache(ss, date_str)
@@ -3776,6 +3848,7 @@ def main():
             _cached_futures = ""   # ★ v11.6 完整執行時由 update_recommendation 填入並存快取
             # Step 2: 抓個股價格
             print(f"\n💹 Step 2/5 抓取個股價格與成交量...")
+            _t2 = time.time()
             try:
                 # 先抓全市場 batch，賣超和買超共用，不重打 API
                 sell_price_map = {}
@@ -3797,15 +3870,14 @@ def main():
                             stock["volume_ratio"] = None
             except Exception as e:
                 print(f"  ⚠️ 價格抓取部分失敗：{e}")
-
-            # Step 3: 抓融資融券
+            _ask_continue("Step 2/5 個股價格", start_time=_t2)
             print(f"\n📋 Step 3/5 抓取融資融券資料...")
+            _t3 = time.time()
             try:
                 enrich_with_margin(buy_groups, date_str)
             except Exception as e:
                 print(f"  ⚠️ 融資融券抓取部分失敗：{e}")
-
-            # 建立快取
+            _ask_continue("Step 3/5 融資融券", start_time=_t3)
             current_prices = {}
             current_margin = {}
             for group in all_groups:
@@ -3848,11 +3920,14 @@ def main():
         # sell_price_map 補入 current_prices（族群聯動等榜外股票用）
         # 快取命中時 sell_price_map = current_prices（僅 300 支），需重新抓全市場
         if sell_price_map is current_prices:
+            print(f"\n💹 Step 2/5 抓取全市場行情（快取命中，補抓全市場）...")
+            _t2 = time.time()
             _full_map = {}
             _full_batch, amp_map = fetch_price_map_batch(date_str)  # ★ v11.21
             _full_map.update(_full_batch)
             _full_map.update(fetch_price_map_otc(date_str))
             sell_price_map = _full_map
+            _ask_continue("Step 2~3/5 行情補抓（快取）", start_time=_t2)
         for code, val in sell_price_map.items():
             if code not in current_prices:
                 current_prices[code] = val
@@ -3973,6 +4048,7 @@ def main():
 
     # Step 4: 寫入 Sheets
     print("\n📊 Step 4/5 寫入 Google Sheets...")
+    _t4 = time.time()
     for key, name, fn in SHEET_OPTIONS:
         if key not in selected_keys:
             continue
@@ -3983,7 +4059,38 @@ def main():
 
     print(f"\n🎉 完成！")
     print(f"  https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}")
+    _ask_continue("Step 4/5 寫入 Sheets", start_time=_t4)
     input("按 Enter 關閉...")
+
+
+def _ask_continue(step_name: str, timeout: int = 5, start_time=None) -> None:
+    """每個 Step 結束後詢問是否繼續，{timeout} 秒無輸入自動繼續。"""
+    import sys, threading, time as _time
+    elapsed = f"  耗時 {_time.time() - start_time:.1f}s" if start_time is not None else ""
+    now_str = __import__("datetime").datetime.now().strftime("%H:%M:%S")
+    print(f"\n  ▶ [{VERSION}] {now_str}{elapsed}  {step_name} 完成。"
+          f"按 [Enter] 繼續，輸入 q 後 Enter 中止（{timeout} 秒後自動繼續）...")
+    result = []
+    event  = threading.Event()
+
+    def _read():
+        try:
+            val = sys.stdin.readline().strip().lower()
+        except Exception:
+            val = ""
+        result.append(val)
+        event.set()
+
+    t = threading.Thread(target=_read, daemon=True)
+    t.start()
+    triggered = event.wait(timeout)
+
+    if triggered and result and result[0] == "q":
+        print("  ⛔ 使用者中止。")
+        input("按 Enter 關閉...")
+        sys.exit(0)
+    if not triggered:
+        print("  ⏩ 自動繼續。")
 
 
 if __name__ == "__main__":
