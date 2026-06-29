@@ -1,6 +1,6 @@
 """
 台灣股市三大法人買超推薦回測腳本 — backtest.py
-版本：v1.0（架子版）
+版本：v1.1
 
 用途：
   對歷史推薦重建評分，比對 T+1/T+2/T+3 實際漲跌，
@@ -10,12 +10,24 @@
   python3 backtest.py              # 跑全部可用歷史
   python3 backtest.py --days 30    # 只跑最近 30 天
   python3 backtest.py --dry-run    # 只印結果，不寫 Sheets
+  python3 backtest.py --single     # 單股回測模式（讀「回測設定」工作表）
 
-架子狀態（v1.0）：
+單股回測模式（--single）：
+  1. 讀取 Google Sheets「回測設定」工作表中的股票代號清單
+  2. 從「歷史紀錄」撈每支股票所有法人買超訊號
+  3. 進場：法人出現買超紀錄當日收盤
+  4. 出場：T+3 收盤 或 法人當日轉賣超，取先到者
+  5. 結果輸出至「單股回測」工作表
+
+回測設定工作表格式：
+  A欄 = 代號（如 2330），B欄 = 備註（可空）
+  第一列為標題列，從第二列開始填代號
+
+架子狀態（v1.1）：
   ✅ 資料讀取（Sheets 歷史紀錄 + 推薦歷史）
   ✅ 評分特徵重建邏輯（連續天數、籌碼集中度、加速度）
   ✅ 輸出格式（明細 + 勝率矩陣）
-  🚧 T+1/T+2/T+3 股價抓取（TODO：資料累積足夠後補上）
+  ✅ 單股回測模式（--single）★ v1.1 新增
   🚧 融資健康度/出貨風險/融券趨勢重建（TODO：需打 MI_MARGN API）
   ⚠️  樣本 < 20 筆時勝率標注「樣本不足」
 
@@ -51,6 +63,75 @@ except ImportError:
 MIN_SAMPLE             = 20        # 勝率統計最低樣本數（低於此數標注「樣本不足」）
 BACKTEST_SHEET_DETAIL  = "回測明細"
 BACKTEST_SHEET_SUMMARY = "回測勝率"
+SINGLE_STOCK_SETTING   = "回測設定"   # ★ v1.1 單股回測設定工作表
+SINGLE_STOCK_RESULT    = "單股回測"   # ★ v1.1 單股回測結果工作表
+
+COOKIE_FILE = "/tmp/twse_cookie_bt.txt"
+
+# ── 網路工具（單股回測用）─────────────────────────────────────
+import subprocess
+
+def curl_get(url):
+    result = subprocess.run([
+        "curl", "-s", "--max-time", "20",
+        "-c", COOKIE_FILE, "-b", COOKIE_FILE,
+        "-H", "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        "-H", "Referer: https://www.twse.com.tw/zh/trading/foreign/t86.html",
+        "-H", "Accept: application/json, text/plain, */*",
+        url
+    ], capture_output=True, text=True)
+    return result.stdout.strip()
+
+_price_cache = {}   # { (code, YYYYMMDD): close_price }
+
+def fetch_close_price_single(code, date_str):
+    """
+    抓取個股指定日期收盤價（YYYYMMDD）。
+    先查快取，再打 TWSE STOCK_DAY API。
+    """
+    key = (code, date_str)
+    if key in _price_cache:
+        return _price_cache[key]
+
+    import json as _json
+    url = (f"https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY"
+           f"?date={date_str}&stockNo={code}&response=json")
+    try:
+        text = curl_get(url)
+        if not text or text.startswith("<"):
+            _price_cache[key] = None
+            return None
+        data = _json.loads(text)
+        if data.get("stat") != "OK" or not data.get("data"):
+            _price_cache[key] = None
+            return None
+        year   = int(date_str[:4]) - 1911
+        target = f"{year}/{date_str[4:6]}/{date_str[6:]}"
+        for row in data["data"]:
+            if row[0].strip() == target:
+                close = float(str(row[6]).replace(",", ""))
+                _price_cache[key] = close
+                return close
+    except Exception:
+        pass
+    _price_cache[key] = None
+    return None
+
+def _next_trading_days(date_str, n=3):
+    """
+    給定日期字串 YYYY/MM/DD，回傳後 n 個交易日（跳週末，未處理國定假日）的 YYYYMMDD list。
+    """
+    try:
+        d = datetime.strptime(date_str, "%Y/%m/%d")
+    except Exception:
+        return []
+    result, count = [], 0
+    while count < n:
+        d += timedelta(days=1)
+        if d.weekday() < 5:
+            result.append(d.strftime("%Y%m%d"))
+            count += 1
+    return result
 
 
 # ── Google Sheets 連線 ─────────────────────────────────────────
@@ -486,24 +567,26 @@ def write_summary_sheet(ss, sections, dry_run=False):
 # ── 主流程 ─────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="台灣股市推薦回測腳本 v1.0")
+    parser = argparse.ArgumentParser(description="台灣股市推薦回測腳本 v1.1")
     parser.add_argument("--days",    type=int, default=0,
                         help="只回測最近 N 天的推薦（0 = 全部）")
     parser.add_argument("--dry-run", action="store_true",
                         help="只印結果，不寫 Google Sheets")
+    parser.add_argument("--single",  action="store_true",
+                        help="★ v1.1 單股回測模式（讀「回測設定」工作表）")
     args = parser.parse_args()
 
     print("=" * 50)
-    print("  台灣股市推薦回測腳本 v1.0（架子版）")
+    print("  台灣股市推薦回測腳本 v1.1")
     print("=" * 50)
 
-    # ── 連線 ──
-    if args.dry_run:
-        ss = None
+    # ── dry-run 快速驗證 ──
+    if args.dry_run and not args.single:
         print("\n[dry-run 模式：不連接 Sheets，使用假資料驗證框架]")
         _demo_dry_run()
         return
 
+    # ── 連線 ──
     if not os.path.exists(CREDENTIALS_FILE):
         print(f"❌ 找不到 credentials.json（路徑：{CREDENTIALS_FILE}）")
         sys.exit(1)
@@ -515,7 +598,14 @@ def main():
         print(f"❌ 連接失敗：{e}")
         sys.exit(1)
 
-    # ── 讀取資料 ──
+    # ── 單股回測模式 ──
+    if args.single:
+        main_single(ss, dry_run=args.dry_run)
+        print(f"\n🎉 完成！")
+        print(f"  https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}")
+        return
+
+    # ── 一般推薦回測模式 ──
     print("\n📂 讀取資料...")
     perf_records = load_perf_history(ss)
     hist_records = load_hist_records(ss)
@@ -568,6 +658,264 @@ def main():
 
     print(f"\n🎉 完成！")
     print(f"  https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}")
+
+
+# ══════════════════════════════════════════════════════════════
+# ★ v1.1 單股回測模式（--single）
+# ══════════════════════════════════════════════════════════════
+
+def load_single_stock_setting(ss):
+    """
+    讀取「回測設定」工作表，回傳 list of (code, remark)。
+    格式：A欄=代號、B欄=備註（可空），第一列為標題。
+    若工作表不存在則自動建立並填入範例。
+    """
+    try:
+        ws = ss.worksheet(SINGLE_STOCK_SETTING)
+        rows = ws.get_all_values()
+        if len(rows) < 2:
+            print(f"  ℹ️ 「{SINGLE_STOCK_SETTING}」工作表無資料，請填入股票代號後再執行")
+            return []
+        result = []
+        for row in rows[1:]:
+            code = row[0].strip() if row else ""
+            remark = row[1].strip() if len(row) > 1 else ""
+            if code and code.isdigit():
+                result.append((code, remark))
+        print(f"  ✅ 讀取回測設定：{len(result)} 支股票")
+        return result
+    except Exception:
+        # 工作表不存在，自動建立
+        print(f"  ℹ️ 找不到「{SINGLE_STOCK_SETTING}」工作表，自動建立...")
+        ws = ss.add_worksheet(title=SINGLE_STOCK_SETTING, rows=100, cols=3)
+        ws.update(range_name="A1", values=[
+            ["代號", "備註（可空）"],
+            ["2330", "台積電"],
+            ["2317", "鴻海"],
+        ])
+        print(f"  ✅ 已建立「{SINGLE_STOCK_SETTING}」工作表，請填入要回測的股票代號後再執行")
+        return []
+
+
+def run_single_stock_backtest(ss, hist_records, codes_remarks):
+    """
+    單股回測主邏輯。
+    進場：法人出現買超當日收盤
+    出場：T+3 收盤 or 法人當日轉賣超（取先到者）
+    回傳 list of dict（每個進出場訊號一筆）
+    """
+    hist_map = build_hist_map(hist_records)
+
+    # 建立「賣超日期」查詢結構：{ code: set of dates }
+    sell_dates = {}
+    for r in hist_records:
+        if r.get("buy_sell") == "賣超":
+            sell_dates.setdefault(r["code"], set()).add(r["date"])
+
+    # 讀取「歷史紀錄」工作表取得代號對應名稱
+    name_map = {}
+    for r in hist_records:
+        if r["code"] not in name_map and r.get("name"):
+            name_map[r["code"]] = r["name"]
+
+    all_results = []
+    for code, remark in codes_remarks:
+        name = name_map.get(code, CODE_NAME_MAP.get(code, code))
+        entries = hist_map.get(code, {})
+        if not entries:
+            print(f"  ⚠️ {code} {name}：歷史紀錄無買超資料，略過")
+            continue
+
+        signals = sorted(entries.keys())   # 買超日期清單，升序
+        print(f"  🔍 {code} {name}：{len(signals)} 個買超訊號")
+
+        for entry_date in signals:
+            # ── 進場收盤價 ──
+            entry_date_yyyymmdd = entry_date.replace("/", "")
+            entry_close = fetch_close_price_single(code, entry_date_yyyymmdd)
+            if not entry_close:
+                continue
+
+            # ── 往後找 T+1 T+2 T+3（跳週末）──
+            future_days = _next_trading_days(entry_date, n=3)
+
+            # ── 出場判斷：法人轉賣超或 T+3 ──
+            exit_day_idx = None   # 0=T+1, 1=T+2, 2=T+3
+            exit_reason  = "T+3"
+            code_sell = sell_dates.get(code, set())
+            for i, fday_yyyymmdd in enumerate(future_days):
+                fday_disp = f"{fday_yyyymmdd[:4]}/{fday_yyyymmdd[4:6]}/{fday_yyyymmdd[6:]}"
+                if fday_disp in code_sell:
+                    exit_day_idx = i
+                    exit_reason  = f"T+{i+1} 法人轉賣"
+                    break
+            if exit_day_idx is None:
+                exit_day_idx = 2   # T+3
+
+            exit_date_yyyymmdd = future_days[exit_day_idx]
+            exit_close = fetch_close_price_single(code, exit_date_yyyymmdd)
+
+            pnl = None
+            if entry_close and exit_close and entry_close > 0:
+                pnl = round((exit_close - entry_close) / entry_close * 100, 2)
+
+            # ── 抓 T+1/T+2/T+3 收盤（供參考）──
+            t_closes = {}
+            for i, fday in enumerate(future_days):
+                t_closes[f"t{i+1}"] = fetch_close_price_single(code, fday)
+
+            # ── 當日法人資料 ──
+            day_data   = entries[entry_date]
+            total_net  = day_data.get("total_net", 0)
+            volume     = day_data.get("volume", 0)
+            chip_pct   = round(total_net / volume * 100, 1) if volume > 0 and total_net > 0 else None
+
+            all_results.append({
+                "code":        code,
+                "name":        name,
+                "remark":      remark,
+                "entry_date":  entry_date,
+                "entry_close": entry_close,
+                "exit_date":   f"{exit_date_yyyymmdd[:4]}/{exit_date_yyyymmdd[4:6]}/{exit_date_yyyymmdd[6:]}",
+                "exit_reason": exit_reason,
+                "exit_close":  exit_close,
+                "pnl":         pnl,
+                "t1":          t_closes.get("t1"),
+                "t2":          t_closes.get("t2"),
+                "t3":          t_closes.get("t3"),
+                "total_net":   total_net,
+                "chip_pct":    chip_pct,
+                "f_net":       day_data.get("f_net", 0),
+                "t_net":       day_data.get("t_net", 0),
+                "d_net":       day_data.get("d_net", 0),
+            })
+
+    return all_results
+
+
+def _single_stock_summary(results):
+    """
+    依股票彙整勝率統計。
+    回傳 list of dict（每支股票一列）。
+    """
+    from collections import defaultdict
+    groups = defaultdict(list)
+    for r in results:
+        groups[(r["code"], r["name"])].append(r)
+
+    summary = []
+    for (code, name), rows in sorted(groups.items()):
+        pnls = [r["pnl"] for r in rows if r["pnl"] is not None]
+        n    = len(pnls)
+        wins = sum(1 for p in pnls if p > 0)
+        avg  = round(sum(pnls) / n, 2) if n else None
+        rate = round(wins / n * 100, 1) if n else None
+        best  = round(max(pnls), 2) if pnls else None
+        worst = round(min(pnls), 2) if pnls else None
+        summary.append({
+            "code": code, "name": name,
+            "signals": len(rows), "valid": n,
+            "wins": wins, "rate": rate, "avg_pnl": avg,
+            "best": best, "worst": worst,
+        })
+    return summary
+
+
+def write_single_stock_sheet(ss, results, summary, dry_run=False):
+    """
+    輸出單股回測結果到「單股回測」工作表。
+    上半部：彙整摘要；下半部：逐筆明細。
+    """
+    now = datetime.now().strftime("%Y/%m/%d %H:%M")
+
+    SUMMARY_HEADERS = [
+        "代號", "股票名稱", "訊號數", "有效樣本", "勝出次數",
+        "勝率%", "平均損益%", "最佳%", "最差%",
+    ]
+    DETAIL_HDRS = [
+        "代號", "股票名稱", "進場日", "進場收盤",
+        "出場日", "出場原因", "出場收盤", "損益%",
+        "T+1收盤", "T+2收盤", "T+3收盤",
+        "法人合計(張)", "外資(張)", "投信(張)", "自營(張)", "籌碼集中度%",
+    ]
+
+    def _pnl_label(p):
+        if p is None: return "N/A"
+        return f"+{p}%" if p > 0 else f"{p}%"
+
+    # 摘要區
+    data = [
+        [f"單股回測結果（{now}，共 {len(summary)} 支股票，{len(results)} 個訊號）"],
+        [],
+        ["═" * 30 + "  彙整摘要  " + "═" * 30],
+        SUMMARY_HEADERS,
+    ]
+    for s in summary:
+        rate_str = f"{s['rate']}%" if s['rate'] is not None else "N/A"
+        if s['valid'] < MIN_SAMPLE:
+            rate_str += f" ⚠️樣本不足({s['valid']})"
+        data.append([
+            s["code"], s["name"], s["signals"], s["valid"],
+            s["wins"], rate_str,
+            _pnl_label(s["avg_pnl"]),
+            _pnl_label(s["best"]),
+            _pnl_label(s["worst"]),
+        ])
+
+    data += [[], ["═" * 30 + "  逐筆明細  " + "═" * 30], DETAIL_HDRS]
+    for r in results:
+        data.append([
+            r["code"], r["name"], r["entry_date"], r["entry_close"],
+            r["exit_date"], r["exit_reason"], r["exit_close"],
+            _pnl_label(r["pnl"]),
+            r["t1"] or "", r["t2"] or "", r["t3"] or "",
+            r["total_net"], r["f_net"], r["t_net"], r["d_net"],
+            r["chip_pct"] if r["chip_pct"] is not None else "",
+        ])
+
+    if dry_run:
+        print(f"  [dry-run] 單股回測：{len(summary)} 支股票，{len(results)} 個訊號")
+        for s in summary:
+            print(f"    {s['code']} {s['name']}: 勝率 {s['rate']}%（{s['valid']} 筆）")
+        return
+
+    ws = get_or_create(ss, SINGLE_STOCK_RESULT, max(len(DETAIL_HDRS), len(SUMMARY_HEADERS)))
+    ws.clear()
+    if ws.row_count < len(data) + 5:
+        ws.add_rows(len(data) + 5 - ws.row_count)
+    ws.update(range_name="A1", values=data)
+    print(f"  ✅ 單股回測 寫入完成（{len(summary)} 支股票，{len(results)} 個訊號）")
+
+
+def main_single(ss, dry_run=False):
+    """單股回測主流程"""
+    print("\n📋 讀取回測設定...")
+    codes_remarks = load_single_stock_setting(ss)
+    if not codes_remarks:
+        return
+
+    print("\n📂 讀取歷史紀錄...")
+    hist_records = load_hist_records(ss)
+    if not hist_records:
+        print("  ⚠️ 歷史紀錄無資料")
+        return
+
+    print(f"\n🔍 開始回測（{len(codes_remarks)} 支股票）...")
+    results = run_single_stock_backtest(ss, hist_records, codes_remarks)
+
+    if not results:
+        print("  ⚠️ 無有效回測訊號（歷史資料可能不足，或代號有誤）")
+        return
+
+    summary = _single_stock_summary(results)
+
+    print(f"\n📊 彙整結果：")
+    for s in summary:
+        rate_str = f"{s['rate']}%" if s['rate'] is not None else "N/A"
+        print(f"  {s['code']} {s['name']}：{s['valid']} 筆有效，勝率 {rate_str}，平均 {s['avg_pnl']}%")
+
+    print("\n💾 輸出結果...")
+    write_single_stock_sheet(ss, results, summary, dry_run=dry_run)
 
 
 def _demo_dry_run():

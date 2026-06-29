@@ -5,6 +5,57 @@ Google Sheets ID：`1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g`
 
 ---
 
+## backtest v1.1 — 2026/06/29
+
+### backtest.py
+
+- **單股回測模式（`--single`）新增**
+  * 新增 `load_single_stock_setting(ss)`：讀取「回測設定」工作表（A欄=代號、B欄=備註），工作表不存在時自動建立並填入範例
+  * 新增 `run_single_stock_backtest(ss, hist_records, codes_remarks)`：從「歷史紀錄」撈指定股票所有法人買超訊號，進場=買超當日收盤，出場=T+3 收盤 或 法人當日轉賣超（取先到者），呼叫 TWSE STOCK_DAY API 補抓收盤價
+  * 新增 `_single_stock_summary(results)`：依股票彙整勝率、平均損益、最佳/最差
+  * 新增 `write_single_stock_sheet(ss, results, summary)`：輸出至「單股回測」工作表，上半部彙整摘要，下半部逐筆明細（進出場日/價/原因/損益%/T+1~T+3收盤/法人各方向張數/籌碼集中度）
+  * 新增 `main_single(ss, dry_run)`：單股回測主流程，整合上述函式
+  * 新增 `curl_get(url)`、`fetch_close_price_single(code, date_str)`、`_next_trading_days(date_str, n)`：價格抓取工具（含 module-level `_price_cache` 避免重複打 API）
+  * 新增 `SINGLE_STOCK_SETTING = "回測設定"`、`SINGLE_STOCK_RESULT = "單股回測"` 常數
+  * `main()` 新增 `--single` 參數，連線後依旗標分流至 `main_single()` 或原有推薦回測流程
+  * 版本從 v1.0（架子版）升至 v1.1
+  * 原有 `fetch_close_price` TODO 函式保留，不影響既有推薦回測流程
+
+- **執行方式**
+  ```bash
+  python3 backtest.py --single          # 單股回測（讀「回測設定」工作表）
+  python3 backtest.py --single --dry-run  # dry-run 模式（不寫 Sheets）
+  ```
+
+---
+
+## v11.29 — 2026/06/26
+
+### fetch_and_update.py
+
+- **5日融資增減趨勢（新增 #26）**
+  * 新增 `update_margin_history(ss, date_str, current_margin)`：每日將融資餘額寫入「融資歷史」工作表（格式：日期/代號/融資餘額(張)），保留 31 天，重跑自動覆蓋
+  * 新增 `load_margin_history(ss)`：讀取近期融資餘額，回傳 `{code: [(disp, mb), ...]}` 按日期升序
+  * 新增 `calc_margin_trend(margin_hist, code, days=5)`：計算近 5 天融資餘額增減，回傳 (delta, label)；label 格式：`↗ 大增N張`（≥500張）/ `↗ 增N張` / `↘ 大減N張` / `↘ 減N張` / `➡ 持平`
+  * 新增 `_score_margin_trend(margin_trend)`：融資趨勢評分 -6 ~ +6 分；大減（≥500張）+6 / 小減 +3 / 小增 -3 / 大增 -6，中性 0
+  * `build_row` 新增 `margin_hist` 參數，計算並輸出 `[39] 融資趨勢` 欄
+  * `ANALYSIS_HEADERS` 新增 `[39] 融資趨勢`
+  * `score_stock` 與 `score_stock_relaxed` 均納入 `_score_margin_trend`（主榜+觀察組同步）
+  * `SHEET_OPTIONS` 新增 `A) 融資歷史`（寫入時機與融券歷史相同）
+  * `_calc_analysis_rows` 在載入 short_hist 後同步載入 `margin_hist`
+
+- **crontab 修正**
+  * 移除多餘的第二條（用 `~` 和裸 `python3`，crontab 環境不展開，會執行失敗）
+  * 只保留第一條（完整絕對路徑），log 正常寫入
+
+### 每日更新.sh
+
+- **新增 `tee -a log.txt`**：每個模式（完整/只抓/只寫/Debug）執行時同時輸出到終端機與 log.txt（append）
+- **banner 版號同步**：從 v11.5 更新至 v11.28（解決待處理 #20）
+
+
+---
+
 ## v11.28 — 2026/06/25
 
 ### fetch_and_update.py
