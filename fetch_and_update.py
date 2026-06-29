@@ -16,7 +16,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.28"  # ← 每次 commit 只改這裡
+VERSION = "v11.29"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -1404,6 +1404,99 @@ def update_short_history(ss, date_str, current_margin):
     print(f"  ✅ 融券歷史 寫入 {len(new_rows)} 筆（{disp}）")
 
 
+# ★ v11.29 融資歷史工作表
+def update_margin_history(ss, date_str, current_margin):
+    """
+    將本次執行中的融資餘額寫入「融資歷史」工作表（每日一批）。
+    格式：日期, 代號, 融資餘額(張)
+    保留 31 天，超過自動清除。
+    只寫 current_margin 中有融資資料的股票（mb > 0）。
+    """
+    disp = fmt_date(date_str)
+    ws   = get_or_create(ss, "融資歷史", 3)
+
+    from datetime import datetime, timedelta
+    _cutoff = (datetime.strptime(date_str, "%Y%m%d") - timedelta(days=31)).strftime("%Y/%m/%d")
+    purge_old_rows(ws, _cutoff)
+
+    existing = ws.get_all_values()
+    headers  = ["日期", "代號", "融資餘額(張)"]
+    if not existing:
+        existing = [headers]
+
+    # 過濾掉今天已寫入的列（重跑時覆蓋）
+    if existing and existing[0] == headers:
+        kept = [existing[0]] + [r for r in existing[1:] if not (r and r[0] == disp)]
+    else:
+        kept = [r for r in existing if not (r and r[0] == disp)]
+        kept = [headers] + kept
+
+    new_rows = [
+        [disp, code, mb]
+        for code, (mb, mc, sb) in current_margin.items()
+        if mb > 0
+    ]
+    new_rows.sort(key=lambda r: r[1])   # 依代號排序
+
+    full = kept + new_rows
+    ws.clear()
+    if ws.row_count < len(full) + 10:
+        ws.add_rows(len(full) + 10 - ws.row_count)
+    ws.update(range_name="A1", values=full)
+    print(f"  ✅ 融資歷史 寫入 {len(new_rows)} 筆（{disp}）")
+
+
+def load_margin_history(ss):
+    """
+    從「融資歷史」工作表讀取近期資料，建立趨勢查表。
+    回傳 {code: [(disp, mb), ...]}，按日期升序。
+    """
+    try:
+        ws   = ss.worksheet("融資歷史")
+        rows = ws.get_all_values()
+    except Exception:
+        return {}
+
+    result = {}
+    for row in rows[1:]:   # 跳標題
+        if len(row) < 3 or not row[1]:
+            continue
+        d_str, code = row[0].strip(), row[1].strip()
+        try:
+            mb = int(str(row[2]).replace(",", ""))
+        except ValueError:
+            continue
+        result.setdefault(code, []).append((d_str, mb))
+
+    # 每支股票按日期升序
+    for code in result:
+        result[code].sort(key=lambda x: x[0])
+    return result
+
+
+def calc_margin_trend(margin_hist, code, days=5):
+    """
+    計算近 days 天融資餘額增減趨勢。
+    回傳 (增減張數, 趨勢標記)。
+    趨勢標記：「↗ 大增N張」/ 「↗ 增N張」/ 「↘ 大減N張」/ 「↘ 減N張」/ 「➡ 持平」/ 「」（資料不足）
+    """
+    entries = margin_hist.get(code, [])
+    if len(entries) < 2:
+        return 0, ""
+
+    # 取最近 days 天
+    recent = entries[-days:]
+    delta = recent[-1][1] - recent[0][1]   # 最新 - 最舊
+
+    if delta == 0:
+        return 0, "➡ 持平"
+    elif delta > 0:
+        label = f"↗ 大增{delta}張" if delta >= 500 else f"↗ 增{delta}張"
+    else:
+        label = f"↘ 大減{abs(delta)}張" if abs(delta) >= 500 else f"↘ 減{abs(delta)}張"
+    return delta, label
+
+
 def load_short_history(ss, date_str):
     """
     從「融券歷史」工作表讀取近期資料，建立趨勢查表。
@@ -1926,7 +2019,8 @@ def _consecutive_days(entries, code, all_dates, net_by_date):
 
 
 def build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net_by_date,
-              short_hist=None, market_pct=None, ma5_map=None, tdcc_map=None, amp_map=None):
+              short_hist=None, market_pct=None, ma5_map=None, tdcc_map=None, amp_map=None,
+              margin_hist=None):
     """
     ★ 優化：從 inner function 獨立為模組層函式。
     建立對照分析 / 每日快照 的單列資料。
@@ -1934,6 +2028,7 @@ def build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net
     ★ v11.9：新增 market_pct 參數，輸出相對強弱欄。
     ★ v11.11：新增 ma5_map 參數，輸出5日線欄。
     ★ v11.21：新增 amp_map 參數，輸出振幅%欄。
+    ★ v11.29：新增 margin_hist 參數，輸出融資趨勢欄。
     """
     code = s["code"]
 
@@ -1983,6 +2078,9 @@ def build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net
     # ★ v11.6 融券趨勢
     _, _, short_trend = calc_short_trend(short_hist or {}, code)
 
+    # ★ v11.29 融資趨勢
+    _, margin_trend = calc_margin_trend(margin_hist or {}, code)
+
     # ★ v11.9 大盤相對強弱
     relative_strength = calc_relative_strength(change_pct, market_pct)
 
@@ -2019,6 +2117,7 @@ def build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net
         s["last"],
         today_amount,      # ★ v11.18 [37] 今日買超金額（元）
         amplitude,         # ★ v11.21 [38] 振幅% = (高-低)/低
+        margin_trend,      # ★ v11.29 [39] 融資趨勢
     ]
 
 
@@ -2038,6 +2137,7 @@ ANALYSIS_HEADERS = [
     "最近出現日",   # [36]
     "今日買超金額", # ★ v11.18 [37]
     "振幅%",        # ★ v11.21 [38] (高-低)/低
+    "融資趨勢",     # ★ v11.29 [39]
 ]
 
 
@@ -2249,6 +2349,9 @@ def _calc_analysis_rows(ss, date_str, current_prices, current_margin, cache_pric
     # ★ v11.6 載入融券歷史，供 build_row 計算趨勢
     short_hist = load_short_history(ss, date_str)
 
+    # ★ v11.29 載入融資歷史，供 build_row 計算融資趨勢
+    margin_hist = load_margin_history(ss)
+
     # ★ v11.9 抓大盤漲跌幅，供 build_row 計算相對強弱
     print("  📡 抓取大盤指數...")
     market_pct = fetch_market_index(date_str)
@@ -2272,7 +2375,7 @@ def _calc_analysis_rows(ss, date_str, current_prices, current_margin, cache_pric
     all_rows = [
         build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net_by_date,
                   short_hist=short_hist, market_pct=market_pct, ma5_map=ma5_map, tdcc_map=tdcc_map,
-                  amp_map=amp_map)
+                  amp_map=amp_map, margin_hist=margin_hist)
         for s in buy_map.values()
     ]
 
@@ -2456,6 +2559,21 @@ def _score_short_trend(short_trend):
     return 0       # 持平或資料不足
 
 
+def _score_margin_trend(margin_trend):
+    """
+    融資趨勢評分（-6 ~ +6，中性 0）：★ v11.29
+    融資大增 → 散戶追高，扣分；融資大減 → 籌碼乾淨，加分。
+    """
+    s = str(margin_trend).strip()
+    if not s or s == "➡ 持平":
+        return 0
+    if "↘" in s:   # 融資減少 → 利多（籌碼乾淨）
+        return 6 if "大減" in s else 3
+    if "↗" in s:   # 融資增加 → 利空（散戶追高）
+        return -6 if "大增" in s else -3
+    return 0
+
+
 def _calc_buy_accel(all_entries, all_dates):
     """
     計算三法人合計買超「加速度」：最近1日買超 vs 前2日平均的比值。
@@ -2585,6 +2703,7 @@ def score_stock(row):
     short_trend  = row[33] if len(row) > 33 else ""   # [33]
     today_amount = row[37] if len(row) > 37 else 0    # ★ v11.18 [37]
     amplitude    = row[38] if len(row) > 38 else ""   # ★ v11.21 [38]
+    margin_trend = row[39] if len(row) > 39 else ""   # ★ v11.29 [39]
     try:
         today_amount = float(today_amount) if today_amount else 0
     except (ValueError, TypeError):
@@ -2651,7 +2770,8 @@ def score_stock(row):
         _score_short_trend(short_trend) +      # -8 ~ +8分
         _score_tdcc(tdcc_big_pct, tdcc_weekly_chg) +  # ★ v11.15 -5 ~ +5分
         _score_net_amount(today_amount) +      # ★ v11.18 0~8分
-        _score_momentum(chg_val)               # ★ v11.21 -2 ~ +5分
+        _score_momentum(chg_val) +             # ★ v11.21 -2 ~ +5分
+        _score_margin_trend(margin_trend)      # ★ v11.29 -6 ~ +6分
     )
     return max(0, min(score, 100))
 
@@ -2673,6 +2793,7 @@ def score_stock_relaxed(row):
     tdcc_raw     = row[32] if len(row) > 32 else ""
     short_trend  = row[33] if len(row) > 33 else ""
     today_amount = row[37] if len(row) > 37 else 0
+    margin_trend = row[39] if len(row) > 39 else ""   # ★ v11.29 [39]
     try:
         today_amount = float(today_amount) if today_amount else 0
     except (ValueError, TypeError):
@@ -2721,7 +2842,8 @@ def score_stock_relaxed(row):
         _score_short_trend(short_trend) +
         _score_tdcc(tdcc_big_pct, tdcc_weekly_chg) +
         _score_net_amount(today_amount) +
-        _score_momentum(chg_val)
+        _score_momentum(chg_val) +
+        _score_margin_trend(margin_trend)      # ★ v11.29
     )
     return max(0, min(score, 100))
 
@@ -4009,6 +4131,7 @@ def main():
         ("8", "融券歷史",      lambda: update_short_history(ss, date_str, current_margin)),
         ("9", "族群熱度排行",   lambda: update_sector_heatmap(ss, date_str)),
         ("0", "重大訊息歷史",   lambda: update_news_history(ss, date_str, fetch_news_announcements(date_str))),
+        ("A", "融資歷史",       lambda: update_margin_history(ss, date_str, current_margin)),  # ★ v11.29
     ]
 
     if args.sheet_only:
