@@ -29,6 +29,18 @@ Google Sheets ID：`1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g`
 
 ---
 
+## v11.30 — 2026/07/02
+
+### 每日更新.sh
+
+- **修正輸出緩衝卡住問題**
+  * 8 處 `python3 fetch_and_update.py` / `python3 backtest.py` 呼叫全部加上 `-u`（unbuffered）參數
+  * 原因：v11.29 加入 `| tee -a log.txt` 後，Python 偵測 stdout 非 tty，改為整塊緩衝，導致畫面停在「🚀 完整執行...」不動（實際背景仍在跑，只是輸出被緩衝住，直到緩衝區滿或程式結束才一次噴出）
+  * 修正後 Step 1~4/5 進度會即時印出，不再有「假卡住」的情況
+  * banner 版號同步至 v11.30
+
+---
+
 ## v11.29 — 2026/06/26
 
 ### fetch_and_update.py

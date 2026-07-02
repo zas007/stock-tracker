@@ -12,11 +12,14 @@
 9. 保底補抓三段式（batch→OTC→skip）、賣超移出 enrich_with_prices、Step 1.5 快取命中跳過 Step 2/3
 """
 
+import warnings
+warnings.filterwarnings("ignore")
+
 import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.29"  # ← 每次 commit 只改這裡
+VERSION = "v11.30"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
