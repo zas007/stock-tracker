@@ -19,7 +19,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.30"  # ← 每次 commit 只改這裡
+VERSION = "v11.31"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -1500,6 +1500,95 @@ def calc_margin_trend(margin_hist, code, days=5):
     return delta, label
 
 
+def update_volume_history(ss, date_str, current_prices):
+    """
+    ★ v11.31 將本次執行中的個股成交量寫入「成交量歷史」工作表（每日一批）。
+    格式：日期, 代號, 成交量(張)
+    保留 31 天，超過自動清除。
+    只寫 current_prices 中有成交量資料的股票（volume > 0）。
+    ★ 涵蓋範圍為 current_prices（買超+賣超共約300檔），
+      不受「對照分析」5天過濾規則限制，累積10天後可算完整量比。
+    """
+    disp = fmt_date(date_str)
+    ws   = get_or_create(ss, "成交量歷史", 3)
+
+    from datetime import datetime, timedelta
+    _cutoff = (datetime.strptime(date_str, "%Y%m%d") - timedelta(days=31)).strftime("%Y/%m/%d")
+    purge_old_rows(ws, _cutoff)
+
+    existing = ws.get_all_values()
+    headers  = ["日期", "代號", "成交量(張)"]
+    if not existing:
+        existing = [headers]
+
+    # 過濾掉今天已寫入的列（重跑時覆蓋）
+    if existing and existing[0] == headers:
+        kept = [existing[0]] + [r for r in existing[1:] if not (r and r[0] == disp)]
+    else:
+        kept = [r for r in existing if not (r and r[0] == disp)]
+        kept = [headers] + kept
+
+    new_rows = [
+        [disp, code, vol]
+        for code, (avg, close, vol, chg, vr) in current_prices.items()
+        if vol and vol > 0
+    ]
+    new_rows.sort(key=lambda r: r[1])   # 依代號排序
+
+    full = kept + new_rows
+    ws.clear()
+    if ws.row_count < len(full) + 10:
+        ws.add_rows(len(full) + 10 - ws.row_count)
+    ws.update(range_name="A1", values=full)
+    print(f"  ✅ 成交量歷史 寫入 {len(new_rows)} 筆（{disp}）")
+
+
+def load_volume_history(ss):
+    """
+    從「成交量歷史」工作表讀取近期資料，建立量比查表。
+    回傳 {code: [(disp, vol), ...]}，按日期升序。
+    """
+    try:
+        ws   = ss.worksheet("成交量歷史")
+        rows = ws.get_all_values()
+    except Exception:
+        return {}
+
+    result = {}
+    for row in rows[1:]:   # 跳標題
+        if len(row) < 3 or not row[1]:
+            continue
+        d_str, code = row[0].strip(), row[1].strip()
+        try:
+            vol = int(str(row[2]).replace(",", ""))
+        except ValueError:
+            continue
+        result.setdefault(code, []).append((d_str, vol))
+
+    # 每支股票按日期升序
+    for code in result:
+        result[code].sort(key=lambda x: x[0])
+    return result
+
+
+def calc_volume_ratio_from_history(volume_hist, code, today_vol, disp, days=10):
+    """
+    ★ v11.31 用「成交量歷史」計算量比：今日成交量 ÷ 近N天平均成交量。
+    取「今日之前」的資料（排除今日自己，避免重跑時把今日算進平均），
+    資料不足 N 天時就用現有天數平均（1~9天皆可，越多天越準）。
+    完全沒有歷史（新股票第一次出現）或今日成交量為0時回傳 None，
+    交由呼叫端 fallback（沿用逐支補抓當下算出的即時量比，若有的話）。
+    """
+    if not today_vol or today_vol <= 0:
+        return None
+    entries = [(d, v) for d, v in volume_hist.get(code, []) if d != disp and v > 0]
+    if not entries:
+        return None
+    recent  = entries[-days:]
+    avg_vol = sum(v for _, v in recent) / len(recent)
+    return round(today_vol / avg_vol, 2) if avg_vol > 0 else None
+
+
 def load_short_history(ss, date_str):
     """
     從「融券歷史」工作表讀取近期資料，建立趨勢查表。
@@ -2023,7 +2112,7 @@ def _consecutive_days(entries, code, all_dates, net_by_date):
 
 def build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net_by_date,
               short_hist=None, market_pct=None, ma5_map=None, tdcc_map=None, amp_map=None,
-              margin_hist=None):
+              margin_hist=None, volume_hist=None):
     """
     ★ 優化：從 inner function 獨立為模組層函式。
     建立對照分析 / 每日快照 的單列資料。
@@ -2032,6 +2121,8 @@ def build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net
     ★ v11.11：新增 ma5_map 參數，輸出5日線欄。
     ★ v11.21：新增 amp_map 參數，輸出振幅%欄。
     ★ v11.29：新增 margin_hist 參數，輸出融資趨勢欄。
+    ★ v11.31：新增 volume_hist 參數，量比改用「成交量歷史」批次計算，
+      不受 batch/逐支補抓路徑影響，兩條路徑改為共用同一份資料來源。
     """
     code = s["code"]
 
@@ -2062,6 +2153,11 @@ def build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net
     d_trend = calc_trend(s["d"])
 
     _, close, volume, change_pct, volume_ratio = current_prices.get(code, (0.0, 0.0, 0, "N/A", None))
+    # ★ v11.31 量比優先改用「成交量歷史」批次計算（不受 batch/逐支補抓路徑影響）
+    #   歷史不足（新股票剛出現）時，沿用 current_prices 內原本的即時值（可能是 None 或逐支補抓算出的值）
+    _hist_vr = calc_volume_ratio_from_history(volume_hist or {}, code, volume, disp)
+    if _hist_vr is not None:
+        volume_ratio = _hist_vr
     all_entries = s["f"] + s["t"] + s["d"]
     all_remaining, all_wavg = calc_position_fifo(all_entries, all_sells)
     pct_str, risk = calc_risk(close, all_wavg)
@@ -2355,6 +2451,9 @@ def _calc_analysis_rows(ss, date_str, current_prices, current_margin, cache_pric
     # ★ v11.29 載入融資歷史，供 build_row 計算融資趨勢
     margin_hist = load_margin_history(ss)
 
+    # ★ v11.31 載入成交量歷史，供 build_row 批次計算量比
+    volume_hist = load_volume_history(ss)
+
     # ★ v11.9 抓大盤漲跌幅，供 build_row 計算相對強弱
     print("  📡 抓取大盤指數...")
     market_pct = fetch_market_index(date_str)
@@ -2378,7 +2477,7 @@ def _calc_analysis_rows(ss, date_str, current_prices, current_margin, cache_pric
     all_rows = [
         build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net_by_date,
                   short_hist=short_hist, market_pct=market_pct, ma5_map=ma5_map, tdcc_map=tdcc_map,
-                  amp_map=amp_map, margin_hist=margin_hist)
+                  amp_map=amp_map, margin_hist=margin_hist, volume_hist=volume_hist)
         for s in buy_map.values()
     ]
 
@@ -4135,6 +4234,7 @@ def main():
         ("9", "族群熱度排行",   lambda: update_sector_heatmap(ss, date_str)),
         ("0", "重大訊息歷史",   lambda: update_news_history(ss, date_str, fetch_news_announcements(date_str))),
         ("A", "融資歷史",       lambda: update_margin_history(ss, date_str, current_margin)),  # ★ v11.29
+        ("B", "成交量歷史",     lambda: update_volume_history(ss, date_str, current_prices)),  # ★ v11.31
     ]
 
     if args.sheet_only:
