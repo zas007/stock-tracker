@@ -19,7 +19,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.31"  # ← 每次 commit 只改這裡
+VERSION = "v11.32"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -3976,7 +3976,7 @@ def main():
 
     if not os.path.exists(CREDENTIALS_FILE) and not args.debug_margin:
         print(f"\n❌ 找不到 credentials.json")
-        input("按 Enter 關閉..."); sys.exit(1)
+        _wait_close(); sys.exit(1)
 
     # ── debug-margin 模式 ──
     if args.debug_margin:
@@ -3987,7 +3987,7 @@ def main():
                 debug_margin(d.strftime("%Y%m%d"))
                 break
             d -= timedelta(days=1)
-        input("按 Enter 關閉...")
+        _wait_close()
         return
 
     # ── 先連上 Sheets ──
@@ -3997,7 +3997,7 @@ def main():
         print("  ✅ 連接成功")
     except Exception as e:
         print(f"\n❌ 連接失敗：{e}")
-        input("按 Enter 關閉..."); sys.exit(1)
+        _wait_close(); sys.exit(1)
 
     # ── 找今日交易日字串（用來比對快取） ──
     warm_up_cookie()
@@ -4014,7 +4014,7 @@ def main():
         result = load_cache(ss, today_str)
         if not result:
             print("❌ 快取不存在或日期不符，請先執行完整模式或只抓資料")
-            input("按 Enter 關閉..."); sys.exit(1)
+            _wait_close(); sys.exit(1)
         date_str, foreign, trust, dealer, f_sell, t_sell, d_sell, current_prices, current_margin, _cached_futures = result
         buy_groups = [foreign, trust, dealer]
         all_buy_codes = set()
@@ -4045,7 +4045,7 @@ def main():
             if dealer:  print(f"  自營商買超第1：{dealer[0]['name']} ({dealer[0]['net']:,} 張)")
         except Exception as e:
             print(f"\n❌ 抓取失敗：{e}")
-            input("按 Enter 關閉..."); sys.exit(1)
+            _wait_close(); sys.exit(1)
 
         all_groups = [foreign, trust, dealer, f_sell, t_sell, d_sell]
         buy_groups = [foreign, trust, dealer]
@@ -4177,7 +4177,7 @@ def main():
             print(f"  ⚠️ 集保快取更新失敗（不影響快取儲存）：{e}")
         print(f"\n✅ fetch-only 完成，快取已儲存至 Sheets（含價格與融資券與集保）。")
         print(f"   執行 --sheet-only 可直接寫入 Sheets，不重打 API。")
-        input("按 Enter 關閉...")
+        _wait_close()
         return
 
     # ── 選擇要寫入的工作表 ──
@@ -4281,12 +4281,36 @@ def main():
         if not write_with_retry(name, fn):
             ans = input("繼續其他工作表？(Y/n): ").strip().lower()
             if ans == "n":
-                input("按 Enter 關閉..."); sys.exit(1)
+                _wait_close(); sys.exit(1)
 
     print(f"\n🎉 完成！")
     print(f"  https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}")
     _ask_continue("Step 4/5 寫入 Sheets", start_time=_t4)
-    input("按 Enter 關閉...")
+    _wait_close()
+
+
+def _wait_close(timeout: int = 15) -> None:
+    """
+    ★ v11.32 統一的「按 Enter 關閉」等待，{timeout} 秒無輸入自動關閉。
+    比照 _ask_continue 的 threading 做法，避免使用者直接關閉終端機視窗時
+    input() 收到 EOF 而噴出未捕捉的 Traceback（見 log.txt 多次紀錄）。
+    """
+    import sys, threading
+    print(f"按 Enter 關閉（{timeout} 秒後自動關閉）...")
+    result = []
+    event  = threading.Event()
+
+    def _read():
+        try:
+            val = sys.stdin.readline()
+        except Exception:
+            val = ""
+        result.append(val)
+        event.set()
+
+    t = threading.Thread(target=_read, daemon=True)
+    t.start()
+    event.wait(timeout)
 
 
 def _ask_continue(step_name: str, timeout: int = 5, start_time=None) -> None:
@@ -4313,7 +4337,7 @@ def _ask_continue(step_name: str, timeout: int = 5, start_time=None) -> None:
 
     if triggered and result and result[0] == "q":
         print("  ⛔ 使用者中止。")
-        input("按 Enter 關閉...")
+        _wait_close()
         sys.exit(0)
     if not triggered:
         print("  ⏩ 自動繼續。")
