@@ -5,7 +5,24 @@ Google Sheets ID：`1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g`
 
 ---
 
-## v11.32 — 2026/07/09
+## v11.33 — 2026/07/13
+
+### config.py
+
+- **【新增】獨立的「臨時休市」清單 `TEMP_CLOSURES`（#31）**
+  * 新增 `TEMP_CLOSURES = {"20260710"}`，先補入 7/10 颱風假
+
+### fetch_and_update.py
+
+- **【修正】颱風假等臨時休市未被排除，導致 T+1~T+5 對照分析日期錯位一天（#31）**
+  * 舊：`_is_trading_day()` 只檢查 `HOLIDAYS`；`HOLIDAYS` 來源是 `fetch_holidays_from_twse` 抓取的 TWSE **官方年度假日行事曆**，只含國定假日，不含颱風假等當天才公告的臨時休市，且 `ensure_holidays_loaded()` 每年只查一次（`_HOLIDAYS_ATTEMPTED`），就算 TWSE 事後補行事曆也不會重查。2026/07/10 颱風假未開盤，但未被排除，導致 `_n_trading_days_after()` 誤把 7/10 算成有效交易日，「推薦成效」中推薦日 07/03～07/09 這 5 筆的 T+1~T+5 對照全部往前多算一天
+  * 新：新增 `TEMP_CLOSURES` 集合（config.py，人工維護，不受 `_HOLIDAYS_ATTEMPTED` 限制），`_is_trading_day()` 同時排除 `HOLIDAYS` 與 `TEMP_CLOSURES`；`VERSION` → v11.33
+  * 效果：`_n_trading_days_after`、`find_trading_day` 等所有依賴 `_is_trading_day()` 的計算一併修正；日後遇到颱風假等臨時休市，只需在 `TEMP_CLOSURES` 手動補一筆日期即可，不用等 TWSE 官方行事曆更新
+  * 待確認：受影響的 5 筆推薦（07/03、06、07、08、09）T+N 目標日期修正後全部落在 07/13，理論上今日重跑會自動補齊；但若 07/13 曾用修正前的舊版程式跑過、導致提前誤判「已過期」搬進「推薦歷史」，則需人工核對該工作表是否有欄位空白
+
+---
+
+
 
 ### fetch_and_update.py
 

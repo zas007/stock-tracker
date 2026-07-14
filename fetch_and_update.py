@@ -19,7 +19,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.32"  # ← 每次 commit 只改這裡
+VERSION = "v11.33"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -39,6 +39,7 @@ try:
     SECTOR_MAP  = _cfg.SECTOR_MAP
     CODE_NAME_MAP = _cfg.CODE_NAME_MAP
     HOLIDAYS    = getattr(_cfg, "HOLIDAYS", set())
+    TEMP_CLOSURES = getattr(_cfg, "TEMP_CLOSURES", set())  # ★ v11.33 颱風假等臨時休市（人工維護，不受 _HOLIDAYS_ATTEMPTED 限制）
     NEWS_KEYWORDS = getattr(_cfg, "NEWS_KEYWORDS", {"利多": [], "利空": []})
     _HOLIDAYS_ATTEMPTED = set()  # ★ v11.25 已嘗試查詢的年度（不重試）
     print("✅ 已載入 config.py")
@@ -48,6 +49,7 @@ except ImportError:
     LARGE_BUY_DAYS  = 3
     LARGE_BUY_RATIO = 1.5
     HOLIDAYS        = set()
+    TEMP_CLOSURES   = set()
     NEWS_KEYWORDS   = {"利多": [], "利空": []}
     _HOLIDAYS_ATTEMPTED = set()
 
@@ -3211,8 +3213,13 @@ def ensure_holidays_loaded(year: int) -> None:
 
 
 def _is_trading_day(d: "datetime") -> bool:
-    """回傳 d 是否為交易日（非週末且非國定假日）。"""
-    return d.weekday() < 5 and d.strftime("%Y%m%d") not in HOLIDAYS
+    """
+    回傳 d 是否為交易日（非週末且非國定假日/臨時休市）。
+    ★ v11.33：HOLIDAYS（TWSE 官方年度假日行事曆，自動查詢）
+              + TEMP_CLOSURES（颱風假等臨時休市，人工維護，見 config.py #31）
+    """
+    ds = d.strftime("%Y%m%d")
+    return d.weekday() < 5 and ds not in HOLIDAYS and ds not in TEMP_CLOSURES
 
 
 def _n_trading_days_after(base_disp, n):
