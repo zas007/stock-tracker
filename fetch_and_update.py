@@ -42,6 +42,19 @@ try:
     TEMP_CLOSURES = getattr(_cfg, "TEMP_CLOSURES", set())  # ★ v11.33 颱風假等臨時休市（人工維護，不受 _HOLIDAYS_ATTEMPTED 限制）
     NEWS_KEYWORDS = getattr(_cfg, "NEWS_KEYWORDS", {"利多": [], "利空": []})
     _HOLIDAYS_ATTEMPTED = set()  # ★ v11.25 已嘗試查詢的年度（不重試）
+    # ★ v11.34 大盤警訊門檻
+    ALERT_FUTURES_DELTA_YELLOW   = getattr(_cfg, "ALERT_FUTURES_DELTA_YELLOW", 3000)
+    ALERT_FUTURES_DELTA_RED      = getattr(_cfg, "ALERT_FUTURES_DELTA_RED", 5000)
+    ALERT_MARGIN_HEALTH_ABS      = getattr(_cfg, "ALERT_MARGIN_HEALTH_ABS", 1500)
+    ALERT_MARGIN_COUNT_YELLOW    = getattr(_cfg, "ALERT_MARGIN_COUNT_YELLOW", 2)
+    ALERT_MARGIN_COUNT_RED       = getattr(_cfg, "ALERT_MARGIN_COUNT_RED", 4)
+    ALERT_SHIP_RISK_COUNT_YELLOW = getattr(_cfg, "ALERT_SHIP_RISK_COUNT_YELLOW", 2)
+    ALERT_SHIP_RISK_COUNT_RED    = getattr(_cfg, "ALERT_SHIP_RISK_COUNT_RED", 4)
+    ALERT_COLOR = getattr(_cfg, "ALERT_COLOR", {
+        "red":    {"red": 0.96, "green": 0.80, "blue": 0.80},
+        "yellow": {"red": 1.00, "green": 0.95, "blue": 0.70},
+        "green":  None,
+    })
     print("✅ 已載入 config.py")
 except ImportError:
     print("⚠️ 找不到 config.py，使用主程式內建預設值")
@@ -52,6 +65,18 @@ except ImportError:
     TEMP_CLOSURES   = set()
     NEWS_KEYWORDS   = {"利多": [], "利空": []}
     _HOLIDAYS_ATTEMPTED = set()
+    ALERT_FUTURES_DELTA_YELLOW   = 3000
+    ALERT_FUTURES_DELTA_RED      = 5000
+    ALERT_MARGIN_HEALTH_ABS      = 1500
+    ALERT_MARGIN_COUNT_YELLOW    = 2
+    ALERT_MARGIN_COUNT_RED       = 4
+    ALERT_SHIP_RISK_COUNT_YELLOW = 2
+    ALERT_SHIP_RISK_COUNT_RED    = 4
+    ALERT_COLOR = {
+        "red":    {"red": 0.96, "green": 0.80, "blue": 0.80},
+        "yellow": {"red": 1.00, "green": 0.95, "blue": 0.70},
+        "green":  None,
+    }
 
 # ═══════════════════════════════════════════════
 # ★ 固定系統設定
@@ -1479,6 +1504,51 @@ def load_margin_history(ss):
     return result
 
 
+# ★ v11.34 大盤警訊 獨立歷史工作表
+def update_alert_log(ss, date_str, level, alert_line, margin_codes, ship_codes):
+    """
+    將當日大盤警訊寫入「警訊」工作表（每日一列，累積保留，方便日後回顧/回測警訊準確度）。
+    格式：日期, 等級, 警訊摘要, 融資異常放大股票, 出貨風險紅燈股票
+    重跑當日會覆蓋當日那一列。
+    """
+    disp = fmt_date(date_str)
+    ws   = get_or_create(ss, "警訊", 5)
+
+    headers = ["日期", "等級", "警訊摘要", "融資異常放大股票", "出貨風險紅燈股票"]
+    existing = ws.get_all_values()
+    if not existing:
+        existing = [headers]
+
+    margin_str = "、".join(f"{name}({code}) {health:+,}" for code, name, health in margin_codes) or "—"
+    ship_str   = "、".join(f"{name}({code})" for code, name in ship_codes) or "—"
+
+    if existing and existing[0] == headers:
+        kept = [existing[0]] + [r for r in existing[1:] if not (r and r[0] == disp)]
+    else:
+        kept = [headers] + [r for r in existing if not (r and r[0] == disp)]
+
+    new_row = [disp, level, alert_line, margin_str, ship_str]
+    full = kept + [new_row]
+
+    ws.clear()
+    if ws.row_count < len(full) + 10:
+        ws.add_rows(len(full) + 10 - ws.row_count)
+    ws.update(range_name="A1", values=full)
+
+    # 視覺強化：依等級為新寫入的這一列上底色（紅底/黃底，正常則清除底色）
+    row_num = len(full)   # 新列在最後一列（1-indexed，含表頭）
+    color = ALERT_COLOR.get(level)
+    try:
+        if color:
+            ws.format(f"A{row_num}:E{row_num}", {"backgroundColor": color})
+        else:
+            ws.format(f"A{row_num}:E{row_num}", {"backgroundColor": {"red": 1, "green": 1, "blue": 1}})
+    except Exception as e:
+        print(f"  ⚠️ 警訊底色設定失敗（不影響資料寫入）：{e}")
+
+    print(f"  ✅ 警訊 寫入完成（{disp} → {level}）")
+
+
 def calc_margin_trend(margin_hist, code, days=5):
     """
     計算近 days 天融資餘額增減趨勢。
@@ -1857,6 +1927,92 @@ def calc_margin_health(margin_change, total_net_lots):
 
 
 # ═══════════════════════════════════════════════
+# ★ v11.34 大盤警訊彙總
+# ═══════════════════════════════════════════════
+
+def _extract_futures_delta(futures_line):
+    """
+    從 futures_line（例如「外資大台指淨部位：🔴🔴🔴🔴 -2,544 口　較前日 🔴 -1,298」）
+    擷取「較前日」後面的數值。找不到就回傳 None。
+    無論是本次現抓、或從快取字串讀回，都能用同一套邏輯解析，不需另外傳原始數字。
+    """
+    if not futures_line:
+        return None
+    m = re.search(r"較前日[^\-\+\d]*([-+]?[\d,]+)", futures_line)
+    if not m:
+        return None
+    try:
+        return int(m.group(1).replace(",", "").replace("+", ""))
+    except ValueError:
+        return None
+
+
+def calc_market_alert(all_rows, futures_line):
+    """
+    彙總三項訊號，判斷當日大盤警戒等級。
+    all_rows: build_row 產出的原始列（尚未經過 update_recommendation 的評分過濾）
+      row[22] = 出貨風險（🟢 低 / 🟡 中 / 🔴 高）
+      row[28] = 融資健康度（數值）
+    futures_line: 外資期貨燈號文字（含「較前日 ±N」）
+
+    回傳 (level, alert_line, margin_codes, ship_codes)
+      level: "red" / "yellow" / "green"
+      margin_codes: [(代號, 名稱, 融資健康度數值), ...] 融資異常放大的股票
+      ship_codes:   [(代號, 名稱), ...] 出貨風險🔴高 的股票
+    """
+    level = "green"
+    reasons = []
+
+    # 1. 外資期貨單日變化
+    delta = _extract_futures_delta(futures_line)
+    if delta is not None:
+        abs_delta = abs(delta)
+        direction = "轉多" if delta > 0 else "轉空"
+        if abs_delta >= ALERT_FUTURES_DELTA_RED:
+            level = "red"
+            reasons.append(f"外資期貨單日{direction} {abs_delta:,} 口")
+        elif abs_delta >= ALERT_FUTURES_DELTA_YELLOW:
+            level = "yellow" if level != "red" else level
+            reasons.append(f"外資期貨單日變動 {abs_delta:,} 口")
+
+    # 2. 融資健康度異常放大
+    margin_codes = []
+    for row in all_rows:
+        try:
+            health = int(row[28]) if str(row[28]).strip().lstrip("-").isdigit() else 0
+        except (ValueError, TypeError):
+            health = 0
+        if abs(health) >= ALERT_MARGIN_HEALTH_ABS:
+            margin_codes.append((row[0], row[1], health))
+    n_margin = len(margin_codes)
+    if n_margin >= ALERT_MARGIN_COUNT_RED:
+        level = "red"
+        reasons.append(f"融資異常放大 {n_margin} 檔")
+    elif n_margin >= ALERT_MARGIN_COUNT_YELLOW:
+        level = "yellow" if level != "red" else level
+        reasons.append(f"融資異常放大 {n_margin} 檔")
+
+    # 3. 出貨風險🔴高 檔數
+    ship_codes = [(row[0], row[1]) for row in all_rows if row[22] == "🔴 高"]
+    n_ship = len(ship_codes)
+    if n_ship >= ALERT_SHIP_RISK_COUNT_RED:
+        level = "red"
+        reasons.append(f"出貨風險紅燈 {n_ship} 檔")
+    elif n_ship >= ALERT_SHIP_RISK_COUNT_YELLOW:
+        level = "yellow" if level != "red" else level
+        reasons.append(f"出貨風險紅燈 {n_ship} 檔")
+
+    emoji = {"red": "🔴", "yellow": "🟡", "green": "🟢"}[level]
+    label = {"red": "高風險", "yellow": "觀察", "green": "正常"}[level]
+    if reasons:
+        alert_line = f"⚠️ 大盤警訊：{emoji} {label}　" + "、".join(reasons)
+    else:
+        alert_line = f"⚠️ 大盤警訊：{emoji} {label}"
+
+    return level, alert_line, margin_codes, ship_codes
+
+
+# ═══════════════════════════════════════════════
 # Google Sheets 工具
 # ═══════════════════════════════════════════════
 
@@ -1943,6 +2099,43 @@ def prepend_block(ws, new_block, disp, date_marker_prefix, sep_cols):
     if ws.row_count < len(full_data) + 10:
         ws.add_rows(len(full_data) + 10 - ws.row_count)
     ws.update(range_name="A1", values=full_data)
+
+
+# ★ v11.34 為「明日關注」表中所有「⚠️ 大盤警訊：」列上色。
+# 因為此表用 prepend 方式每天把舊資料往下推，儲存格底色不會跟著內容移動，
+# 所以每次寫入後都要重新掃描全表、依當時內容重新上色（等於每次都是重畫，而不是只畫最上面新增的那一列）。
+def _apply_alert_colors(ws, n_cols):
+    try:
+        rows = ws.get_all_values()
+    except Exception as e:
+        print(f"  ⚠️ 讀取警訊列失敗，略過底色更新：{e}")
+        return
+
+    col_letter_end = chr(ord("A") + n_cols - 1)
+    requests_by_color = {}   # color_key(str) -> [row_num, ...]
+    white = {"red": 1, "green": 1, "blue": 1}
+
+    for i, row in enumerate(rows, start=1):
+        cell = row[0] if row else ""
+        if not cell.startswith("⚠️ 大盤警訊："):
+            continue
+        if "🔴" in cell:
+            level = "red"
+        elif "🟡" in cell:
+            level = "yellow"
+        else:
+            level = "green"
+        color = ALERT_COLOR.get(level) or white
+        key = json.dumps(color, sort_keys=True)
+        requests_by_color.setdefault(key, []).append(i)
+
+    for key, row_nums in requests_by_color.items():
+        color = json.loads(key)
+        for row_num in row_nums:
+            try:
+                ws.format(f"A{row_num}:{col_letter_end}{row_num}", {"backgroundColor": color})
+            except Exception as e:
+                print(f"  ⚠️ 第 {row_num} 列底色設定失敗：{e}")
 
 
 # ═══════════════════════════════════════════════
@@ -2977,6 +3170,10 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
             futures_line = "外資大台指淨部位：⚠️ 資料取得失敗"
         print(f"  {futures_line}")
 
+    # ★ v11.34 大盤警訊彙總（外資期貨變化 / 融資異常放大 / 出貨風險紅燈）
+    alert_level, alert_line, alert_margin_codes, alert_ship_codes = calc_market_alert(all_rows, futures_line)
+    print(f"  {alert_line}")
+
     # ★ v11.21 振幅標記輔助
     def _amp_label(row):
         try:
@@ -3061,6 +3258,7 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
     block = [
         [f"資料日期：{disp} ｜ 明日關注推薦（綜合評分前5名）"] + [""] * (n_cols - 1),
         [futures_line] + [""] * (n_cols - 1),
+        [alert_line] + [""] * (n_cols - 1),   # ★ v11.34 大盤警訊摘要列
         RECOMMEND_HEADERS,
     ] + rec_rows
 
@@ -3071,6 +3269,14 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
         ] + watch_rows
 
     prepend_block(ws, block, disp, "資料日期：", n_cols)
+    _apply_alert_colors(ws, n_cols)   # ★ v11.34 重新掃描全表，為每一筆「⚠️ 大盤警訊：」列上底色
+
+    # ★ v11.34 同步寫入獨立「警訊」工作表，累積歷史方便回顧/回測
+    try:
+        update_alert_log(ss, date_str, alert_level, alert_line, alert_margin_codes, alert_ship_codes)
+    except Exception as e:
+        print(f"  ⚠️ 警訊 工作表寫入失敗（不影響明日關注）：{e}")
+
     top5_names = ', '.join(r[1] for _, r in top5)
     watch_names = ', '.join(r[1] for _, r in watch5)
     print(f"  ✅ 明日關注 更新完成（Top5：{top5_names}）")

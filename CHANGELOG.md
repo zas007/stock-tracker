@@ -5,6 +5,32 @@ Google Sheets ID：`1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g`
 
 ---
 
+## v11.34 — 2026/07/29
+
+### config.py
+
+- **【新增】大盤警訊門檻設定**
+  * 新增 `ALERT_FUTURES_DELTA_YELLOW/RED`、`ALERT_MARGIN_HEALTH_ABS`、`ALERT_MARGIN_COUNT_YELLOW/RED`、`ALERT_SHIP_RISK_COUNT_YELLOW/RED`、`ALERT_COLOR` 等門檻與底色設定
+
+### fetch_and_update.py
+
+- **【新增】大盤警訊彙總與展示（外資期貨變化／融資異常放大／出貨風險紅燈）**
+  * 舊：外資大台指單日變化、融資健康度異常放大、出貨風險🔴高 三項訊號分散在各自欄位，沒有整合成單一警戒等級，大跌時不容易一眼看出當下風險程度
+  * 新：新增 `calc_market_alert()` 彙總三項訊號算出 🟢正常/🟡觀察/🔴高風險 等級與摘要文字；`update_recommendation()` 寫入「明日關注」表頂部（跟外資期貨部位同一區塊）；新增獨立「警訊」工作表逐日累積歷史記錄；新增 `_apply_alert_colors()`，因「明日關注」採 prepend 疊放、儲存格底色不會跟著內容移動，故每次寫入後重新掃描全表依當時內容重新上色，避免顏色黏在舊列號上
+  * 效果：大跌期間可直接從「明日關注」表頂部或獨立「警訊」表看到當下風險等級與紅/黃底色提示，「警訊」表也為日後做警訊準確度回測留下歷史資料
+  * `VERSION` → v11.34；`每日更新.sh` banner 同步更新
+
+### 診斷記錄（本次未變更程式邏輯）
+
+- **每日定時排程（cron）連續多日未執行，log.txt 完全無紀錄**，經排查確認：
+  1. `crontab -l` 顯示排程仍存在，手動執行 `fetch_and_update.py` 正常無誤，排除程式本身問題
+  2. 查看系統郵件（`cat /var/mail/zzz`）發現每次觸發都留下 `/bin/sh: 130: Bad file descriptor`
+  3. 確認是 crontab 檔案本身損毀：兩條新舊排程指令黏在同一行、中間缺少換行，導致舊指令結尾的 `2>&1` 被接續解讀成 `2>&130`（誤判導向不存在的檔案描述符 130），shell 在還沒執行到 Python 前就報錯中止
+  * 處置：改用 `EDITOR=nano crontab -e` 清空後重新輸入單一乾淨排程行，並以 `crontab -l | cat -et` 確認結尾只有換行符號、無殘留字元；清空 `/var/mail/zzz` 舊錯誤信
+  * 待確認：明日 16:30 排程觸發後需再次檢查 log.txt 是否恢復正常
+
+---
+
 ## v11.33 — 2026/07/13
 
 ### config.py
