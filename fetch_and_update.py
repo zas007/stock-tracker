@@ -19,7 +19,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.33"  # ← 每次 commit 只改這裡
+VERSION = "v11.36"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -55,6 +55,8 @@ try:
         "yellow": {"red": 1.00, "green": 0.95, "blue": 0.70},
         "green":  None,
     })
+    # ★ v11.35 情境式降權係數
+    ALERT_DAMPEN_FACTOR = getattr(_cfg, "ALERT_DAMPEN_FACTOR", {"red": 0.5, "yellow": 0.75, "green": 1.0})
     print("✅ 已載入 config.py")
 except ImportError:
     print("⚠️ 找不到 config.py，使用主程式內建預設值")
@@ -77,6 +79,7 @@ except ImportError:
         "yellow": {"red": 1.00, "green": 0.95, "blue": 0.70},
         "green":  None,
     }
+    ALERT_DAMPEN_FACTOR = {"red": 0.5, "yellow": 0.75, "green": 1.0}
 
 # ═══════════════════════════════════════════════
 # ★ 固定系統設定
@@ -1529,6 +1532,10 @@ def update_alert_log(ss, date_str, level, alert_line, margin_codes, ship_codes):
 
     new_row = [disp, level, alert_line, margin_str, ship_str]
     full = kept + [new_row]
+    # ★ v11.36 依日期降序排列（新資料在最上面）
+    header_row, body_rows = full[0], full[1:]
+    body_rows.sort(key=lambda r: r[0] if r else "", reverse=True)
+    full = [header_row] + body_rows
 
     ws.clear()
     if ws.row_count < len(full) + 10:
@@ -1536,7 +1543,8 @@ def update_alert_log(ss, date_str, level, alert_line, margin_codes, ship_codes):
     ws.update(range_name="A1", values=full)
 
     # 視覺強化：依等級為新寫入的這一列上底色（紅底/黃底，正常則清除底色）
-    row_num = len(full)   # 新列在最後一列（1-indexed，含表頭）
+    # ★ v11.36：改降序後不假設固定在第2列，直接找出 disp 對應的實際列號
+    row_num = next((i for i, r in enumerate(full, start=1) if r and r[0] == disp), 2)
     color = ALERT_COLOR.get(level)
     try:
         if color:
@@ -2222,11 +2230,15 @@ def append_history(ss, date_str, foreign, trust, dealer, f_sell, t_sell, d_sell)
                              abs(r["net"]), r["avg_price"] or "", "賣超", "", ""])
 
     full = kept + new_rows
+    # ★ v11.36 依日期降序排列（新資料在最上面），header 固定在第一列
+    header_row, body_rows = full[0], full[1:]
+    body_rows.sort(key=lambda r: r[0] if r else "", reverse=True)
+    full = [header_row] + body_rows
     ws.clear()
     if ws.row_count < len(full) + 10:
         ws.add_rows(len(full) + 10 - ws.row_count)
     ws.update(range_name="A1", values=full)
-    print(f"  ✅ 歷史紀錄 新增 {len(new_rows)} 筆（合計 {len(full)-1} 筆）")
+    print(f"  ✅ 歷史紀錄 新增 {len(new_rows)} 筆（合計 {len(full)-1} 筆，日期降序）")
 
 
 # ═══════════════════════════════════════════════
@@ -2782,22 +2794,24 @@ PERFORMANCE_HEADERS = [
 ]
 
 
-def _score_matrix(consec, chip_lbl, today_amount=0):
+def _score_matrix(consec, chip_lbl, today_amount=0, dampen=1.0):
     """
     連續天數 × 籌碼集中度 矩陣評分（40分）
     天數越長代表法人持續買進，分數越高。
     ★ v11.22 大型股補償：籌碼偏低但買超金額 ≥1億時，偏低分 ×1.5（無條件進位）
       原因：大型股成交量大，法人買1萬張也只佔2%，籌碼集中度天生偏低
       但絕對金額大代表法人認真佈局，不應被 matrix 嚴重懲罰
+    ★ v11.35 dampen：大盤警訊🟡/🔴時傳入 <1.0 的係數，對這項因子降權
+      （回測顯示大跌期間籌碼集中度/連續天數這兩個訊號會反轉，不再代表法人續強）
     """
     if chip_lbl == "🔵 高度集中":
-        if consec <= 3:   return 26
-        elif consec <= 7: return 33
-        else:             return 40
+        if consec <= 3:   base = 26
+        elif consec <= 7: base = 33
+        else:             base = 40
     elif chip_lbl == "🟦 中度集中":
-        if consec <= 3:   return 15
-        elif consec <= 7: return 21
-        else:             return 27
+        if consec <= 3:   base = 15
+        elif consec <= 7: base = 21
+        else:             base = 27
     else:  # 偏低
         base = 4 if consec <= 3 else (7 if consec <= 7 else 10)
         # ★ v11.22 大型股補償：買超金額 ≥1億 → ×1.5，≥3億 → ×2（上限比照中度集中）
@@ -2806,10 +2820,10 @@ def _score_matrix(consec, chip_lbl, today_amount=0):
         except (ValueError, TypeError):
             amt = 0
         if amt >= 300_000_000:
-            return min(int(base * 2 + 0.5), 27)   # 上限比照中度集中最高分
+            base = min(int(base * 2 + 0.5), 27)   # 上限比照中度集中最高分
         elif amt >= 100_000_000:
-            return min(int(base * 1.5 + 0.5), 20)
-        return base
+            base = min(int(base * 1.5 + 0.5), 20)
+    return int(base * dampen)
 
 
 def _score_margin(health):
@@ -2973,7 +2987,7 @@ def _score_momentum(chg_pct):
     return -2                       # 大跌
 
 
-def score_stock(row):
+def score_stock(row, dampen=1.0):
     """
     輸入 build_row 產出的 row，回傳綜合評分（0~100）。
     row index 對照 ANALYSIS_HEADERS：
@@ -2988,6 +3002,9 @@ def score_stock(row):
       移除「漲幅 ≤2%」門檻（避免錯殺法人剛開始佈局的股票）
       改為「漲幅 >8%」上限（避免追高）
       新增「出貨風險🔴」過濾
+
+    ★ v11.35 dampen：大盤警訊🟡/🔴時由呼叫端傳入 <1.0 係數，
+      對「籌碼集中度×連續天數」矩陣分數（40分）降權，其餘因子不受影響。
     """
     code         = row[0]
     signal       = row[23]
@@ -3059,7 +3076,7 @@ def score_stock(row):
         chg_val = 0.0
 
     score = (
-        _score_matrix(consec, chip_lbl, today_amount) +  # 40分（★v11.22 大型股補償）
+        _score_matrix(consec, chip_lbl, today_amount, dampen) +  # 40分（★v11.22 大型股補償／★v11.35 情境降權）
         _score_margin(health) +                # 25分
         _score_risk(risk) +                    # 15分
         _score_volume_ratio(volume_ratio) +    # 7分
@@ -3073,12 +3090,13 @@ def score_stock(row):
     return max(0, min(score, 100))
 
 
-def score_stock_relaxed(row):
+def score_stock_relaxed(row, dampen=1.0):
     """
     ★ v11.21 觀察組用：放鬆過濾條件的評分版本。
     取消：出貨風險🔴過濾、現價>400過濾。
     保留：ETF過濾、今日賣超過濾、consec==0過濾。
     評分邏輯與 score_stock 相同（包含動能分）。
+    ★ v11.35 dampen：同 score_stock，大盤警訊🟡/🔴時降權矩陣分數。
     """
     code         = row[0]
     signal       = row[23]
@@ -3131,7 +3149,7 @@ def score_stock_relaxed(row):
         chg_val = 0.0
 
     score = (
-        _score_matrix(consec, chip_lbl, today_amount) +  # ★ v11.22
+        _score_matrix(consec, chip_lbl, today_amount, dampen) +  # ★ v11.22／★ v11.35
         _score_margin(health) +
         _score_risk(risk) +
         _score_volume_ratio(volume_ratio) +
@@ -3173,6 +3191,11 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
     # ★ v11.34 大盤警訊彙總（外資期貨變化 / 融資異常放大 / 出貨風險紅燈）
     alert_level, alert_line, alert_margin_codes, alert_ship_codes = calc_market_alert(all_rows, futures_line)
     print(f"  {alert_line}")
+
+    # ★ v11.35 依警訊等級決定評分降權係數（只影響籌碼集中度×連續天數矩陣分數）
+    _score_dampen = ALERT_DAMPEN_FACTOR.get(alert_level, 1.0)
+    if _score_dampen < 1.0:
+        print(f"  ⚙️ 情境降權啟動：籌碼集中度/連續天數矩陣分數 ×{_score_dampen}（依據 {alert_level} 警訊）")
 
     # ★ v11.21 振幅標記輔助
     def _amp_label(row):
@@ -3217,7 +3240,7 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
         amp_lbl  = _amp_label(row)
         risk_disp = f"{risk} ⚠️" if risk == "🔴 高" else risk
 
-        s = score_stock(row)
+        s = score_stock(row, dampen=_score_dampen)
         if s is not None:
             scored.append((s, [code, name, s, consec, chip_pct, chip_lbl,
                                risk_disp, health, close, chg_pct, dealer, amp_lbl]))
@@ -3227,7 +3250,7 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
         if (not is_etf_code(code) and consec >= 1 and chip_lbl and
                 "🔴 今日賣超" not in str(row[23]) and s is None):
             # s is None 代表被主榜過濾掉的（高風險/高價等），重算放鬆版評分
-            sw = score_stock_relaxed(row)
+            sw = score_stock_relaxed(row, dampen=_score_dampen)
             if sw is not None:
                 watch_scored.append((sw, [code, name, sw, consec, chip_pct, chip_lbl,
                                           risk_disp, health, close, chg_pct, dealer, amp_lbl]))
@@ -3496,11 +3519,15 @@ def _archive_performance(ss, expired_rows):
         existing = [PERFORMANCE_HEADERS]
 
     full = existing + new_rows
+    # ★ v11.36 依推薦日降序排列（新資料在最上面），header 固定在第一列
+    header_row, body_rows = full[0], full[1:]
+    body_rows.sort(key=lambda r: r[0] if r else "", reverse=True)
+    full = [header_row] + body_rows
     ws.clear()
     if ws.row_count < len(full) + 10:
         ws.add_rows(len(full) + 10 - ws.row_count)
     ws.update(range_name="A1", values=full)
-    print(f"  ✅ 推薦歷史 新增 {len(new_rows)} 筆（累計 {len(full)-1} 筆）")
+    print(f"  ✅ 推薦歷史 新增 {len(new_rows)} 筆（累計 {len(full)-1} 筆，日期降序）")
 
 
 def update_performance(ss, date_str, current_prices):

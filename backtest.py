@@ -1,6 +1,6 @@
 """
 台灣股市三大法人買超推薦回測腳本 — backtest.py
-版本：v1.1
+版本：v1.2
 
 用途：
   對歷史推薦重建評分，比對 T+1/T+2/T+3 實際漲跌，
@@ -23,12 +23,14 @@
   A欄 = 代號（如 2330），B欄 = 備註（可空）
   第一列為標題列，從第二列開始填代號
 
-架子狀態（v1.1）：
+架子狀態（v1.2）：
   ✅ 資料讀取（Sheets 歷史紀錄 + 推薦歷史）
   ✅ 評分特徵重建邏輯（連續天數、籌碼集中度、加速度）
   ✅ 輸出格式（明細 + 勝率矩陣）
   ✅ 單股回測模式（--single）★ v1.1 新增
-  🚧 融資健康度/出貨風險/融券趨勢重建（TODO：需打 MI_MARGN API）
+  ✅ 大盤警訊等級切面、主榜排名切面、獨立代號數、標準差 ★ v1.2 新增
+  ✅ 回測明細改依推薦日降序排列（新資料在最上面）★ v1.2 新增
+  🚧 融券趨勢重建（TODO：需打 MI_MARGN API）
   ⚠️  樣本 < 20 筆時勝率標注「樣本不足」
 
 注意：
@@ -36,7 +38,7 @@
   資料來源為「推薦歷史」工作表（由主程式 _archive_performance 自動寫入）。
 """
 
-import os, sys, json, re, argparse
+import os, sys, json, re, argparse, statistics
 from datetime import datetime, timedelta
 
 # ── 載入設定 ──────────────────────────────────────────────────
@@ -228,6 +230,29 @@ def load_hist_records(ss):
     return result
 
 
+def load_alert_history(ss):
+    """
+    ★ v1.2 從「警訊」工作表讀取每日大盤警戒等級，供回測依警訊等級切面分析。
+    回傳 {日期(YYYY/MM/DD): level("red"/"yellow"/"green")}
+    「警訊」是 v11.34 才新增的工作表，該日期之前的推薦查不到資料屬正常現象。
+    """
+    try:
+        ws   = ss.worksheet("警訊")
+        rows = ws.get_all_values()
+    except Exception:
+        print("  ℹ️ 尚無「警訊」工作表（v11.34 才新增），大盤警訊切面將全部標「未知」")
+        return {}
+
+    result = {}
+    date_pat = re.compile(r"^\d{4}/\d{2}/\d{2}$")
+    for row in rows[1:]:
+        if not row or not date_pat.match(str(row[0]).strip()):
+            continue
+        result[row[0].strip()] = row[1].strip() if len(row) > 1 else ""
+    print(f"  ✅ 警訊 讀取 {len(result)} 筆")
+    return result
+
+
 def build_hist_map(hist_records):
     """
     將歷史紀錄轉為快速查詢結構：
@@ -380,12 +405,14 @@ def calc_win_rate_matrix(detail_rows):
             n    = len(pnls)
             wins = sum(1 for p in pnls if p > 0)
             avg  = round(sum(pnls) / n, 2) if n else None
+            std  = round(statistics.pstdev(pnls), 2) if n >= 2 else None   # ★ v1.2 母體標準差
             rate = round(wins / n * 100, 1) if n else None
+            n_codes = len({r.get("code") for r in grp if r.get(t_key) is not None and r.get("code")})   # ★ v1.2 去重後獨立代號數（與樣本數 n 同一母體）
             suffix = "" if n >= MIN_SAMPLE else f" ⚠️樣本不足({n})"
             result.append({
                 "key":  k, "n": n, "wins": wins,
                 "rate": f"{rate}%{suffix}" if rate is not None else "N/A",
-                "avg":  avg,
+                "avg":  avg, "std": std, "n_codes": n_codes,
             })
         return result
 
@@ -462,14 +489,35 @@ def calc_win_rate_matrix(detail_rows):
         n    = len(pnls)
         wins = sum(1 for p in pnls if p > 0)
         avg  = round(sum(pnls)/n, 2) if n else None
+        std  = round(statistics.pstdev(pnls), 2) if n >= 2 else None
         rate = round(wins/n*100, 1) if n else None
+        n_codes = len({r.get("code") for r in detail_rows
+                        if r.get("code") and r.get(t_key) is not None})
         suffix = "" if n >= MIN_SAMPLE else f" ⚠️樣本不足({n})"
         overall.append({
             "key":  label, "n": n, "wins": wins,
             "rate": f"{rate}%{suffix}" if rate is not None else "N/A",
-            "avg":  avg,
+            "avg":  avg, "std": std, "n_codes": n_codes,
         })
     sections.append(("【整體 T+1 / T+2 / T+3 / T+4 / T+5 勝率（總覽）】", overall))
+
+    # 切面 10：★ v1.2 大盤警訊等級 × T+1 勝率
+    # 驗證 fetch_and_update.py v11.35 的情境降權有沒有效：紅/黃警訊日 vs 正常日的推薦表現
+    _ALERT_LABEL = {"red": "🔴 高風險", "yellow": "🟡 觀察", "green": "🟢 正常"}
+    def _alert_lbl(r):
+        lv = str(r.get("alert_level", "")).strip()
+        return _ALERT_LABEL.get(lv, "未知（v11.34前無資料）")
+    sections.append(("【大盤警訊等級 × T+1 勝率】",
+        _stats(detail_rows, _alert_lbl, "t1_pnl")))
+
+    # 切面 11：★ v1.2 主榜排名 Top1~5 × T+1 勝率（驗證評分排序能力，只看主榜）
+    def _rank_lbl(r):
+        rk = r.get("rank")
+        return f"第{rk}名" if rk else "非主榜/無排名"
+    main_board_rows = [r for r in detail_rows if r.get("rank")]
+    if main_board_rows:
+        sections.append(("【主榜排名 Top1~5 × T+1 勝率】",
+            _stats(main_board_rows, _rank_lbl, "t1_pnl")))
 
     return sections
 
@@ -484,6 +532,7 @@ DETAIL_HEADERS = [
     "T+4收盤", "T+4漲跌%", "T+5收盤", "T+5漲跌%",
     "T+1勝負", "T+2勝負", "T+3勝負", "T+4勝負", "T+5勝負",
     "融資健康度", "出貨風險", "融券趨勢",
+    "組別", "主榜排名", "大盤警訊等級",   # ★ v1.2
 ]
 
 def _win_label(pnl):
@@ -493,6 +542,8 @@ def _win_label(pnl):
 def write_detail_sheet(ss, detail_rows, dry_run=False):
     now  = datetime.now().strftime("%Y/%m/%d %H:%M")
     n    = len(DETAIL_HEADERS)
+    # ★ v1.2 依推薦日降序排列（新資料在最上面），符合專案「沒特別說明一律降序」的預設
+    detail_rows = sorted(detail_rows, key=lambda r: r.get("rec_date", ""), reverse=True)
     data = [
         [f"回測明細（產出時間：{now}，共 {len(detail_rows)} 筆）"] + [""]*(n-1),
         DETAIL_HEADERS,
@@ -521,6 +572,7 @@ def write_detail_sheet(ss, detail_rows, dry_run=False):
             _win_label(r.get("t4_pnl")),
             _win_label(r.get("t5_pnl")),
             r.get("margin_health",""), r.get("risk",""), r.get("short_trend",""),
+            r.get("group",""), r.get("rank","") or "", r.get("alert_level","") or "",
         ])
 
     if dry_run:
@@ -541,14 +593,15 @@ def write_summary_sheet(ss, sections, dry_run=False):
     now  = datetime.now().strftime("%Y/%m/%d %H:%M")
     data = [
         [f"回測勝率矩陣（產出時間：{now}）"],
-        ["切面", "分類", "樣本數", "勝出數", "勝率（T+1）", "平均漲跌幅(%)"],
+        ["切面", "分類", "樣本數", "獨立代號數", "勝出數", "勝率（T+1）", "平均漲跌幅(%)", "標準差(%)"],
     ]
     for title, rows in sections:
-        data.append([title] + [""]*5)
+        data.append([title] + [""]*7)
         for r in rows:
-            data.append(["", r["key"], r["n"], r["wins"], r["rate"],
-                         r["avg"] if r["avg"] is not None else "N/A"])
-        data.append([""]*6)
+            data.append(["", r["key"], r["n"], r.get("n_codes", ""), r["wins"], r["rate"],
+                         r["avg"] if r["avg"] is not None else "N/A",
+                         r.get("std") if r.get("std") is not None else "N/A"])
+        data.append([""]*8)
 
     if dry_run:
         print(f"  [dry-run] 回測勝率矩陣（前15行預覽）：")
@@ -556,7 +609,7 @@ def write_summary_sheet(ss, sections, dry_run=False):
             if any(row): print(f"    {row}")
         return
 
-    ws = get_or_create(ss, BACKTEST_SHEET_SUMMARY, 6)
+    ws = get_or_create(ss, BACKTEST_SHEET_SUMMARY, 8)
     ws.clear()
     if ws.row_count < len(data) + 5:
         ws.add_rows(len(data) + 5 - ws.row_count)
@@ -567,7 +620,7 @@ def write_summary_sheet(ss, sections, dry_run=False):
 # ── 主流程 ─────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="台灣股市推薦回測腳本 v1.1")
+    parser = argparse.ArgumentParser(description="台灣股市推薦回測腳本 v1.2")
     parser.add_argument("--days",    type=int, default=0,
                         help="只回測最近 N 天的推薦（0 = 全部）")
     parser.add_argument("--dry-run", action="store_true",
@@ -577,7 +630,7 @@ def main():
     args = parser.parse_args()
 
     print("=" * 50)
-    print("  台灣股市推薦回測腳本 v1.1")
+    print("  台灣股市推薦回測腳本 v1.2")
     print("=" * 50)
 
     # ── dry-run 快速驗證 ──
@@ -609,6 +662,7 @@ def main():
     print("\n📂 讀取資料...")
     perf_records = load_perf_history(ss)
     hist_records = load_hist_records(ss)
+    alert_map    = load_alert_history(ss)   # ★ v1.2
 
     if not perf_records:
         print("\n⚠️ 推薦歷史無資料，架子驗證完成。")
@@ -640,8 +694,21 @@ def main():
             "t4": rec.get("t4"), "t4_pnl": calc_pnl(base, rec.get("t4")),
             "t5": rec.get("t5"), "t5_pnl": calc_pnl(base, rec.get("t5")),
             "group": rec.get("group", ""),  # ★ v11.23
+            "alert_level": alert_map.get(rec["rec_date"], ""),   # ★ v1.2
         }
         detail_rows.append(row)
+
+    # ── ★ v1.2 主榜排名：同一推薦日的主榜股票依推薦評分由高到低排 1~N ──
+    from collections import defaultdict as _defaultdict
+    by_date_board = _defaultdict(list)
+    for r in detail_rows:
+        if str(r.get("group", "")).strip() == "主榜":
+            by_date_board[r["rec_date"]].append(r)
+    for day_rows in by_date_board.values():
+        day_rows.sort(key=lambda r: (r.get("rec_score") if isinstance(r.get("rec_score"), (int, float)) else -1),
+                       reverse=True)
+        for i, r in enumerate(day_rows, start=1):
+            r["rank"] = i
 
     valid_t1 = sum(1 for r in detail_rows if r.get("t1_pnl") is not None)
     print(f"  T+1 有效樣本：{valid_t1}/{len(detail_rows)} 筆"
