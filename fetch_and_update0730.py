@@ -19,7 +19,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.38"  # ← 每次 commit 只改這裡
+VERSION = "v11.36"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -3011,8 +3011,8 @@ def score_stock(row, dampen=1.0):
     risk         = row[22]
     accel_label  = row[24] if len(row) > 24 else ""
     chip_lbl     = row[26]
-    health       = row[30]   # ★ v11.37 修正：融資健康度應為 row[30]（原本誤讀 row[29]=融券餘額，導致 _score_margin() dict查表永遠對不到、這25分一直是0分）
-    vr_raw = row[31] if len(row) > 31 else None   # ★ v11.37 修正：量比應為 row[31]（原本誤讀 row[30]=融資健康度字串，導致 float() 轉換失敗、量比分數一直是 None）
+    health       = row[29]
+    vr_raw = row[30] if len(row) > 30 else None
     tdcc_raw     = row[32] if len(row) > 32 else ""   # ★ v11.15 [32]
     short_trend  = row[33] if len(row) > 33 else ""   # [33]
     today_amount = row[37] if len(row) > 37 else 0    # ★ v11.18 [37]
@@ -3062,11 +3062,10 @@ def score_stock(row, dampen=1.0):
         pass   # 無法解析漲幅（N/A等）→ 不過濾，讓評分決定
 
     # 取三法人最大連續天數作為代表
-    # ★ v11.37 修正：自營商連續天數應為 row[14]（原本誤用 row[13]=自營商累計天數）
     consec = max(
         int(row[3])  if str(row[3]).isdigit()  else 0,
         int(row[8])  if str(row[8]).isdigit()  else 0,
-        int(row[14]) if str(row[14]).isdigit() else 0,
+        int(row[13]) if str(row[13]).isdigit() else 0,
     )
     if consec == 0: return None
 
@@ -3104,8 +3103,8 @@ def score_stock_relaxed(row, dampen=1.0):
     risk         = row[22]
     accel_label  = row[24] if len(row) > 24 else ""
     chip_lbl     = row[26]
-    health       = row[30]   # ★ v11.37 修正：融資健康度應為 row[30]（原本誤讀 row[29]=融券餘額，導致 _score_margin() dict查表永遠對不到、這25分一直是0分）
-    vr_raw = row[31] if len(row) > 31 else None   # ★ v11.37 修正：量比應為 row[31]（原本誤讀 row[30]=融資健康度字串，導致 float() 轉換失敗、量比分數一直是 None）
+    health       = row[29]
+    vr_raw = row[30] if len(row) > 30 else None
     tdcc_raw     = row[32] if len(row) > 32 else ""
     short_trend  = row[33] if len(row) > 33 else ""
     today_amount = row[37] if len(row) > 37 else 0
@@ -3140,7 +3139,7 @@ def score_stock_relaxed(row, dampen=1.0):
     consec = max(
         int(row[3])  if str(row[3]).isdigit()  else 0,
         int(row[8])  if str(row[8]).isdigit()  else 0,
-        int(row[14]) if str(row[14]).isdigit() else 0,
+        int(row[13]) if str(row[13]).isdigit() else 0,
     )
     if consec == 0: return None
 
@@ -3222,11 +3221,11 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
         consec   = max(
             int(row[3])  if str(row[3]).isdigit()  else 0,
             int(row[8])  if str(row[8]).isdigit()  else 0,
-            int(row[14]) if str(row[14]).isdigit() else 0,
+            int(row[13]) if str(row[13]).isdigit() else 0,
         )
-        d_consec = int(row[14]) if str(row[14]).isdigit() else 0
-        chip_pct = row[25]   # ★ v11.37 修正：原本誤讀 row[24]（買超加速度），籌碼集中度% 應為 row[25]
-        chip_lbl = row[26]   # ★ v11.37 修正：原本誤讀 row[25]（籌碼集中度%數值），評級應為 row[26]
+        d_consec = int(row[13]) if str(row[13]).isdigit() else 0
+        chip_pct = row[24]
+        chip_lbl = row[25]
         risk     = row[22]
         health   = row[28]
         close    = row[19]
@@ -3243,10 +3242,8 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
 
         s = score_stock(row, dampen=_score_dampen)
         if s is not None:
-            # ★ v11.37 修正：原本 dealer/amp_lbl 順序對調，導致「振幅%」欄顯示自營標記、
-            #   「自營商標記」欄顯示振幅數字；正確順序應為 amp_lbl 在前、dealer 在後
             scored.append((s, [code, name, s, consec, chip_pct, chip_lbl,
-                               risk_disp, health, close, chg_pct, amp_lbl, dealer]))
+                               risk_disp, health, close, chg_pct, dealer, amp_lbl]))
 
         # ★ v11.21 觀察組：放鬆過濾（允許風險中/高、允許>400元、允許ETF外其他）
         # 只要 consec >= 1，有集中度資料，今日非賣超，且非ETF
@@ -3256,7 +3253,7 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
             sw = score_stock_relaxed(row, dampen=_score_dampen)
             if sw is not None:
                 watch_scored.append((sw, [code, name, sw, consec, chip_pct, chip_lbl,
-                                          risk_disp, health, close, chg_pct, amp_lbl, dealer]))
+                                          risk_disp, health, close, chg_pct, dealer, amp_lbl]))
 
     # 依評分降冪，取前5；觀察組另取前5（排除已在主榜的代號）
     scored.sort(key=lambda x: x[0], reverse=True)
@@ -4296,7 +4293,6 @@ def main():
 
         # Step 1.5: 快取命中則跳過 Step 2/3，直接用快取的 prices/margin
         _cache_result = load_cache(ss, date_str)
-        _cache_is_stale_price = False   # ★ v11.37
         if _cache_result and _cache_result[0] == date_str:
             _, _cf, _ct, _cd, _cfs, _cts, _cds, current_prices, current_margin, _cached_futures = _cache_result
             sell_price_map = current_prices
@@ -4309,23 +4305,11 @@ def main():
                                 "margin_balance","margin_change","short_balance"):
                         if key in cached:
                             stock[key] = cached[key]
-
-            # ★ v11.37 快取有效性檢查：若快取存的收盤價大多是0（例如快取存檔當下
-            #   TWSE 資料還沒公布，STOCK_DAY_ALL 打不到），視為快取不完整，
-            #   強制當作快取沒命中、走下面完整重新抓取，避免每次都沿用空白舊快取
-            _valid_close = sum(1 for g in buy_groups for s in g if float(s.get("close") or 0) > 0)
-            _total_buy = sum(len(g) for g in buy_groups)
-            if _total_buy > 0 and _valid_close / _total_buy < 0.5:
-                print(f"  ⚠️ 快取價格異常（僅 {_valid_close}/{_total_buy} 支有效收盤價），"
-                      f"視為快取不完整，改為重新抓取")
-                _cache_is_stale_price = True
-            else:
-                print("  ✅ 快取命中（日期吻合），跳過 Step 2/3 API 抓取")
-
-        if not _cache_result or _cache_result[0] != date_str or _cache_is_stale_price:
+            print("  ✅ 快取命中（日期吻合），跳過 Step 2/3 API 抓取")
+        else:
             if _cache_result and _cache_result[0] != date_str:
                 print(f"  ⚠️ 快取日期不符（{_cache_result[0]} ≠ {date_str}），重新抓取")
-            _cached_futures = "" if not (_cache_result and _cache_result[0] == date_str) else _cached_futures   # ★ v11.6 完整執行時由 update_recommendation 填入並存快取
+            _cached_futures = ""   # ★ v11.6 完整執行時由 update_recommendation 填入並存快取
             # Step 2: 抓個股價格
             print(f"\n💹 Step 2/5 抓取個股價格與成交量...")
             _t2 = time.time()
