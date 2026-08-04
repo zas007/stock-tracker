@@ -19,7 +19,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.38"  # ← 每次 commit 只改這裡
+VERSION = "v11.40"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -442,41 +442,56 @@ def fetch_price_map_otc(date_str):
     一次抓全上櫃，回傳 { code: (avg, close, vol, pct_str, None) }
     API: tpex.org.tw daily_close_quotes
     欄位：[0]代號 [1]名稱 [2]收盤 [3]漲跌 [7]均價 [8]成交股數
+
+    ★ v11.39 比照 fetch_price_map_batch，失敗時最多 retry 2 次（間隔 3 秒），
+      解決 OTC API 偶發無回應/逾時導致命中率隨網路狀況浮動的問題（#30）。
     """
     year = int(date_str[:4]) - 1911
     d    = f"{year}/{date_str[4:6]}/{date_str[6:]}"
     url  = (f"https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes"
             f"/stk_quote_result.php?d={d}&output=json")
-    print(f"  [otc] 抓取上櫃行情（{date_str}）...")
-    text = curl_get(url)
-    if not text or text.startswith("<") or text.startswith("Host"):
-        print("  [otc] ❌ 無回應")
-        return {}
-    try:
-        data  = json.loads(text)
-        rows  = data["tables"][0].get("data", data["tables"][0].get("aaData", []))
-    except Exception as e:
-        print(f"  [otc] ❌ 解析失敗：{e}")
-        return {}
 
-    otc_map = {}
-    for row in rows:
-        try:
-            code    = str(row[0]).strip()
-            close   = float(str(row[2]).replace(",", "").strip())
-            diff    = float(str(row[3]).replace(",", "").strip().replace("+", ""))
-            avg     = float(str(row[7]).replace(",", "").strip())
-            shares  = float(str(row[8]).replace(",", "").strip())
-            vol     = int(shares / 1000)
-            prev_close = close - diff
-            pct    = (close - prev_close) / prev_close * 100 if prev_close > 0 else 0.0
-            sign   = "+" if pct >= 0 else ""
-            pct_str = f"{sign}{pct:.2f}%"
-            otc_map[code] = (avg, close, vol, pct_str, None)
-        except Exception:
+    for attempt in range(1, 4):   # 最多 3 次（1 + retry 2）
+        if attempt > 1:
+            print(f"  [otc] ⏳ 等待 3 秒後重試（{attempt - 1}/2）...")
+            time.sleep(3)
+
+        print(f"  [otc] 抓取上櫃行情（{date_str}）{'（重試）' if attempt > 1 else ''}...")
+        text = curl_get(url)
+        if not text or text.startswith("<") or text.startswith("Host"):
+            print("  [otc] ❌ 無回應")
             continue
-    print(f"  [otc] ✅ {len(otc_map)} 支")
-    return otc_map
+        try:
+            data  = json.loads(text)
+            rows  = data["tables"][0].get("data", data["tables"][0].get("aaData", []))
+        except Exception as e:
+            print(f"  [otc] ❌ 解析失敗：{e}")
+            continue
+
+        otc_map = {}
+        for row in rows:
+            try:
+                code    = str(row[0]).strip()
+                close   = float(str(row[2]).replace(",", "").strip())
+                diff    = float(str(row[3]).replace(",", "").strip().replace("+", ""))
+                avg     = float(str(row[7]).replace(",", "").strip())
+                shares  = float(str(row[8]).replace(",", "").strip())
+                vol     = int(shares / 1000)
+                prev_close = close - diff
+                pct    = (close - prev_close) / prev_close * 100 if prev_close > 0 else 0.0
+                sign   = "+" if pct >= 0 else ""
+                pct_str = f"{sign}{pct:.2f}%"
+                otc_map[code] = (avg, close, vol, pct_str, None)
+            except Exception:
+                continue
+
+        if otc_map:
+            print(f"  [otc] ✅ {len(otc_map)} 支")
+            return otc_map
+        print("  [otc] ❌ 解析結果為空")
+
+    print("  [otc] ❌ 重試 3 次仍失敗，回傳空表")
+    return {}
 
 
 # ═══════════════════════════════════════════════
@@ -846,13 +861,19 @@ def _fetch_stock_day_rows(code, date_str):
     return [], None
 
 
-def fetch_ma5_batch(codes, date_str, ss=None):
+def fetch_ma5_batch(codes, date_str, price_hist=None, current_prices=None, ss=None):
     """
-    ★ v11.19 批次計算5日均線。
+    ★ v11.39 批次計算5日均線。
     策略：
-      1. 先從每日快照工作表讀近 9 個交易日的 {date: {code: close}}
-      2. 每支股票收集快照有的天數
-      3. 不足的股票（快照覆蓋不到）用 _fetch_stock_day_rows 逐支補底
+      1. 「收盤價歷史」表（price_hist，近 31 天，不含今日）取前 8 個交易日收盤
+      2. 今日收盤直接用 current_prices（本次執行已抓到的現價，不必再查一次）
+      3. 合計仍不足 5 天的股票，才用 _fetch_stock_day_rows 逐支補底
+    ★ 取代 v11.19 解析「每日快照」展示表的做法：該表格式脆弱（依賴區塊標題），
+      且若當天批次/OTC 抓價本身失敗，快照裡當天的資料就是缺的、後續也補不回來，
+      逐支補抓命中率因而隨網路狀況浮動（#29）。改用專用的「收盤價歷史」表後，
+      累積約 2 週資料即可讓大多數股票不再需要逐支補底。
+    price_hist：load_price_history(ss) 的回傳值，{code: [(disp日期, close), ...]}。
+    current_prices：本次執行的現價字典，{code: (avg, close, vol, chg, vr)}。
     回傳 dict：{code: (close, ma5, label)}
     """
 
@@ -866,61 +887,41 @@ def fetch_ma5_batch(codes, date_str, ss=None):
             cur -= timedelta(days=1)
         return list(reversed(dates))  # 舊 → 新
 
-    trading_days = _prev_trading_dates(date_str, n=9)
+    trading_days = _prev_trading_dates(date_str, n=9)  # 含今日，最後一筆是今日
+    hist_days = trading_days[:-1]                       # 不含今日的前8個交易日
     code_set = set(codes)
-    # {date_str(YYYYMMDD): {code: close}}
-    snapshot_by_date = {}
+    price_hist = price_hist or {}
+    current_prices = current_prices or {}
 
-    # ── Step 1：從每日快照讀歷史收盤 ──
-    if ss is not None:
-        try:
-            ws_snap = get_or_create(ss, "每日快照")
-            snap_rows = ws_snap.get_all_values()
-            # 每個快照區塊第一列是「統計截至：YYYY/MM/DD」，第二列是 HEADERS，之後是資料
-            # 找出所有區塊的日期與資料列
-            current_date = None
-            for row in snap_rows:
-                if not row:
-                    continue
-                cell = str(row[0]).strip()
-                if cell.startswith("統計截至："):
-                    # 取日期，格式 YYYY/MM/DD → YYYYMMDD
-                    d = cell.replace("統計截至：", "").strip().replace("/", "")
-                    current_date = d if len(d) == 8 else None
-                    continue
-                if cell == "代號" or cell == "":
-                    continue
-                if current_date and current_date in trading_days:
-                    code = cell
-                    if code in code_set and len(row) > 19:
-                        try:
-                            close = float(str(row[19]).replace(",", ""))
-                            if current_date not in snapshot_by_date:
-                                snapshot_by_date[current_date] = {}
-                            snapshot_by_date[current_date][code] = close
-                        except (ValueError, TypeError):
-                            pass
-            print(f"  [ma5-batch] 快照覆蓋 {len(snapshot_by_date)} 天")
-        except Exception as e:
-            print(f"  [ma5-batch] 快照讀取失敗：{e}")
-
-    # ── Step 2：組合每支股票的 closes，找出需要補底的股票 ──
+    # ── Step 1：組合每支股票的 closes（歷史表 + 今日現價）──
     code_closes = {}  # {code: [close, ...]}（按 trading_days 順序，None=缺）
+    hist_hit_days = 0
     for code in code_set:
-        closes = []
-        for d in trading_days:
-            c = snapshot_by_date.get(d, {}).get(code)
-            closes.append(c)
+        # 「收盤價歷史」的日期是 disp 格式（YYYY/MM/DD），轉成 YYYYMMDD 比對
+        hist_map = {d_str.replace("/", ""): c for d_str, c in price_hist.get(code, [])}
+        closes = [hist_map.get(d) for d in hist_days]
+        hist_hit_days += sum(1 for c in closes if c is not None)
+
+        today_close = None
+        if code in current_prices:
+            _avg, _close, _vol, _chg, _vr = current_prices[code]
+            if _close and _close > 0:
+                today_close = _close
+        closes.append(today_close)
+
         code_closes[code] = closes
+
+    print(f"  [ma5-batch] 收盤價歷史命中 {hist_hit_days}/{len(code_set) * len(hist_days)} 天格，今日現價 "
+          f"{sum(1 for c in code_closes.values() if c[-1] is not None)}/{len(code_set)} 支")
 
     # 需要補底：有效天數 < 5
     need_fallback = [
         code for code, closes in code_closes.items()
         if sum(1 for c in closes if c is not None) < 5
     ]
-    print(f"  [ma5-batch] 快照不足5天，補底 {len(need_fallback)} 支...")
+    print(f"  [ma5-batch] 歷史+現價不足5天，補底 {len(need_fallback)} 支...")
 
-    # ── Step 3：逐支 API 補底（只補不足的股票）──
+    # ── Step 2：逐支 API 補底（只補不足的股票）──
     for code in need_fallback:
         try:
             rows, source = _fetch_stock_day_rows(code, date_str)
@@ -955,7 +956,7 @@ def fetch_ma5_batch(codes, date_str, ss=None):
                 except Exception:
                     pass
             if api_closes:
-                # 用 API 結果覆蓋（比快照更完整）
+                # 用 API 結果覆蓋（比歷史表+現價更完整）
                 # 轉成 trading_days 對齊格式：最後一筆對齊今日，往前填
                 aligned = [None] * len(trading_days)
                 for i, c in enumerate(reversed(api_closes)):
@@ -966,7 +967,7 @@ def fetch_ma5_batch(codes, date_str, ss=None):
         except Exception:
             pass
 
-    # ── Step 4：計算 ma5 ──
+    # ── Step 3：計算 ma5 ──
     result = {}
     valid = 0
     for code in code_set:
@@ -1651,6 +1652,81 @@ def load_volume_history(ss):
     return result
 
 
+def update_price_history(ss, date_str, current_prices):
+    """
+    ★ v11.39 將本次執行中的個股收盤價寫入「收盤價歷史」工作表（每日一批）。
+    格式：日期, 代號, 收盤價
+    保留 31 天，超過自動清除。
+    只寫 current_prices 中有收盤價資料的股票（close > 0）。
+    ★ 涵蓋範圍為 current_prices（買超+賣超共約300檔），跟成交量歷史一致。
+
+    緣起（#29）：舊版 fetch_ma5_batch 解析「每日快照」展示表湊歷史收盤價，
+    格式脆弱（依賴「統計截至：」區塊標題），且當天若批次/OTC 抓價失敗，
+    快照裡當天資料就是缺的，之後無法補回，逐支補抓命中率因而隨網路狀況浮動。
+    改用專用的「收盤價歷史」表後，MA5 批次計算不再依賴快照解析。
+    """
+    disp = fmt_date(date_str)
+    ws   = get_or_create(ss, "收盤價歷史", 3)
+
+    from datetime import datetime, timedelta
+    _cutoff = (datetime.strptime(date_str, "%Y%m%d") - timedelta(days=31)).strftime("%Y/%m/%d")
+    purge_old_rows(ws, _cutoff)
+
+    existing = ws.get_all_values()
+    headers  = ["日期", "代號", "收盤價"]
+    if not existing:
+        existing = [headers]
+
+    # 過濾掉今天已寫入的列（重跑時覆蓋）
+    if existing and existing[0] == headers:
+        kept = [existing[0]] + [r for r in existing[1:] if not (r and r[0] == disp)]
+    else:
+        kept = [r for r in existing if not (r and r[0] == disp)]
+        kept = [headers] + kept
+
+    new_rows = [
+        [disp, code, close]
+        for code, (avg, close, vol, chg, vr) in current_prices.items()
+        if close and close > 0
+    ]
+    new_rows.sort(key=lambda r: r[1])   # 依代號排序
+
+    full = kept + new_rows
+    ws.clear()
+    if ws.row_count < len(full) + 10:
+        ws.add_rows(len(full) + 10 - ws.row_count)
+    ws.update(range_name="A1", values=full)
+    print(f"  ✅ 收盤價歷史 寫入 {len(new_rows)} 筆（{disp}）")
+
+
+def load_price_history(ss):
+    """
+    從「收盤價歷史」工作表讀取近期資料，建立 MA5 批次查表。
+    回傳 {code: [(disp, close), ...]}，按日期升序。
+    """
+    try:
+        ws   = ss.worksheet("收盤價歷史")
+        rows = ws.get_all_values()
+    except Exception:
+        return {}
+
+    result = {}
+    for row in rows[1:]:   # 跳標題
+        if len(row) < 3 or not row[1]:
+            continue
+        d_str, code = row[0].strip(), row[1].strip()
+        try:
+            close = float(str(row[2]).replace(",", ""))
+        except ValueError:
+            continue
+        result.setdefault(code, []).append((d_str, close))
+
+    # 每支股票按日期升序
+    for code in result:
+        result[code].sort(key=lambda x: x[0])
+    return result
+
+
 def calc_volume_ratio_from_history(volume_hist, code, today_vol, disp, days=10):
     """
     ★ v11.31 用「成交量歷史」計算量比：今日成交量 ÷ 近N天平均成交量。
@@ -2107,6 +2183,47 @@ def prepend_block(ws, new_block, disp, date_marker_prefix, sep_cols):
     if ws.row_count < len(full_data) + 10:
         ws.add_rows(len(full_data) + 10 - ws.row_count)
     ws.update(range_name="A1", values=full_data)
+
+
+def _apply_banner_merges(ws, n_cols):
+    """
+    ★ v11.39 手機版寬度有限，「資料日期」「外資大台指淨部位」「⚠️ 大盤警訊：」
+    這幾條橫幅列的文字目前只塞在 A 欄，右側被截斷看不到完整內容。
+    改為把這幾列的儲存格合併成一整列（A:{n_cols}），文字才能完整顯示、自動換行。
+    因為此表用 prepend 方式每天把舊資料往下推，列位置每天都會位移，
+    所以跟 _apply_alert_colors 一樣，每次寫入後都要重新掃描全表：
+      1. 先解除目前範圍內所有舊合併（避免殘留在錯位的列上）
+      2. 重新比對目前內容，只合併「現在」符合橫幅格式的列
+    """
+    try:
+        rows = ws.get_all_values()
+    except Exception as e:
+        print(f"  ⚠️ 讀取列失敗，略過橫幅合併：{e}")
+        return
+    if not rows:
+        return
+
+    col_letter_end = chr(ord("A") + n_cols - 1)
+    last_row = len(rows)
+
+    try:
+        ws.unmerge_cells(f"A1:{col_letter_end}{last_row}")
+    except Exception as e:
+        print(f"  ⚠️ 解除舊合併失敗（不影響資料）：{e}")
+
+    banner_prefixes = ("資料日期：", "外資大台指淨部位：", "⚠️ 大盤警訊：")
+    merges = [
+        {"range": f"A{i}:{col_letter_end}{i}"}
+        for i, row in enumerate(rows, start=1)
+        if row and str(row[0]).startswith(banner_prefixes)
+    ]
+    if not merges:
+        return
+    try:
+        ws.batch_merge(merges)
+        print(f"  ✅ 橫幅列合併 {len(merges)} 列")
+    except Exception as e:
+        print(f"  ⚠️ 橫幅合併失敗（不影響資料）：{e}")
 
 
 # ★ v11.34 為「明日關注」表中所有「⚠️ 大盤警訊：」列上色。
@@ -2661,6 +2778,9 @@ def _calc_analysis_rows(ss, date_str, current_prices, current_margin, cache_pric
     # ★ v11.31 載入成交量歷史，供 build_row 批次計算量比
     volume_hist = load_volume_history(ss)
 
+    # ★ v11.39 載入收盤價歷史，供 fetch_ma5_batch 批次計算5日均線
+    price_hist = load_price_history(ss)
+
     # ★ v11.9 抓大盤漲跌幅，供 build_row 計算相對強弱
     print("  📡 抓取大盤指數...")
     market_pct = fetch_market_index(date_str)
@@ -2675,7 +2795,7 @@ def _calc_analysis_rows(ss, date_str, current_prices, current_margin, cache_pric
     if not fast_mode:
         _ma5_codes = list(buy_map.keys())
         print(f"  📡 抓取5日均線（{len(_ma5_codes)} 支）...")
-        ma5_map = fetch_ma5_batch(_ma5_codes, date_str, ss=ss)
+        ma5_map = fetch_ma5_batch(_ma5_codes, date_str, price_hist=price_hist, current_prices=current_prices)
         _hit = sum(1 for v in ma5_map.values() if v[2])
         # 命中數已在 fetch_ma5_batch 內印出，這裡不重複
     else:
@@ -3296,6 +3416,7 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
 
     prepend_block(ws, block, disp, "資料日期：", n_cols)
     _apply_alert_colors(ws, n_cols)   # ★ v11.34 重新掃描全表，為每一筆「⚠️ 大盤警訊：」列上底色
+    _apply_banner_merges(ws, n_cols)  # ★ v11.39 橫幅列合併儲存格，手機閱讀不被截斷
 
     # ★ v11.34 同步寫入獨立「警訊」工作表，累積歷史方便回顧/回測
     try:
@@ -4211,6 +4332,16 @@ def main():
     parser.add_argument("--debug-margin", action="store_true", help="印出融資融券 API 原始欄位")
     args = parser.parse_args()
 
+    # ★ v11.40 修正 bug：amp_map（振幅%資料）只有在實際打 API 抓行情時才會賦值
+    #   （Step 2 fetch_price_map_batch），sheet-only 模式全程走快取、不打 API，
+    #   amp_map 完全不會被賦值。但 _run_analysis / _run_recommendation 這兩個
+    #   巢狀函式把 amp_map 當成外層 main() 的變數使用，Python 判斷它是 main()
+    #   的區域變數（因為 main() 內其他分支有賦值），sheet-only 模式下這些分支
+    #   都沒執行到，導致「free variable 'amp_map' referenced before assignment」。
+    #   在此先給預設空字典，sheet-only 模式下振幅%欄位會是空白（原本就抓不到，
+    #   不影響資料正確性），但至少不會整個寫入失敗。
+    amp_map = {}
+
     print("=" * 50)
     print(f"  台灣股市三大法人買超/賣超追蹤 {VERSION}")
     print("  config.py 獨立設定 ｜ 族群聯動累積 ｜ 分模式執行")
@@ -4491,6 +4622,7 @@ def main():
         ("0", "重大訊息歷史",   lambda: update_news_history(ss, date_str, fetch_news_announcements(date_str))),
         ("A", "融資歷史",       lambda: update_margin_history(ss, date_str, current_margin)),  # ★ v11.29
         ("B", "成交量歷史",     lambda: update_volume_history(ss, date_str, current_prices)),  # ★ v11.31
+        ("C", "收盤價歷史",     lambda: update_price_history(ss, date_str, current_prices)),  # ★ v11.39
     ]
 
     if args.sheet_only:
