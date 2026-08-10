@@ -1,6 +1,6 @@
 """
 台灣股市三大法人買超推薦回測腳本 — backtest.py
-版本：v1.2
+版本：v1.3
 
 用途：
   對歷史推薦重建評分，比對 T+1/T+2/T+3 實際漲跌，
@@ -23,13 +23,16 @@
   A欄 = 代號（如 2330），B欄 = 備註（可空）
   第一列為標題列，從第二列開始填代號
 
-架子狀態（v1.2）：
+架子狀態（v1.3）：
   ✅ 資料讀取（Sheets 歷史紀錄 + 推薦歷史）
   ✅ 評分特徵重建邏輯（連續天數、籌碼集中度、加速度）
   ✅ 輸出格式（明細 + 勝率矩陣）
   ✅ 單股回測模式（--single）★ v1.1 新增
   ✅ 大盤警訊等級切面、主榜排名切面、獨立代號數、標準差 ★ v1.2 新增
   ✅ 回測明細改依推薦日降序排列（新資料在最上面）★ v1.2 新增
+  ✅ 「推薦收盤買 vs 建議買進低點買」勝率比較切面 ★ v1.3 新增（對應 fetch_and_update.py v11.42）
+     └ v11.42 之前累積的推薦成效資料沒有建議買進價位欄，該切面樣本數會偏低，
+       需累積 v11.42 上線後的新資料（建議2~3週）才有參考價值，見備忘錄 T38
   🚧 融券趨勢重建（TODO：需打 MI_MARGN API）
   ⚠️  樣本 < 20 筆時勝率標注「樣本不足」
 
@@ -196,6 +199,10 @@ def load_perf_history(ss):
             "group":        row[10].strip() if len(row) > 10 else "",
             "risk":         row[11].strip() if len(row) > 11 else "",   # ★ v11.23
             "margin_health":row[12].strip() if len(row) > 12 else "", # ★ v11.23
+            # ★ v1.3 對應 fetch_and_update.py v11.42 新增的三欄（法人成本價／5日均線組成的買進參考）
+            "buy_label":    row[13].strip() if len(row) > 13 else "",
+            "buy_low":      _f(row[14])     if len(row) > 14 else None,
+            "buy_high":     _f(row[15])     if len(row) > 15 else None,
         })
     print(f"  ✅ 推薦歷史讀取 {len(result)} 筆")
     return result
@@ -519,6 +526,36 @@ def calc_win_rate_matrix(detail_rows):
         sections.append(("【主榜排名 Top1~5 × T+1 勝率】",
             _stats(main_board_rows, _rank_lbl, "t1_pnl")))
 
+    # 切面 12：★ v1.3 推薦收盤買 vs 建議買進低點買 × T+1~T+5 勝率
+    # 直接回答「照建議買進價位買，勝率比照推薦收盤價買高多少%」
+    # ★ 對應 fetch_and_update.py v11.42；v11.42 之前累積的推薦成效資料沒有這三欄，
+    #   「建議買進低點買」那幾列的樣本數會明顯偏低（甚至 N/A），屬於資料還在累積中的正常現象，
+    #   不是計算錯誤。建議累積至少 2~3 週新資料後再參考本切面的結論（見備忘錄 T38）。
+    buy_vs_close = []
+    for t_key_close, t_key_buy, label in [
+        ("t1_pnl", "t1_pnl_buy", "T+1"),
+        ("t2_pnl", "t2_pnl_buy", "T+2"),
+        ("t3_pnl", "t3_pnl_buy", "T+3"),
+        ("t4_pnl", "t4_pnl_buy", "T+4"),
+        ("t5_pnl", "t5_pnl_buy", "T+5"),
+    ]:
+        for t_key, method in [(t_key_close, "推薦收盤買"), (t_key_buy, "建議買進低點買")]:
+            pnls = [r[t_key] for r in detail_rows if r.get(t_key) is not None]
+            n    = len(pnls)
+            wins = sum(1 for p in pnls if p > 0)
+            avg  = round(sum(pnls) / n, 2) if n else None
+            std  = round(statistics.pstdev(pnls), 2) if n >= 2 else None
+            rate = round(wins / n * 100, 1) if n else None
+            n_codes = len({r.get("code") for r in detail_rows
+                            if r.get("code") and r.get(t_key) is not None})
+            suffix = "" if n >= MIN_SAMPLE else f" ⚠️樣本不足({n})"
+            buy_vs_close.append({
+                "key":  f"{label}（{method}）", "n": n, "wins": wins,
+                "rate": f"{rate}%{suffix}" if rate is not None else "N/A",
+                "avg":  avg, "std": std, "n_codes": n_codes,
+            })
+    sections.append(("【★推薦收盤買 vs 建議買進低點買 × T+1~T+5 勝率比較】", buy_vs_close))
+
     return sections
 
 
@@ -533,6 +570,9 @@ DETAIL_HEADERS = [
     "T+1勝負", "T+2勝負", "T+3勝負", "T+4勝負", "T+5勝負",
     "融資健康度", "出貨風險", "融券趨勢",
     "組別", "主榜排名", "大盤警訊等級",   # ★ v1.2
+    "建議買進價位", "建議買進低", "建議買進高",   # ★ v1.3
+    "T+1漲跌%(建議買進)", "T+2漲跌%(建議買進)", "T+3漲跌%(建議買進)",
+    "T+4漲跌%(建議買進)", "T+5漲跌%(建議買進)",   # ★ v1.3
 ]
 
 def _win_label(pnl):
@@ -573,6 +613,9 @@ def write_detail_sheet(ss, detail_rows, dry_run=False):
             _win_label(r.get("t5_pnl")),
             r.get("margin_health",""), r.get("risk",""), r.get("short_trend",""),
             r.get("group",""), r.get("rank","") or "", r.get("alert_level","") or "",
+            r.get("buy_label",""), r.get("buy_low","") or "", r.get("buy_high","") or "",
+            r.get("t1_pnl_buy","待補"), r.get("t2_pnl_buy","待補"), r.get("t3_pnl_buy","待補"),
+            r.get("t4_pnl_buy","待補"), r.get("t5_pnl_buy","待補"),
         ])
 
     if dry_run:
@@ -620,7 +663,7 @@ def write_summary_sheet(ss, sections, dry_run=False):
 # ── 主流程 ─────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="台灣股市推薦回測腳本 v1.2")
+    parser = argparse.ArgumentParser(description="台灣股市推薦回測腳本 v1.3")
     parser.add_argument("--days",    type=int, default=0,
                         help="只回測最近 N 天的推薦（0 = 全部）")
     parser.add_argument("--dry-run", action="store_true",
@@ -630,7 +673,7 @@ def main():
     args = parser.parse_args()
 
     print("=" * 50)
-    print("  台灣股市推薦回測腳本 v1.2")
+    print("  台灣股市推薦回測腳本 v1.3")
     print("=" * 50)
 
     # ── dry-run 快速驗證 ──
@@ -685,6 +728,8 @@ def main():
     for rec in perf_records:
         features = _rebuild_features(rec, hist_map)
         base     = rec.get("base_close")
+        buy_low  = rec.get("buy_low")    # ★ v1.3
+        buy_high = rec.get("buy_high")   # ★ v1.3
         row = {
             **features,
             "base_close": base,
@@ -695,6 +740,16 @@ def main():
             "t5": rec.get("t5"), "t5_pnl": calc_pnl(base, rec.get("t5")),
             "group": rec.get("group", ""),  # ★ v11.23
             "alert_level": alert_map.get(rec["rec_date"], ""),   # ★ v1.2
+            # ★ v1.3 以「建議買進低點」為進場價的假設性損益（回答：照建議價位買，勝率高多少%）
+            #   出場價維持用同一組 T+N 收盤，只換「進場價」這個變數，其餘條件不變才能公平比較
+            "buy_label":    rec.get("buy_label", ""),
+            "buy_low":      buy_low,
+            "buy_high":     buy_high,
+            "t1_pnl_buy":   calc_pnl(buy_low, rec.get("t1")),
+            "t2_pnl_buy":   calc_pnl(buy_low, rec.get("t2")),
+            "t3_pnl_buy":   calc_pnl(buy_low, rec.get("t3")),
+            "t4_pnl_buy":   calc_pnl(buy_low, rec.get("t4")),
+            "t5_pnl_buy":   calc_pnl(buy_low, rec.get("t5")),
         }
         detail_rows.append(row)
 

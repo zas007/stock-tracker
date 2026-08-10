@@ -19,7 +19,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.40"  # ← 每次 commit 只改這裡
+VERSION = "v11.42"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -2509,6 +2509,8 @@ def build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net
 
     # ★ v11.11 5日均線突破標記
     ma5_label = (ma5_map or {}).get(code, ("", "", ""))[2] if ma5_map else ""
+    # ★ v11.41 5日均線數值（[34]的5日線欄只存文字標記，這裡另外存數字供「推薦買進價位」使用）
+    ma5_value = (ma5_map or {}).get(code, ("", "", ""))[1] if ma5_map else ""
 
     # ★ v11.15 集保大戶%
     tdcc_entry    = (tdcc_map or {}).get(code)
@@ -2541,6 +2543,8 @@ def build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net
         today_amount,      # ★ v11.18 [37] 今日買超金額（元）
         amplitude,         # ★ v11.21 [38] 振幅% = (高-低)/低
         margin_trend,      # ★ v11.29 [39] 融資趨勢
+        all_wavg or "",    # ★ v11.41 [40] 三大法人合計加權成本價（FIFO扣減後剩餘部位），供「推薦買進價位」使用
+        ma5_value or "",   # ★ v11.41 [41] 5日均線數值（供「推薦買進價位」使用）
     ]
 
 
@@ -2561,6 +2565,8 @@ ANALYSIS_HEADERS = [
     "今日買超金額", # ★ v11.18 [37]
     "振幅%",        # ★ v11.21 [38] (高-低)/低
     "融資趨勢",     # ★ v11.29 [39]
+    "法人加權成本價", # ★ v11.41 [40] 三大法人合計加權成本價（FIFO扣減後剩餘部位）
+    "5日均線價",      # ★ v11.41 [41] 5日均線數值
 ]
 
 
@@ -2903,6 +2909,9 @@ RECOMMEND_HEADERS = [
     "連續天數", "籌碼集中度%", "籌碼集中度評級",
     "出貨風險", "融資健康度",
     "現價", "當日漲跌%", "振幅%", "自營商標記",
+    "推薦買進價位",  # ★ v11.41 法人加權成本價／5日均線 組成的買進參考區間（文字，含來源標註）
+    "買進區間低",    # ★ v11.42 上面文字欄的數字版（低點），供「推薦成效」回測使用
+    "買進區間高",    # ★ v11.42 上面文字欄的數字版（高點），供「推薦成效」回測使用
 ]
 
 PERFORMANCE_HEADERS = [
@@ -2911,7 +2920,60 @@ PERFORMANCE_HEADERS = [
     "組別",       # ★ v11.21 主榜/觀察組
     "出貨風險",   # ★ v11.23 推薦當日出貨風險
     "融資健康度", # ★ v11.23 推薦當日融資健康度
+    "建議買進價位",  # ★ v11.42 推薦當日的「推薦買進價位」文字（法人成本價／5日均線）
+    "建議買進低",    # ★ v11.42 上面文字欄的低點數字，回測用
+    "建議買進高",    # ★ v11.42 上面文字欄的高點數字，回測用
 ]
+
+
+def _buy_price_info(cost_wavg, ma5_value, close):
+    """
+    ★ v11.41 推薦買進價位：結合「法人加權成本價」（三大法人FIFO扣減後剩餘部位的實際成本）
+    與「5日均線」兩個既有基準，取兩者區間當作買進參考。
+    ★ v11.42 改回傳 (顯示文字, 區間低點數字, 區間高點數字) 三個值——文字給「明日關注」顯示用，
+    數字另外存進「推薦成效」/「推薦歷史」，供之後回測「照建議價位買 vs 照推薦日收盤買」的勝率差異。
+
+    設計理由（見備忘錄討論）：
+    - 法人成本價跟「出貨風險」燈號用的是同一份資料（calc_risk 的 w_avg），數字互相呼應不衝突
+    - 5日均線是常見的技術面買點參考（拉回不破均線）
+    - 兩者都有資料時取 [較低值, 較高值] 當區間，並各自標註來源方便判讀
+    - 只有一個有資料時，退化成單一數字（低點=高點=該數字）
+    - 兩者都沒有資料時（例如籌碼已全數出清、股票太新5日線不足）回傳 ("-", "", "")
+    - 現價已經超過區間上緣時，顯示文字前面加「⚠️追高」提示；低/高點數字欄仍照實填入，
+      不因為現價追高就清空，回測時才能算出「當初若照建議價位買、現在漲跌%」
+    """
+    def _to_float(v):
+        try:
+            v = float(v)
+            return v if v > 0 else None
+        except (TypeError, ValueError):
+            return None
+
+    cost  = _to_float(cost_wavg)
+    ma5   = _to_float(ma5_value)
+    price = _to_float(close)
+
+    points = []
+    if cost is not None:
+        points.append((cost, "成本"))
+    if ma5 is not None:
+        points.append((ma5, "5日"))
+
+    if not points:
+        return "-", "", ""
+
+    if len(points) == 1:
+        v, lbl = points[0]
+        range_str = f"{v:.1f}({lbl})"
+        low, high = v, v
+    else:
+        points.sort(key=lambda x: x[0])
+        (v1, l1), (v2, l2) = points
+        range_str = f"{v1:.1f}({l1})~{v2:.1f}({l2})"
+        low, high = v1, v2
+
+    label = f"⚠️追高 {range_str}" if (price is not None and price > high) else range_str
+    return label, round(low, 2), round(high, 2)
 
 
 def _score_matrix(consec, chip_lbl, today_amount=0, dampen=1.0):
@@ -3360,13 +3422,18 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
             dealer = (dealer + " 📢利空").strip()
         amp_lbl  = _amp_label(row)
         risk_disp = f"{risk} ⚠️" if risk == "🔴 高" else risk
+        # ★ v11.41/v11.42 推薦買進價位：法人加權成本價[40] + 5日均線[41]
+        cost_wavg = row[40] if len(row) > 40 else ""
+        ma5_value = row[41] if len(row) > 41 else ""
+        buy_label, buy_low, buy_high = _buy_price_info(cost_wavg, ma5_value, close)
 
         s = score_stock(row, dampen=_score_dampen)
         if s is not None:
             # ★ v11.37 修正：原本 dealer/amp_lbl 順序對調，導致「振幅%」欄顯示自營標記、
             #   「自營商標記」欄顯示振幅數字；正確順序應為 amp_lbl 在前、dealer 在後
             scored.append((s, [code, name, s, consec, chip_pct, chip_lbl,
-                               risk_disp, health, close, chg_pct, amp_lbl, dealer]))
+                               risk_disp, health, close, chg_pct, amp_lbl, dealer,
+                               buy_label, buy_low, buy_high]))
 
         # ★ v11.21 觀察組：放鬆過濾（允許風險中/高、允許>400元、允許ETF外其他）
         # 只要 consec >= 1，有集中度資料，今日非賣超，且非ETF
@@ -3376,7 +3443,8 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
             sw = score_stock_relaxed(row, dampen=_score_dampen)
             if sw is not None:
                 watch_scored.append((sw, [code, name, sw, consec, chip_pct, chip_lbl,
-                                          risk_disp, health, close, chg_pct, amp_lbl, dealer]))
+                                          risk_disp, health, close, chg_pct, amp_lbl, dealer,
+                                          buy_label, buy_low, buy_high]))
 
     # 依評分降冪，取前5；觀察組另取前5（排除已在主榜的代號）
     scored.sort(key=lambda x: x[0], reverse=True)
@@ -3665,7 +3733,7 @@ def update_performance(ss, date_str, current_prices):
     6. 整表寫回（最新在最上面）
     """
     disp_today = fmt_date(date_str)
-    N_COLS     = len(PERFORMANCE_HEADERS)   # 8
+    N_COLS     = len(PERFORMANCE_HEADERS)   # 16（★v11.42 新增建議買進價位/低/高後）
 
     # ── 讀取「明日關注」工作表 ──
     try:
@@ -3736,17 +3804,23 @@ def update_performance(ss, date_str, current_prices):
                         close = 0.0
                     risk          = r[7].strip() if len(r) > 7 else ""
                     margin_health = r[8].strip() if len(r) > 8 else ""
-                    today_stocks.append((r[1].strip(), r[2].strip(), r[3].strip(), close, group, risk, margin_health))  # ★ v11.23
+                    # ★ v11.42 推薦買進價位（文字+低+高），index 13/14/15，對應 RECOMMEND_HEADERS
+                    buy_label = r[13].strip() if len(r) > 13 else ""
+                    buy_low   = r[14].strip() if len(r) > 14 else ""
+                    buy_high  = r[15].strip() if len(r) > 15 else ""
+                    today_stocks.append((r[1].strip(), r[2].strip(), r[3].strip(), close, group, risk, margin_health,
+                                          buy_label, buy_low, buy_high))  # ★ v11.23 出貨風險/融資健康度；v11.42 買進價位
                 j += 1
             break
 
     new_rows = []
-    for code, name, score, base_close, group, risk, margin_health in today_stocks:
+    for code, name, score, base_close, group, risk, margin_health, buy_label, buy_low, buy_high in today_stocks:
         if code not in today_codes_in_rows:
             new_rows.append([disp_today, code, name, score,
                              base_close if base_close > 0 else "",
                              "", "", "", "", "", group,
-                             risk, margin_health])   # ★ v11.23 出貨風險/融資健康度
+                             risk, margin_health,
+                             buy_label, buy_low, buy_high])   # ★ v11.23 出貨風險/融資健康度；v11.42 買進價位
 
     rows = new_rows + rows
 
@@ -3760,6 +3834,7 @@ def update_performance(ss, date_str, current_prices):
     # col index: 推薦日[0] 代號[1] 名稱[2] 評分[3]
     #            推薦收盤[4] T+1[5] T+2[6] T+3[7] T+4[8] T+5[9]
     #            組別[10] 出貨風險[11] 融資健康度[12]
+    #            建議買進價位[13] 建議買進低[14] 建議買進高[15]   ★ v11.42
     for r in rows:
         rec_disp   = r[0]
         code       = r[1]
