@@ -19,7 +19,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.42"  # ← 每次 commit 只改這裡
+VERSION = "v11.45"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -2912,6 +2912,12 @@ RECOMMEND_HEADERS = [
     "推薦買進價位",  # ★ v11.41 法人加權成本價／5日均線 組成的買進參考區間（文字，含來源標註）
     "買進區間低",    # ★ v11.42 上面文字欄的數字版（低點），供「推薦成效」回測使用
     "買進區間高",    # ★ v11.42 上面文字欄的數字版（高點），供「推薦成效」回測使用
+    # ★ v11.45 量比/融資趨勢/融券趨勢：三者都已經是評分公式的一部分（7分/-6~+6分/回補+8/加碼-8），
+    #   但「明日關注」原本沒有顯示，backtest.py 也就沒辦法接進去驗證有沒有效（融券趨勢過去甚至誤以為
+    #   要另外重打 MI_MARGN API 才能重建，其實 calc_short_trend() 早就算好了，只是沒往下傳）
+    "量比",       # ANALYSIS_HEADERS[31]，今日量÷近10日均量，無燈號分級的原始數值
+    "融資趨勢",   # ANALYSIS_HEADERS[39]，近5天融資增減文字標籤（↗大增/增N張／↘大減/減N張／➡持平）
+    "融券趨勢",   # ANALYSIS_HEADERS[33]，近期融券餘額連續同向天數文字標籤
 ]
 
 PERFORMANCE_HEADERS = [
@@ -2923,6 +2929,20 @@ PERFORMANCE_HEADERS = [
     "建議買進價位",  # ★ v11.42 推薦當日的「推薦買進價位」文字（法人成本價／5日均線）
     "建議買進低",    # ★ v11.42 上面文字欄的低點數字，回測用
     "建議買進高",    # ★ v11.42 上面文字欄的高點數字，回測用
+    # ★ v11.44 以下五欄直接抄「明日關注」當時已算好的真值（RECOMMEND_HEADERS[4][5][6][11][12]），
+    #   讓 backtest.py 不用再從「歷史紀錄」逆推近似值——backtest 舊邏輯重建的「連續天數」用的是
+    #   三大法人合計連續天數，跟評分實際用的 max(外資/投信/自營商連續天數) 定義不同，會兜不起來；
+    #   籌碼集中度%/買超加速度同樣是重算，這裡改成直接記錄當時的真值，回測切面才準確。
+    "連續天數",       # 推薦當日的連續天數（= 評分實際用的 max(外資/投信/自營商連續天數)）
+    "籌碼集中度%",    # 推薦當日的籌碼集中度%（= 評分實際用的 ANALYSIS_HEADERS[25]）
+    "籌碼集中度評級", # 🔵高度集中／🟦中度集中／⬜偏低
+    "振幅%",          # 推薦當日振幅（高-低)/低，⚡5%以上會有標記
+    "自營商標記",     # 自營商連續天數標記，含📢利多/利空重大訊息標記（若有）
+    # ★ v11.45 量比/融資趨勢/融券趨勢，對應 RECOMMEND_HEADERS[16][17][18]
+    #   （T39：這三個都已經是評分公式的一部分，過去只算分沒往下傳，backtest.py 沒辦法驗證有沒有效）
+    "量比",           # ANALYSIS_HEADERS[31] 原始數值
+    "融資趨勢",       # ANALYSIS_HEADERS[39] 文字標籤
+    "融券趨勢",       # ANALYSIS_HEADERS[33] 文字標籤
 ]
 
 
@@ -3410,7 +3430,8 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
         chip_pct = row[25]   # ★ v11.37 修正：原本誤讀 row[24]（買超加速度），籌碼集中度% 應為 row[25]
         chip_lbl = row[26]   # ★ v11.37 修正：原本誤讀 row[25]（籌碼集中度%數值），評級應為 row[26]
         risk     = row[22]
-        health   = row[28]
+        health   = row[30]  # ★ v11.43 修正：原本誤讀 row[28]（融資增減(張)，數值），融資健康度應為 row[30]（文字標籤），
+                             #   導致「明日關注」「推薦成效」「推薦歷史」融資健康度欄位長期存成原始張數而非✅/🟡/⚠️/🔴標籤
         close    = row[19]
         chg_pct  = row[20]
         dealer   = _dealer_label(d_consec)
@@ -3426,6 +3447,11 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
         cost_wavg = row[40] if len(row) > 40 else ""
         ma5_value = row[41] if len(row) > 41 else ""
         buy_label, buy_low, buy_high = _buy_price_info(cost_wavg, ma5_value, close)
+        # ★ v11.45 量比[31]/融券趨勢[33]/融資趨勢[39]：三者都已是評分公式的一部分，
+        #   過去只算分沒往下傳給「明日關注」，這裡補上，backtest.py 才有辦法接進去開切面（T39）
+        vol_ratio     = row[31] if len(row) > 31 else ""
+        short_trend   = row[33] if len(row) > 33 else ""
+        margin_trend  = row[39] if len(row) > 39 else ""
 
         s = score_stock(row, dampen=_score_dampen)
         if s is not None:
@@ -3433,7 +3459,8 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
             #   「自營商標記」欄顯示振幅數字；正確順序應為 amp_lbl 在前、dealer 在後
             scored.append((s, [code, name, s, consec, chip_pct, chip_lbl,
                                risk_disp, health, close, chg_pct, amp_lbl, dealer,
-                               buy_label, buy_low, buy_high]))
+                               buy_label, buy_low, buy_high,
+                               vol_ratio, margin_trend, short_trend]))
 
         # ★ v11.21 觀察組：放鬆過濾（允許風險中/高、允許>400元、允許ETF外其他）
         # 只要 consec >= 1，有集中度資料，今日非賣超，且非ETF
@@ -3444,7 +3471,8 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
             if sw is not None:
                 watch_scored.append((sw, [code, name, sw, consec, chip_pct, chip_lbl,
                                           risk_disp, health, close, chg_pct, amp_lbl, dealer,
-                                          buy_label, buy_low, buy_high]))
+                                          buy_label, buy_low, buy_high,
+                                          vol_ratio, margin_trend, short_trend]))
 
     # 依評分降冪，取前5；觀察組另取前5（排除已在主榜的代號）
     scored.sort(key=lambda x: x[0], reverse=True)
@@ -3733,7 +3761,7 @@ def update_performance(ss, date_str, current_prices):
     6. 整表寫回（最新在最上面）
     """
     disp_today = fmt_date(date_str)
-    N_COLS     = len(PERFORMANCE_HEADERS)   # 16（★v11.42 新增建議買進價位/低/高後）
+    N_COLS     = len(PERFORMANCE_HEADERS)   # 24（★v11.45 新增量比/融資趨勢/融券趨勢後）
 
     # ── 讀取「明日關注」工作表 ──
     try:
@@ -3808,19 +3836,40 @@ def update_performance(ss, date_str, current_prices):
                     buy_label = r[13].strip() if len(r) > 13 else ""
                     buy_low   = r[14].strip() if len(r) > 14 else ""
                     buy_high  = r[15].strip() if len(r) > 15 else ""
+                    # ★ v11.44 連續天數/籌碼集中度%/籌碼集中度評級/振幅%/自營商標記，
+                    #   index 4/5/6/11/12，對應 RECOMMEND_HEADERS——直接抄真值供回測用，不必重建
+                    consec   = r[4].strip()  if len(r) > 4  else ""
+                    chip_pct = r[5].strip()  if len(r) > 5  else ""
+                    chip_lbl = r[6].strip()  if len(r) > 6  else ""
+                    amp      = r[11].strip() if len(r) > 11 else ""
+                    dealer   = r[12].strip() if len(r) > 12 else ""
+                    # ★ v11.45 量比/融資趨勢/融券趨勢，index 16/17/18，對應 RECOMMEND_HEADERS（T39）
+                    vol_ratio    = r[16].strip() if len(r) > 16 else ""
+                    margin_trend = r[17].strip() if len(r) > 17 else ""
+                    short_trend  = r[18].strip() if len(r) > 18 else ""
                     today_stocks.append((r[1].strip(), r[2].strip(), r[3].strip(), close, group, risk, margin_health,
-                                          buy_label, buy_low, buy_high))  # ★ v11.23 出貨風險/融資健康度；v11.42 買進價位
+                                          buy_label, buy_low, buy_high,
+                                          consec, chip_pct, chip_lbl, amp, dealer,
+                                          vol_ratio, margin_trend, short_trend))
+                    # ★ v11.23 出貨風險/融資健康度；v11.42 買進價位；v11.44 連續天數/籌碼集中度/振幅/自營商標記；
+                    #   v11.45 量比/融資趨勢/融券趨勢
                 j += 1
             break
 
     new_rows = []
-    for code, name, score, base_close, group, risk, margin_health, buy_label, buy_low, buy_high in today_stocks:
+    for (code, name, score, base_close, group, risk, margin_health, buy_label, buy_low, buy_high,
+         consec, chip_pct, chip_lbl, amp, dealer,
+         vol_ratio, margin_trend, short_trend) in today_stocks:
         if code not in today_codes_in_rows:
             new_rows.append([disp_today, code, name, score,
                              base_close if base_close > 0 else "",
                              "", "", "", "", "", group,
                              risk, margin_health,
-                             buy_label, buy_low, buy_high])   # ★ v11.23 出貨風險/融資健康度；v11.42 買進價位
+                             buy_label, buy_low, buy_high,
+                             consec, chip_pct, chip_lbl, amp, dealer,
+                             vol_ratio, margin_trend, short_trend])
+            # ★ v11.23 出貨風險/融資健康度；v11.42 買進價位；v11.44 連續天數/籌碼集中度/振幅/自營商標記；
+            #   v11.45 量比/融資趨勢/融券趨勢
 
     rows = new_rows + rows
 
@@ -3835,6 +3884,8 @@ def update_performance(ss, date_str, current_prices):
     #            推薦收盤[4] T+1[5] T+2[6] T+3[7] T+4[8] T+5[9]
     #            組別[10] 出貨風險[11] 融資健康度[12]
     #            建議買進價位[13] 建議買進低[14] 建議買進高[15]   ★ v11.42
+    #            連續天數[16] 籌碼集中度%[17] 籌碼集中度評級[18] 振幅%[19] 自營商標記[20]   ★ v11.44
+    #            量比[21] 融資趨勢[22] 融券趨勢[23]   ★ v11.45
     for r in rows:
         rec_disp   = r[0]
         code       = r[1]

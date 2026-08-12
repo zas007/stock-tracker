@@ -1,6 +1,6 @@
 """
 台灣股市三大法人買超推薦回測腳本 — backtest.py
-版本：v1.3
+版本：v1.5
 
 用途：
   對歷史推薦重建評分，比對 T+1/T+2/T+3 實際漲跌，
@@ -23,7 +23,7 @@
   A欄 = 代號（如 2330），B欄 = 備註（可空）
   第一列為標題列，從第二列開始填代號
 
-架子狀態（v1.3）：
+架子狀態（v1.5）：
   ✅ 資料讀取（Sheets 歷史紀錄 + 推薦歷史）
   ✅ 評分特徵重建邏輯（連續天數、籌碼集中度、加速度）
   ✅ 輸出格式（明細 + 勝率矩陣）
@@ -33,7 +33,14 @@
   ✅ 「推薦收盤買 vs 建議買進低點買」勝率比較切面 ★ v1.3 新增（對應 fetch_and_update.py v11.42）
      └ v11.42 之前累積的推薦成效資料沒有建議買進價位欄，該切面樣本數會偏低，
        需累積 v11.42 上線後的新資料（建議2~3週）才有參考價值，見備忘錄 T38
-  🚧 融券趨勢重建（TODO：需打 MI_MARGN API）
+  ✅ 連續天數／籌碼集中度%／籌碼集中度評級改優先讀真值 ★ v1.4 新增（對應 fetch_and_update.py v11.44）
+     └ v11.44 之前累積的舊資料沒有這幾欄，自動 fallback 用舊版重建邏輯（明細欄「來源」標示真值/重建近似值）
+  ✅ 振幅%、自營商標記(含📢利多/利空)兩個新切面 ★ v1.4 新增（同對應 v11.44，舊資料歸類「未知」）
+  ✅ 量比、融資趨勢、融券趨勢三個新切面 ★ v1.5 新增（對應 fetch_and_update.py v11.45，T39）
+     └ 融券趨勢過去誤以為需要另打 MI_MARGN API 才能重建，其實 calc_short_trend() 早就算好了，
+       只是沒往下傳，v11.45 補上後直接讀真值即可；v11.45 之前累積的舊資料沒有這幾欄，歸類「未知」
+  🚧 買超加速度仍為重建近似值（尚未接真值，fetch_and_update.py 未存這欄，見備忘錄待處理清單 T41）
+  🚧 相對強弱%、集保大戶、5日線尚未接進回測（見備忘錄待處理清單 T40）
   ⚠️  樣本 < 20 筆時勝率標注「樣本不足」
 
 注意：
@@ -203,6 +210,18 @@ def load_perf_history(ss):
             "buy_label":    row[13].strip() if len(row) > 13 else "",
             "buy_low":      _f(row[14])     if len(row) > 14 else None,
             "buy_high":     _f(row[15])     if len(row) > 15 else None,
+            # ★ v1.4 對應 fetch_and_update.py v11.44 新增的五欄：推薦當日的真值（不再由 backtest 自己重建近似值）
+            # v11.44 之前封存的舊資料沒有這幾欄，會是空字串，_rebuild_features() 會 fallback 到舊的重建邏輯
+            "consec_real":   row[16].strip() if len(row) > 16 else "",
+            "chip_pct_real": row[17].strip() if len(row) > 17 else "",
+            "chip_lbl_real": row[18].strip() if len(row) > 18 else "",
+            "amp":           row[19].strip() if len(row) > 19 else "",
+            "dealer":        row[20].strip() if len(row) > 20 else "",
+            # ★ v1.5 對應 fetch_and_update.py v11.45 新增的三欄：量比/融資趨勢/融券趨勢（T39）
+            # v11.45 之前封存的舊資料沒有這幾欄，會是空字串
+            "vol_ratio_real":    row[21].strip() if len(row) > 21 else "",
+            "margin_trend_real": row[22].strip() if len(row) > 22 else "",
+            "short_trend_real":  row[23].strip() if len(row) > 23 else "",
         })
     print(f"  ✅ 推薦歷史讀取 {len(result)} 筆")
     return result
@@ -324,36 +343,55 @@ def fetch_tn_prices(code, base_date_disp):
 
 def _rebuild_features(rec, hist_map):
     """
-    從歷史紀錄重建推薦日當天的評分特徵。
+    組裝推薦日當天的評分特徵。
+    ★ v1.4：連續天數／籌碼集中度%／籌碼集中度評級／振幅%／自營商標記，
+      優先直接採用 fetch_and_update.py v11.44 起存進「推薦歷史」的真值（推薦當時評分實際用的數字），
+      不再由 backtest 自己從「歷史紀錄」重建近似值——舊版重建的「連續天數」用的是三大法人合計連續天數，
+      跟評分實際用的 max(外資/投信/自營商連續天數) 定義不同，兜不起來；籌碼集中度%同理是重算，有精度誤差風險。
+      只有 v11.44 之前封存的舊資料（沒有這幾欄，會是空字串）才 fallback 用舊的重建邏輯，資料來源標記在
+      "*_source" 欄位方便回測明細分辨這筆是真值還是重建值。
+    「買超加速度」目前仍是重建近似值（fetch_and_update.py 尚未把這欄存進「推薦歷史」，見備忘錄待處理清單 T41）。
+    量比/融資趨勢/融券趨勢已改讀 v11.45 存的真值（T39，見下方）。
     回傳 dict（特徵值），資料不足時用空字串填充（不回傳 None，確保明細完整）。
     """
     code     = rec["code"]
     rec_date = rec["rec_date"]   # YYYY/MM/DD
     entries  = hist_map.get(code, {})
-
-    # ── 連續天數 ──
     all_dates  = sorted(entries.keys())
     net_by_day = {d: entries[d].get("total_net", 0) for d in all_dates}
-    consec = 0
-    for d in reversed(all_dates):
-        if d > rec_date: continue
-        if net_by_day.get(d, 0) > 0: consec += 1
-        else: break
 
-    # ── 籌碼集中度 ──
-    day_data  = entries.get(rec_date, {})
-    total_net = day_data.get("total_net", 0)
-    volume    = day_data.get("volume", 0)
-    if volume > 0 and total_net > 0:
-        chip_pct = total_net / volume
-        if chip_pct >= CHIP_HIGH:  chip_lbl = "🔵 高度集中"
-        elif chip_pct >= CHIP_MID: chip_lbl = "🟦 中度集中"
-        else:                      chip_lbl = "⬜ 偏低"
-        chip_pct_disp = round(chip_pct * 100, 1)
+    # ── 連續天數：v11.44 真值優先，否則 fallback 重建（合計買超連續天數，僅為近似值）──
+    consec_real = rec.get("consec_real", "")
+    if str(consec_real).strip().isdigit():
+        consec, consec_source = int(consec_real), "真值"
     else:
-        chip_pct_disp, chip_lbl = "", ""
+        consec = 0
+        for d in reversed(all_dates):
+            if d > rec_date: continue
+            if net_by_day.get(d, 0) > 0: consec += 1
+            else: break
+        consec_source = "重建近似值"
 
-    # ── 加速度 ──
+    # ── 籌碼集中度：v11.44 真值優先，否則 fallback 重算（僅為近似值）──
+    chip_pct_real = rec.get("chip_pct_real", "")
+    chip_lbl_real = rec.get("chip_lbl_real", "")
+    if chip_pct_real or chip_lbl_real:
+        chip_pct_disp, chip_lbl, chip_source = chip_pct_real, chip_lbl_real, "真值"
+    else:
+        day_data  = entries.get(rec_date, {})
+        total_net = day_data.get("total_net", 0)
+        volume    = day_data.get("volume", 0)
+        if volume > 0 and total_net > 0:
+            chip_pct = total_net / volume
+            if chip_pct >= CHIP_HIGH:  chip_lbl = "🔵 高度集中"
+            elif chip_pct >= CHIP_MID: chip_lbl = "🟦 中度集中"
+            else:                      chip_lbl = "⬜ 偏低"
+            chip_pct_disp = round(chip_pct * 100, 1)
+        else:
+            chip_pct_disp, chip_lbl = "", ""
+        chip_source = "重建近似值"
+
+    # ── 加速度（仍為重建近似值，尚未接真值）──
     buy_dates = sorted(
         [d for d in all_dates if d <= rec_date and net_by_day.get(d, 0) > 0],
         reverse=True
@@ -378,12 +416,19 @@ def _rebuild_features(rec, hist_map):
         "rec_date":      rec_date,
         "rec_score":     rec.get("score", ""),
         "consec":        consec,
+        "consec_source": consec_source,      # ★ v1.4
         "chip_pct":      chip_pct_disp,
         "chip_lbl":      chip_lbl,
+        "chip_source":   chip_source,        # ★ v1.4
         "accel_lbl":     accel_lbl,
         "margin_health": rec.get("margin_health", ""),  # ★ v11.23 從推薦歷史直接取
         "risk":          rec.get("risk", ""),            # ★ v11.23 從推薦歷史直接取
-        "short_trend":   "TODO",   # 仍待補
+        "amp":           rec.get("amp", ""),              # ★ v1.4 振幅%（真值，v11.44 前無資料）
+        "dealer":        rec.get("dealer", ""),           # ★ v1.4 自營商標記，含📢利多/利空（真值，v11.44 前無資料）
+        # ★ v1.5 量比/融資趨勢/融券趨勢，直接讀真值（v11.45 前無資料時為空字串，切面會歸類「未知」）
+        "vol_ratio":     rec.get("vol_ratio_real", ""),
+        "margin_trend":  rec.get("margin_trend_real", ""),
+        "short_trend":   rec.get("short_trend_real", ""),
     }
 
 
@@ -526,7 +571,66 @@ def calc_win_rate_matrix(detail_rows):
         sections.append(("【主榜排名 Top1~5 × T+1 勝率】",
             _stats(main_board_rows, _rank_lbl, "t1_pnl")))
 
-    # 切面 12：★ v1.3 推薦收盤買 vs 建議買進低點買 × T+1~T+5 勝率
+    # 切面 12：★ v1.4 振幅% × T+1 勝率（v11.44 前無資料，歸類「未知」）
+    def _amp_bucket(r):
+        v = str(r.get("amp", "")).strip()
+        if not v:
+            return "未知"
+        try:
+            amp = float(v.replace("⚡", "").replace("%", ""))
+        except ValueError:
+            return "未知"
+        if amp < 2:   return "<2%"
+        elif amp < 5: return "2~5%"
+        else:         return "≥5%⚡"
+    sections.append(("【振幅% × T+1 勝率】",
+        _stats(detail_rows, _amp_bucket, "t1_pnl")))
+
+    # 切面 13：★ v1.4 自營商標記／重大訊息 × T+1 勝率（v11.44 前無資料，歸類「未知」）
+    # 主要想看：📢利多/📢利空 標記出現時，勝率是否有明顯差異
+    def _dealer_lbl(r):
+        v = str(r.get("dealer", "")).strip()
+        if not v:
+            return "未知"
+        if "📢利多" in v: return "📢 利多標記"
+        if "📢利空" in v: return "📢 利空標記"
+        return "無重大訊息標記"
+    sections.append(("【自營商標記/重大訊息 × T+1 勝率】",
+        _stats(detail_rows, _dealer_lbl, "t1_pnl")))
+
+    # 切面 15：★ v1.5 量比 × T+1 勝率（T39，v11.45 前無資料，歸類「未知」）
+    def _vol_ratio_bucket(r):
+        v = str(r.get("vol_ratio", "")).strip()
+        if not v:
+            return "未知"
+        try:
+            vr = float(v)
+        except ValueError:
+            return "未知"
+        if vr < 1:    return "<1倍（量縮）"
+        elif vr < 2:  return "1~2倍"
+        elif vr < 3:  return "2~3倍"
+        else:         return "≥3倍（爆量）"
+    sections.append(("【量比 × T+1 勝率】",
+        _stats(detail_rows, _vol_ratio_bucket, "t1_pnl")))
+
+    # 切面 16：★ v1.5 融資趨勢 × T+1 勝率（T39，v11.45 前無資料，歸類「未知」）
+    def _margin_trend_lbl(r):
+        v = str(r.get("margin_trend", "")).strip()
+        return v if v else "未知"
+    sections.append(("【融資趨勢 × T+1 勝率】",
+        _stats(detail_rows, _margin_trend_lbl, "t1_pnl")))
+
+    # 切面 17：★ v1.5 融券趨勢 × T+1 勝率（T39，v11.45 前無資料，歸類「未知」；
+    #   backtest.py 舊版誤以為需要另打 MI_MARGN API 才能重建，其實 fetch_and_update.py
+    #   的 calc_short_trend() 早就算好了，v11.45 只是把這個現成標籤存進「推薦歷史」）
+    def _short_trend_lbl(r):
+        v = str(r.get("short_trend", "")).strip()
+        return v if v else "未知"
+    sections.append(("【融券趨勢 × T+1 勝率】",
+        _stats(detail_rows, _short_trend_lbl, "t1_pnl")))
+
+    # 切面 18：★ v1.3 推薦收盤買 vs 建議買進低點買 × T+1~T+5 勝率
     # 直接回答「照建議買進價位買，勝率比照推薦收盤價買高多少%」
     # ★ 對應 fetch_and_update.py v11.42；v11.42 之前累積的推薦成效資料沒有這三欄，
     #   「建議買進低點買」那幾列的樣本數會明顯偏低（甚至 N/A），屬於資料還在累積中的正常現象，
@@ -563,12 +667,15 @@ def calc_win_rate_matrix(detail_rows):
 
 DETAIL_HEADERS = [
     "推薦日", "推薦星期", "代號", "股票名稱", "推薦評分",
-    "連續天數", "籌碼集中度%", "籌碼集中度評級", "買超加速度",
+    "連續天數", "連續天數來源", "籌碼集中度%", "籌碼集中度評級", "籌碼集中度來源",   # ★ v1.4 加「來源」欄，方便分辨真值/重建近似值
+    "買超加速度",
     "推薦收盤",
     "T+1收盤", "T+1漲跌%", "T+2收盤", "T+2漲跌%", "T+3收盤", "T+3漲跌%",
     "T+4收盤", "T+4漲跌%", "T+5收盤", "T+5漲跌%",
     "T+1勝負", "T+2勝負", "T+3勝負", "T+4勝負", "T+5勝負",
     "融資健康度", "出貨風險", "融券趨勢",
+    "振幅%", "自營商標記",   # ★ v1.4
+    "量比", "融資趨勢",   # ★ v1.5
     "組別", "主榜排名", "大盤警訊等級",   # ★ v1.2
     "建議買進價位", "建議買進低", "建議買進高",   # ★ v1.3
     "T+1漲跌%(建議買進)", "T+2漲跌%(建議買進)", "T+3漲跌%(建議買進)",
@@ -598,8 +705,9 @@ def write_detail_sheet(ss, detail_rows, dry_run=False):
         data.append([
             rec_date,               weekday_zh,
             r.get("code",""),       r.get("name",""),
-            r.get("rec_score",""),  r.get("consec",""),
-            r.get("chip_pct",""),   r.get("chip_lbl",""),  r.get("accel_lbl",""),
+            r.get("rec_score",""),  r.get("consec",""),  r.get("consec_source",""),
+            r.get("chip_pct",""),   r.get("chip_lbl",""),  r.get("chip_source",""),
+            r.get("accel_lbl",""),
             r.get("base_close",""),
             r.get("t1",""),         r.get("t1_pnl","待補"),
             r.get("t2",""),         r.get("t2_pnl","待補"),
@@ -612,6 +720,8 @@ def write_detail_sheet(ss, detail_rows, dry_run=False):
             _win_label(r.get("t4_pnl")),
             _win_label(r.get("t5_pnl")),
             r.get("margin_health",""), r.get("risk",""), r.get("short_trend",""),
+            r.get("amp",""), r.get("dealer",""),
+            r.get("vol_ratio",""), r.get("margin_trend",""),
             r.get("group",""), r.get("rank","") or "", r.get("alert_level","") or "",
             r.get("buy_label",""), r.get("buy_low","") or "", r.get("buy_high","") or "",
             r.get("t1_pnl_buy","待補"), r.get("t2_pnl_buy","待補"), r.get("t3_pnl_buy","待補"),
@@ -663,7 +773,7 @@ def write_summary_sheet(ss, sections, dry_run=False):
 # ── 主流程 ─────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="台灣股市推薦回測腳本 v1.3")
+    parser = argparse.ArgumentParser(description="台灣股市推薦回測腳本 v1.5")
     parser.add_argument("--days",    type=int, default=0,
                         help="只回測最近 N 天的推薦（0 = 全部）")
     parser.add_argument("--dry-run", action="store_true",
@@ -673,7 +783,7 @@ def main():
     args = parser.parse_args()
 
     print("=" * 50)
-    print("  台灣股市推薦回測腳本 v1.3")
+    print("  台灣股市推薦回測腳本 v1.5")
     print("=" * 50)
 
     # ── dry-run 快速驗證 ──
@@ -1044,26 +1154,32 @@ def _demo_dry_run():
     """dry-run：用假資料驗證完整框架"""
     fake = [
         {"rec_date":"2026/05/20","code":"2330","name":"台積電","rec_score":85,
-         "consec":8,"chip_pct":25.3,"chip_lbl":"🔵 高度集中","accel_lbl":"🚀 加速",
+         "consec":8,"consec_source":"真值","chip_pct":25.3,"chip_lbl":"🔵 高度集中","chip_source":"真值",
+         "accel_lbl":"🚀 加速","amp":"4.2%","dealer":"⭐連續3天 📢利多",
+         "vol_ratio":"2.4","margin_trend":"↗ 大增","short_trend":"回補 3天",
          "base_close":950.0,
          "t1":960.0,"t1_pnl":1.05, "t2":945.0,"t2_pnl":-0.53,
          "t3":970.0,"t3_pnl":2.11, "t4":975.0,"t4_pnl":2.63,
          "t5":980.0,"t5_pnl":3.16,
-         "margin_health":"TODO","risk":"TODO","short_trend":"TODO"},
+         "margin_health":"TODO","risk":"TODO"},
         {"rec_date":"2026/05/20","code":"6669","name":"緯穎","rec_score":72,
-         "consec":4,"chip_pct":15.1,"chip_lbl":"🟦 中度集中","accel_lbl":"📈 溫和加速",
+         "consec":4,"consec_source":"真值","chip_pct":15.1,"chip_lbl":"🟦 中度集中","chip_source":"真值",
+         "accel_lbl":"📈 溫和加速","amp":"1.8%","dealer":"",
+         "vol_ratio":"1.3","margin_trend":"➡ 持平","short_trend":"持平",
          "base_close":2500.0,
          "t1":2480.0,"t1_pnl":-0.80, "t2":2530.0,"t2_pnl":1.20,
          "t3":2550.0,"t3_pnl":2.00,  "t4":2540.0,"t4_pnl":1.60,
          "t5":2560.0,"t5_pnl":2.40,
-         "margin_health":"TODO","risk":"TODO","short_trend":"TODO"},
+         "margin_health":"TODO","risk":"TODO"},
         {"rec_date":"2026/05/21","code":"3037","name":"欣興","rec_score":65,
-         "consec":3,"chip_pct":11.2,"chip_lbl":"🟦 中度集中","accel_lbl":"➡ 持平",
+         "consec":3,"consec_source":"重建近似值","chip_pct":11.2,"chip_lbl":"🟦 中度集中","chip_source":"重建近似值",
+         "accel_lbl":"➡ 持平","amp":"","dealer":"",
+         "vol_ratio":"","margin_trend":"","short_trend":"",
          "base_close":180.0,
          "t1":None,"t1_pnl":None, "t2":None,"t2_pnl":None,
          "t3":None,"t3_pnl":None, "t4":None,"t4_pnl":None,
          "t5":None,"t5_pnl":None,
-         "margin_health":"TODO","risk":"TODO","short_trend":"TODO"},
+         "margin_health":"TODO","risk":"TODO"},
     ]
     sections = calc_win_rate_matrix(fake)
     write_detail_sheet(None, fake, dry_run=True)
