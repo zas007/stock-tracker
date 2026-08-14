@@ -5,6 +5,46 @@ Google Sheets ID：`1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g`
 
 ---
 
+## v11.46 — 2026/08/14
+
+### 調整（refactor）
+
+- **「明日關注」「推薦成效」「推薦歷史」欄位讀寫改用具名 index，取代寫死的 row[N]**
+  * 背景：欄位順序改動一直靠人工對照 `RECOMMEND_HEADERS`/`PERFORMANCE_HEADERS` 數 index，過去因此出過 v11.37、v11.43 兩次實際計分/存錯欄位的 bug
+  * 新增 `REC_IDX`/`PERF_IDX`（由 headers list 自動產生欄名→index 對照表），以及 `_make_rec_row()`/`_rec_cell()`、`_make_perf_row()`/`_perf_cell()` 存取小工具
+  * 改寫範圍：`update_recommendation()` 評分迴圈組列、排名寫入、Top5/觀察組代號比對；`_parse_rec_sheet()`；`update_performance()` 解析明日關注今日 block、T+1~T+5 填值迴圈；`_archive_performance()`
+  * 純重構，欄位順序與寫入內容完全不變，只是把 magic number 換成具名讀取，方便之後要調欄位順序時不用整個檔案找 index 改
+  * 已用模擬資料跑過 `update_recommendation()` → `update_performance()` 全流程，確認輸出欄位對齊 headers、數值無偏移
+
+- **`ANALYSIS_HEADERS`（build_row 對照分析欄位）同樣改用具名 index**
+  * 新增 `ANALYSIS_IDX`、`_make_ana_row()`、`_ana_cell()`，`ANALYSIS_HEADERS` 定義移到 `build_row()` 前面
+  * 改寫範圍：`build_row()` 組列、`score_stock()`、`score_stock_relaxed()`、`calc_market_alert()`、`_amp_label()`、`_calc_analysis_rows()`、`update_recommendation()` 讀 all_rows 的迴圈
+  * **附帶發現一處註解與實際欄位不符**：`calc_market_alert()` 判斷「融資異常放大」讀的其實是「融資增減(張)」原始數值，不是 `calc_margin_health()` 算出的文字標籤——研判是刻意的（文字標籤沒辦法拿數字門檻比大小），這次只改具名讀取、行為不變，註解已寫清楚，邏輯留給之後確認要不要調整
+  * 已用模擬資料跑過 `build_row → score_stock → update_recommendation` 全流程，確認 42 欄逐一對齊 `ANALYSIS_HEADERS`
+
+- **「明日關注」觀察組區塊移除重複的欄位標題列**
+  * 背景：主榜標題列印過一次後，緊接著的「⚠️ 高風險觀察組」區塊又印了一次一模一樣的標題，捲動時用不到
+  * `update_recommendation()` 組 block 時，觀察組只保留「── ⚠️ 高風險觀察組」分隔行，不再重印 `RECOMMEND_HEADERS`
+  * 同步清掉 `_parse_rec_sheet()`、`update_performance()` 今日 block 解析裡「跳過觀察組標題列」的死碼（配合拿掉的標題列一起失效，原本靠「代號欄不是數字」自然跳過即可，不影響解析正確性）
+  * 已驗證 `_parse_rec_sheet()` 在少了這行標題後仍正確分辨主榜／觀察組、正確取出代號/名稱/評分/現價
+
+- 版本 v11.45 → v11.46；`每日更新.sh` banner 同步更新
+
+---
+
+## backtest.py v1.6 — 2026/08/14
+
+### 調整（refactor）
+
+- **`load_perf_history()` 改用具名 index（PERF_IDX/`_perf_cell()`）讀取「推薦歷史」，取代寫死的 row[N]**
+  * backtest.py 是獨立腳本、不 import fetch_and_update.py，所以自己保留一份 `PERFORMANCE_HEADERS` 順序（註解註明要跟主程式手動同步）
+  * 純重構，讀出的欄位與數值完全不變
+  * 已用模擬 Google Sheets 回傳資料跑過 `load_perf_history()`，確認每個欄位對應正確
+  * 跟 fetch_and_update.py v11.46 同一批處理
+  * 版本 v1.5 → v1.6
+
+---
+
 ## backtest.py v1.4 — 2026/08/12
 
 ### 新增 / 調整

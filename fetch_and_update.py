@@ -2035,13 +2035,17 @@ def calc_market_alert(all_rows, futures_line):
     """
     彙總三項訊號，判斷當日大盤警戒等級。
     all_rows: build_row 產出的原始列（尚未經過 update_recommendation 的評分過濾）
-      row[22] = 出貨風險（🟢 低 / 🟡 中 / 🔴 高）
-      row[28] = 融資健康度（數值）
+      出貨風險 = 🟢 低 / 🟡 中 / 🔴 高
+      這裡的「融資健康度異常放大」實際讀的是「融資增減(張)」這個原始數字（ANALYSIS_IDX["融資增減(張)"]），
+      不是 calc_margin_health() 算出來的 ✅/🟡/⚠️/🔴 文字標籤（那個沒辦法拿來跟 ALERT_MARGIN_HEALTH_ABS
+      這種數字門檻比大小）。★ v11.46 改用具名 index 讀取，行為與改之前完全相同，只是把
+      原本寫死的 row[28]（正好對到「融資增減(張)」）換成 ANALYSIS_IDX["融資增減(張)"]，
+      避免以後改 ANALYSIS_HEADERS 順序時又對錯欄位。
     futures_line: 外資期貨燈號文字（含「較前日 ±N」）
 
     回傳 (level, alert_line, margin_codes, ship_codes)
       level: "red" / "yellow" / "green"
-      margin_codes: [(代號, 名稱, 融資健康度數值), ...] 融資異常放大的股票
+      margin_codes: [(代號, 名稱, 融資增減張數), ...] 融資異常放大的股票
       ship_codes:   [(代號, 名稱), ...] 出貨風險🔴高 的股票
     """
     level = "green"
@@ -2059,15 +2063,16 @@ def calc_market_alert(all_rows, futures_line):
             level = "yellow" if level != "red" else level
             reasons.append(f"外資期貨單日變動 {abs_delta:,} 口")
 
-    # 2. 融資健康度異常放大
+    # 2. 融資增減(張) 異常放大
     margin_codes = []
     for row in all_rows:
+        _mc_raw = _ana_cell(row, "融資增減(張)")
         try:
-            health = int(row[28]) if str(row[28]).strip().lstrip("-").isdigit() else 0
+            health = int(_mc_raw) if str(_mc_raw).strip().lstrip("-").isdigit() else 0
         except (ValueError, TypeError):
             health = 0
         if abs(health) >= ALERT_MARGIN_HEALTH_ABS:
-            margin_codes.append((row[0], row[1], health))
+            margin_codes.append((_ana_cell(row, "代號"), _ana_cell(row, "股票名稱"), health))
     n_margin = len(margin_codes)
     if n_margin >= ALERT_MARGIN_COUNT_RED:
         level = "red"
@@ -2077,7 +2082,8 @@ def calc_market_alert(all_rows, futures_line):
         reasons.append(f"融資異常放大 {n_margin} 檔")
 
     # 3. 出貨風險🔴高 檔數
-    ship_codes = [(row[0], row[1]) for row in all_rows if row[22] == "🔴 高"]
+    ship_codes = [(_ana_cell(row, "代號"), _ana_cell(row, "股票名稱")) for row in all_rows
+                  if _ana_cell(row, "出貨風險") == "🔴 高"]
     n_ship = len(ship_codes)
     if n_ship >= ALERT_SHIP_RISK_COUNT_RED:
         level = "red"
@@ -2434,6 +2440,51 @@ def _consecutive_days(entries, code, all_dates, net_by_date):
     return count
 
 
+ANALYSIS_HEADERS = [
+    "代號","股票名稱",
+    "外資累計天數","外資連續天數","外資買超(張)","外資加權均價","外資趨勢",
+    "投信累計天數","投信連續天數","投信買超(張)","投信加權均價","投信趨勢","投信標記",
+    "自營商累計天數","自營商連續天數","自營商買超(張)","自營商加權均價","自營商趨勢",
+    "合計累計天數","現價","當日漲跌%","漲幅%","出貨風險","訊號","買超加速度",
+    "籌碼集中度%","籌碼集中度評級",
+    "融資餘額(張)","融資增減(張)","融券餘額(張)","融資健康度",
+    "量比",         # [31]
+    "集保大戶",     # ★ v11.15 [32]
+    "融券趨勢",     # [33]
+    "5日線",        # ★ v11.11 [34]
+    "相對強弱%",    # ★ v11.9  [35]
+    "最近出現日",   # [36]
+    "今日買超金額", # ★ v11.18 [37]
+    "振幅%",        # ★ v11.21 [38] (高-低)/低
+    "融資趨勢",     # ★ v11.29 [39]
+    "法人加權成本價", # ★ v11.41 [40] 三大法人合計加權成本價（FIFO扣減後剩餘部位）
+    "5日均線價",      # ★ v11.41 [41] 5日均線數值
+]
+
+# ★ v11.46 由 ANALYSIS_HEADERS 自動產生欄名→index 對照表（單一真相來源），
+#   讓 build_row 的輸出、以及 score_stock / score_stock_relaxed / calc_market_alert 等
+#   後續讀取都能用 ANALYSIS_IDX["融資健康度"] 取代寫死的 row[30] 這類 magic number。
+#   （過去 row[25]/row[26]/row[28]/row[29]/row[30] 這幾欄的位置對照曾經搞混，
+#   造成 v11.37、v11.43 的實際計分 bug，見下方 build_row/score_stock 內的修正註記）
+ANALYSIS_IDX = {name: i for i, name in enumerate(ANALYSIS_HEADERS)}
+
+
+def _make_ana_row(fields: dict) -> list:
+    """依 ANALYSIS_IDX 把 {欄名: 值} 組成一列 build_row 資料（長度 = len(ANALYSIS_HEADERS)）。"""
+    row = [""] * len(ANALYSIS_HEADERS)
+    for key, val in fields.items():
+        row[ANALYSIS_IDX[key]] = val
+    return row
+
+
+def _ana_cell(row: list, key: str, default=""):
+    """安全讀取 build_row 產出的列在 key 欄的值（依 ANALYSIS_IDX 對照，越界或空值回傳 default）。"""
+    idx = ANALYSIS_IDX[key]
+    if len(row) > idx and row[idx] not in (None, ""):
+        return row[idx]
+    return default
+
+
 def build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net_by_date,
               short_hist=None, market_pct=None, ma5_map=None, tdcc_map=None, amp_map=None,
               margin_hist=None, volume_hist=None):
@@ -2525,49 +2576,32 @@ def build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net
     # ★ v11.21 振幅%
     amplitude = (amp_map or {}).get(code, "")
 
-    return [
-        code, s["name"],
-        f_total, f_consec, f_net, f_wavg or "", f_trend,
-        t_total, t_consec, t_net, t_wavg or "", t_trend, trust_label,
-        d_total, d_consec, d_net, d_wavg or "", d_trend,
-        f_total + t_total + d_total,
-        close or "", change_pct or "", pct_str, risk, signal, accel_label,
-        chip_pct, chip_lbl,
-        mb or "", mc if (mb or mc) else "", sb or "", margin_health,
-        volume_ratio,
-        tdcc_label,       # ★ v11.15 [31]
-        short_trend,      # [32]
-        ma5_label,        # ★ v11.11 [33]
-        relative_strength,
-        s["last"],
-        today_amount,      # ★ v11.18 [37] 今日買超金額（元）
-        amplitude,         # ★ v11.21 [38] 振幅% = (高-低)/低
-        margin_trend,      # ★ v11.29 [39] 融資趨勢
-        all_wavg or "",    # ★ v11.41 [40] 三大法人合計加權成本價（FIFO扣減後剩餘部位），供「推薦買進價位」使用
-        ma5_value or "",   # ★ v11.41 [41] 5日均線數值（供「推薦買進價位」使用）
-    ]
-
-
-ANALYSIS_HEADERS = [
-    "代號","股票名稱",
-    "外資累計天數","外資連續天數","外資買超(張)","外資加權均價","外資趨勢",
-    "投信累計天數","投信連續天數","投信買超(張)","投信加權均價","投信趨勢","投信標記",
-    "自營商累計天數","自營商連續天數","自營商買超(張)","自營商加權均價","自營商趨勢",
-    "合計累計天數","現價","當日漲跌%","漲幅%","出貨風險","訊號","買超加速度",
-    "籌碼集中度%","籌碼集中度評級",
-    "融資餘額(張)","融資增減(張)","融券餘額(張)","融資健康度",
-    "量比",         # [31]
-    "集保大戶",     # ★ v11.15 [32]
-    "融券趨勢",     # [33]
-    "5日線",        # ★ v11.11 [34]
-    "相對強弱%",    # ★ v11.9  [35]
-    "最近出現日",   # [36]
-    "今日買超金額", # ★ v11.18 [37]
-    "振幅%",        # ★ v11.21 [38] (高-低)/低
-    "融資趨勢",     # ★ v11.29 [39]
-    "法人加權成本價", # ★ v11.41 [40] 三大法人合計加權成本價（FIFO扣減後剩餘部位）
-    "5日均線價",      # ★ v11.41 [41] 5日均線數值
-]
+    return _make_ana_row({
+        "代號": code, "股票名稱": s["name"],
+        "外資累計天數": f_total, "外資連續天數": f_consec, "外資買超(張)": f_net,
+        "外資加權均價": f_wavg or "", "外資趨勢": f_trend,
+        "投信累計天數": t_total, "投信連續天數": t_consec, "投信買超(張)": t_net,
+        "投信加權均價": t_wavg or "", "投信趨勢": t_trend, "投信標記": trust_label,
+        "自營商累計天數": d_total, "自營商連續天數": d_consec, "自營商買超(張)": d_net,
+        "自營商加權均價": d_wavg or "", "自營商趨勢": d_trend,
+        "合計累計天數": f_total + t_total + d_total,
+        "現價": close or "", "當日漲跌%": change_pct or "", "漲幅%": pct_str,
+        "出貨風險": risk, "訊號": signal, "買超加速度": accel_label,
+        "籌碼集中度%": chip_pct, "籌碼集中度評級": chip_lbl,
+        "融資餘額(張)": mb or "", "融資增減(張)": mc if (mb or mc) else "",
+        "融券餘額(張)": sb or "", "融資健康度": margin_health,
+        "量比": volume_ratio,
+        "集保大戶": tdcc_label,       # ★ v11.15
+        "融券趨勢": short_trend,
+        "5日線": ma5_label,           # ★ v11.11
+        "相對強弱%": relative_strength,
+        "最近出現日": s["last"],
+        "今日買超金額": today_amount,  # ★ v11.18 今日買超金額（元）
+        "振幅%": amplitude,           # ★ v11.21 振幅% = (高-低)/低
+        "融資趨勢": margin_trend,     # ★ v11.29
+        "法人加權成本價": all_wavg or "",  # ★ v11.41 三大法人合計加權成本價（FIFO扣減後剩餘部位），供「推薦買進價位」使用
+        "5日均線價": ma5_value or "",      # ★ v11.41 供「推薦買進價位」使用
+    })
 
 
 # ═══════════════════════════════════════════════
@@ -2831,15 +2865,15 @@ def _calc_analysis_rows(ss, date_str, current_prices, current_margin, cache_pric
                 count += 1
         return count
 
-    # ★ v11.20 修正：v11.18 新增 r[37]（今日買超金額）後，r[-1] 不再是最近出現日
-    #   改用明確 index r[36]（最近出現日）
+    # ★ v11.20 修正：v11.18 新增「今日買超金額」欄後，r[-1] 不再是最近出現日
+    #   改用明確欄名 ANALYSIS_IDX["最近出現日"]（★ v11.46 進一步改用 _ana_cell 具名讀取）
     all_rows = [
         r for r in all_rows
-        if len(r) > 36 and r[36] and _trading_days_diff(r[36], disp) <= 5
+        if _ana_cell(r, "最近出現日") and _trading_days_diff(_ana_cell(r, "最近出現日"), disp) <= 5
     ]
 
-    all_rows.sort(key=lambda r: r[18])
-    all_rows.sort(key=lambda r: r[36] if len(r) > 36 and r[36] else "", reverse=True)
+    all_rows.sort(key=lambda r: _ana_cell(r, "合計累計天數"))
+    all_rows.sort(key=lambda r: _ana_cell(r, "最近出現日"), reverse=True)
     return all_rows
 
 
@@ -2944,6 +2978,49 @@ PERFORMANCE_HEADERS = [
     "融資趨勢",       # ANALYSIS_HEADERS[39] 文字標籤
     "融券趨勢",       # ANALYSIS_HEADERS[33] 文字標籤
 ]
+
+# ★ v11.46 由 RECOMMEND_HEADERS / PERFORMANCE_HEADERS 自動產生欄名→index 對照表，
+#   讓後續程式碼可以用 REC_IDX["現價"] 取代寫死的 row[9]。
+#   單一真相來源：欄位順序只需要在上面的 *_HEADERS list 改一次，
+#   下面所有存取都會自動跟著換，不必再到處找 magic number 改。
+REC_IDX  = {name: i for i, name in enumerate(RECOMMEND_HEADERS)}
+PERF_IDX = {name: i for i, name in enumerate(PERFORMANCE_HEADERS)}
+
+
+def _make_rec_row(fields: dict) -> list:
+    """
+    依 REC_IDX 把 {欄名: 值} 組成一列「明日關注」資料（長度 = len(RECOMMEND_HEADERS)）。
+    沒填的欄位預設空字串。「排名」通常不在 fields 裡，是排序決定名次後才另外填入
+    （見 REC_IDX["排名"]）。
+    """
+    row = [""] * len(RECOMMEND_HEADERS)
+    for key, val in fields.items():
+        row[REC_IDX[key]] = val
+    return row
+
+
+def _rec_cell(row: list, key: str, default=""):
+    """安全讀取「明日關注」工作表某一列在 key 欄的值（依 REC_IDX 對照，越界或空值回傳 default）。"""
+    idx = REC_IDX[key]
+    if len(row) > idx and row[idx] not in (None, ""):
+        return str(row[idx]).strip()
+    return default
+
+
+def _make_perf_row(fields: dict) -> list:
+    """依 PERF_IDX 把 {欄名: 值} 組成一列「推薦成效／推薦歷史」資料（長度 = len(PERFORMANCE_HEADERS)）。"""
+    row = [""] * len(PERFORMANCE_HEADERS)
+    for key, val in fields.items():
+        row[PERF_IDX[key]] = val
+    return row
+
+
+def _perf_cell(row: list, key: str, default=""):
+    """安全讀取「推薦成效／推薦歷史」工作表某一列在 key 欄的值（依 PERF_IDX 對照）。"""
+    idx = PERF_IDX[key]
+    if len(row) > idx and row[idx] not in (None, ""):
+        return row[idx]
+    return default
 
 
 def _buy_price_info(cost_wavg, ma5_value, close):
@@ -3192,13 +3269,9 @@ def _score_momentum(chg_pct):
 def score_stock(row, dampen=1.0):
     """
     輸入 build_row 產出的 row，回傳綜合評分（0~100）。
-    row index 對照 ANALYSIS_HEADERS：
-      [3]=外資連續, [8]=投信連續, [13]=自營連續
-      [19]=現價, [20]=當日漲跌%, [21]=漲幅%, [22]=出貨風險, [23]=訊號
-      [24]=買超加速度, [25]=籌碼集中度%, [26]=籌碼集中度評級
-      [29]=融資健康度, [30]=量比 → [31]=集保大戶
-      [32]=融券趨勢, [33]=5日線（v11.11）, [34]=相對強弱%, [35]=最近出現日
-      [32]=5日線（v11.11）, [33]=相對強弱%, [34]=最近出現日
+    ★ v11.46 全部改用 ANALYSIS_IDX/_ana_cell 具名讀取，不再靠人工對照 ANALYSIS_HEADERS 數 index
+    （過去 row[25]/row[26]/row[28]/row[29]/row[30]/row[31] 的位置對照曾經搞混，
+    造成 v11.37 的實際計分 bug：融資健康度誤讀成融券餘額、量比誤讀成融資健康度字串）。
 
     v11.2 過濾邏輯：
       移除「漲幅 ≤2%」門檻（避免錯殺法人剛開始佈局的股票）
@@ -3208,18 +3281,18 @@ def score_stock(row, dampen=1.0):
     ★ v11.35 dampen：大盤警訊🟡/🔴時由呼叫端傳入 <1.0 係數，
       對「籌碼集中度×連續天數」矩陣分數（40分）降權，其餘因子不受影響。
     """
-    code         = row[0]
-    signal       = row[23]
-    risk         = row[22]
-    accel_label  = row[24] if len(row) > 24 else ""
-    chip_lbl     = row[26]
-    health       = row[30]   # ★ v11.37 修正：融資健康度應為 row[30]（原本誤讀 row[29]=融券餘額，導致 _score_margin() dict查表永遠對不到、這25分一直是0分）
-    vr_raw = row[31] if len(row) > 31 else None   # ★ v11.37 修正：量比應為 row[31]（原本誤讀 row[30]=融資健康度字串，導致 float() 轉換失敗、量比分數一直是 None）
-    tdcc_raw     = row[32] if len(row) > 32 else ""   # ★ v11.15 [32]
-    short_trend  = row[33] if len(row) > 33 else ""   # [33]
-    today_amount = row[37] if len(row) > 37 else 0    # ★ v11.18 [37]
-    amplitude    = row[38] if len(row) > 38 else ""   # ★ v11.21 [38]
-    margin_trend = row[39] if len(row) > 39 else ""   # ★ v11.29 [39]
+    code         = _ana_cell(row, "代號")
+    signal       = _ana_cell(row, "訊號")
+    risk         = _ana_cell(row, "出貨風險")
+    accel_label  = _ana_cell(row, "買超加速度")
+    chip_lbl     = _ana_cell(row, "籌碼集中度評級")
+    health       = _ana_cell(row, "融資健康度")
+    vr_raw       = _ana_cell(row, "量比", default=None)
+    tdcc_raw     = _ana_cell(row, "集保大戶")
+    short_trend  = _ana_cell(row, "融券趨勢")
+    today_amount = _ana_cell(row, "今日買超金額", default=0)
+    amplitude    = _ana_cell(row, "振幅%")
+    margin_trend = _ana_cell(row, "融資趨勢")
     try:
         today_amount = float(today_amount) if today_amount else 0
     except (ValueError, TypeError):
@@ -3250,13 +3323,13 @@ def score_stock(row, dampen=1.0):
 
     # 現價上限：> 400 元不推（價格過高，散戶參與度低）
     try:
-        close_val = float(str(row[19]).replace(",", ""))
+        close_val = float(str(_ana_cell(row, "現價")).replace(",", ""))
         if close_val > 400:              return None
     except (ValueError, TypeError):
         pass
 
     # 漲幅上限：當日已漲超過 8% 視為追高，不推
-    chg_str = str(row[20]).replace("%", "").replace("+", "").strip()
+    chg_str = str(_ana_cell(row, "當日漲跌%")).replace("%", "").replace("+", "").strip()
     try:
         chg = float(chg_str)
         if chg > 8.0:                    return None
@@ -3264,17 +3337,16 @@ def score_stock(row, dampen=1.0):
         pass   # 無法解析漲幅（N/A等）→ 不過濾，讓評分決定
 
     # 取三法人最大連續天數作為代表
-    # ★ v11.37 修正：自營商連續天數應為 row[14]（原本誤用 row[13]=自營商累計天數）
     consec = max(
-        int(row[3])  if str(row[3]).isdigit()  else 0,
-        int(row[8])  if str(row[8]).isdigit()  else 0,
-        int(row[14]) if str(row[14]).isdigit() else 0,
+        int(_ana_cell(row, "外資連續天數"))   if str(_ana_cell(row, "外資連續天數")).isdigit()   else 0,
+        int(_ana_cell(row, "投信連續天數"))   if str(_ana_cell(row, "投信連續天數")).isdigit()   else 0,
+        int(_ana_cell(row, "自營商連續天數")) if str(_ana_cell(row, "自營商連續天數")).isdigit() else 0,
     )
     if consec == 0: return None
 
     # ★ v11.21 當日漲跌%→動能分
     try:
-        chg_val = float(str(row[20]).replace("%", "").replace("+", "").strip())
+        chg_val = float(str(_ana_cell(row, "當日漲跌%")).replace("%", "").replace("+", "").strip())
     except (ValueError, TypeError):
         chg_val = 0.0
 
@@ -3301,17 +3373,26 @@ def score_stock_relaxed(row, dampen=1.0):
     評分邏輯與 score_stock 相同（包含動能分）。
     ★ v11.35 dampen：同 score_stock，大盤警訊🟡/🔴時降權矩陣分數。
     """
-    code         = row[0]
-    signal       = row[23]
-    risk         = row[22]
-    accel_label  = row[24] if len(row) > 24 else ""
-    chip_lbl     = row[26]
-    health       = row[30]   # ★ v11.37 修正：融資健康度應為 row[30]（原本誤讀 row[29]=融券餘額，導致 _score_margin() dict查表永遠對不到、這25分一直是0分）
-    vr_raw = row[31] if len(row) > 31 else None   # ★ v11.37 修正：量比應為 row[31]（原本誤讀 row[30]=融資健康度字串，導致 float() 轉換失敗、量比分數一直是 None）
-    tdcc_raw     = row[32] if len(row) > 32 else ""
-    short_trend  = row[33] if len(row) > 33 else ""
-    today_amount = row[37] if len(row) > 37 else 0
-    margin_trend = row[39] if len(row) > 39 else ""   # ★ v11.29 [39]
+def score_stock_relaxed(row, dampen=1.0):
+    """
+    ★ v11.21 觀察組用：放鬆過濾條件的評分版本。
+    取消：出貨風險🔴過濾、現價>400過濾。
+    保留：ETF過濾、今日賣超過濾、consec==0過濾。
+    評分邏輯與 score_stock 相同（包含動能分）。
+    ★ v11.35 dampen：同 score_stock，大盤警訊🟡/🔴時降權矩陣分數。
+    ★ v11.46 改用 ANALYSIS_IDX/_ana_cell 具名讀取，同 score_stock。
+    """
+    code         = _ana_cell(row, "代號")
+    signal       = _ana_cell(row, "訊號")
+    risk         = _ana_cell(row, "出貨風險")
+    accel_label  = _ana_cell(row, "買超加速度")
+    chip_lbl     = _ana_cell(row, "籌碼集中度評級")
+    health       = _ana_cell(row, "融資健康度")
+    vr_raw       = _ana_cell(row, "量比", default=None)
+    tdcc_raw     = _ana_cell(row, "集保大戶")
+    short_trend  = _ana_cell(row, "融券趨勢")
+    today_amount = _ana_cell(row, "今日買超金額", default=0)
+    margin_trend = _ana_cell(row, "融資趨勢")
     try:
         today_amount = float(today_amount) if today_amount else 0
     except (ValueError, TypeError):
@@ -3340,14 +3421,14 @@ def score_stock_relaxed(row, dampen=1.0):
     # 不過濾出貨風險🔴、不過濾現價>400、不過濾漲幅>8%
 
     consec = max(
-        int(row[3])  if str(row[3]).isdigit()  else 0,
-        int(row[8])  if str(row[8]).isdigit()  else 0,
-        int(row[14]) if str(row[14]).isdigit() else 0,
+        int(_ana_cell(row, "外資連續天數"))   if str(_ana_cell(row, "外資連續天數")).isdigit()   else 0,
+        int(_ana_cell(row, "投信連續天數"))   if str(_ana_cell(row, "投信連續天數")).isdigit()   else 0,
+        int(_ana_cell(row, "自營商連續天數")) if str(_ana_cell(row, "自營商連續天數")).isdigit() else 0,
     )
     if consec == 0: return None
 
     try:
-        chg_val = float(str(row[20]).replace("%", "").replace("+", "").strip())
+        chg_val = float(str(_ana_cell(row, "當日漲跌%")).replace("%", "").replace("+", "").strip())
     except (ValueError, TypeError):
         chg_val = 0.0
 
@@ -3403,13 +3484,14 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
     # ★ v11.21 振幅標記輔助
     def _amp_label(row):
         try:
-            amp = float(row[38]) if len(row) > 38 and row[38] != "" else 0.0
+            _amp_raw = _ana_cell(row, "振幅%")
+            amp = float(_amp_raw) if _amp_raw != "" else 0.0
         except (ValueError, TypeError):
             amp = 0.0
         return f"⚡{amp:.1f}%" if amp >= 5.0 else (f"{amp:.1f}%" if amp > 0 else "")
 
     # ★ v11.26 重大訊息：預載近3天命中代號
-    _all_codes = {row[0] for row in all_rows}
+    _all_codes = {_ana_cell(row, "代號") for row in all_rows}
     try:
         _news_map = load_news_for_codes(ss, _all_codes, date_str, days=3)
     except Exception:
@@ -3419,21 +3501,20 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
     scored = []
     watch_scored = []   # ★ v11.21 觀察組（放鬆限制）
     for row in all_rows:
-        code     = row[0]
-        name     = row[1]
+        code     = _ana_cell(row, "代號")
+        name     = _ana_cell(row, "股票名稱")
         consec   = max(
-            int(row[3])  if str(row[3]).isdigit()  else 0,
-            int(row[8])  if str(row[8]).isdigit()  else 0,
-            int(row[14]) if str(row[14]).isdigit() else 0,
+            int(_ana_cell(row, "外資連續天數"))   if str(_ana_cell(row, "外資連續天數")).isdigit()   else 0,
+            int(_ana_cell(row, "投信連續天數"))   if str(_ana_cell(row, "投信連續天數")).isdigit()   else 0,
+            int(_ana_cell(row, "自營商連續天數")) if str(_ana_cell(row, "自營商連續天數")).isdigit() else 0,
         )
-        d_consec = int(row[14]) if str(row[14]).isdigit() else 0
-        chip_pct = row[25]   # ★ v11.37 修正：原本誤讀 row[24]（買超加速度），籌碼集中度% 應為 row[25]
-        chip_lbl = row[26]   # ★ v11.37 修正：原本誤讀 row[25]（籌碼集中度%數值），評級應為 row[26]
-        risk     = row[22]
-        health   = row[30]  # ★ v11.43 修正：原本誤讀 row[28]（融資增減(張)，數值），融資健康度應為 row[30]（文字標籤），
-                             #   導致「明日關注」「推薦成效」「推薦歷史」融資健康度欄位長期存成原始張數而非✅/🟡/⚠️/🔴標籤
-        close    = row[19]
-        chg_pct  = row[20]
+        d_consec = int(_ana_cell(row, "自營商連續天數")) if str(_ana_cell(row, "自營商連續天數")).isdigit() else 0
+        chip_pct = _ana_cell(row, "籌碼集中度%")
+        chip_lbl = _ana_cell(row, "籌碼集中度評級")
+        risk     = _ana_cell(row, "出貨風險")
+        health   = _ana_cell(row, "融資健康度")
+        close    = _ana_cell(row, "現價")
+        chg_pct  = _ana_cell(row, "當日漲跌%")
         dealer   = _dealer_label(d_consec)
         # ★ v11.26 重大訊息標記
         news_tags = _news_map.get(code, [])
@@ -3443,44 +3524,56 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
             dealer = (dealer + " 📢利空").strip()
         amp_lbl  = _amp_label(row)
         risk_disp = f"{risk} ⚠️" if risk == "🔴 高" else risk
-        # ★ v11.41/v11.42 推薦買進價位：法人加權成本價[40] + 5日均線[41]
-        cost_wavg = row[40] if len(row) > 40 else ""
-        ma5_value = row[41] if len(row) > 41 else ""
+        # ★ v11.41/v11.42 推薦買進價位：法人加權成本價 + 5日均線
+        cost_wavg = _ana_cell(row, "法人加權成本價")
+        ma5_value = _ana_cell(row, "5日均線價")
         buy_label, buy_low, buy_high = _buy_price_info(cost_wavg, ma5_value, close)
-        # ★ v11.45 量比[31]/融券趨勢[33]/融資趨勢[39]：三者都已是評分公式的一部分，
+        # ★ v11.45 量比/融券趨勢/融資趨勢：三者都已是評分公式的一部分，
         #   過去只算分沒往下傳給「明日關注」，這裡補上，backtest.py 才有辦法接進去開切面（T39）
-        vol_ratio     = row[31] if len(row) > 31 else ""
-        short_trend   = row[33] if len(row) > 33 else ""
-        margin_trend  = row[39] if len(row) > 39 else ""
+        vol_ratio     = _ana_cell(row, "量比")
+        short_trend   = _ana_cell(row, "融券趨勢")
+        margin_trend  = _ana_cell(row, "融資趨勢")
 
         s = score_stock(row, dampen=_score_dampen)
         if s is not None:
-            # ★ v11.37 修正：原本 dealer/amp_lbl 順序對調，導致「振幅%」欄顯示自營標記、
-            #   「自營商標記」欄顯示振幅數字；正確順序應為 amp_lbl 在前、dealer 在後
-            scored.append((s, [code, name, s, consec, chip_pct, chip_lbl,
-                               risk_disp, health, close, chg_pct, amp_lbl, dealer,
-                               buy_label, buy_low, buy_high,
-                               vol_ratio, margin_trend, short_trend]))
+            # ★ v11.46 改用 _make_rec_row(dict) 依 REC_IDX 組列，不再靠手動排列的 list 位置
+            #   （原本這裡曾因為 dealer/amp_lbl 手動排列順序對調而寫錯欄位，見 v11.37 修正）
+            r = _make_rec_row({
+                "代號": code, "股票名稱": name, "評分": s, "連續天數": consec,
+                "籌碼集中度%": chip_pct, "籌碼集中度評級": chip_lbl,
+                "出貨風險": risk_disp, "融資健康度": health,
+                "現價": close, "當日漲跌%": chg_pct, "振幅%": amp_lbl, "自營商標記": dealer,
+                "推薦買進價位": buy_label, "買進區間低": buy_low, "買進區間高": buy_high,
+                "量比": vol_ratio, "融資趨勢": margin_trend, "融券趨勢": short_trend,
+            })
+            scored.append((s, r))
 
         # ★ v11.21 觀察組：放鬆過濾（允許風險中/高、允許>400元、允許ETF外其他）
         # 只要 consec >= 1，有集中度資料，今日非賣超，且非ETF
         if (not is_etf_code(code) and consec >= 1 and chip_lbl and
-                "🔴 今日賣超" not in str(row[23]) and s is None):
+                "🔴 今日賣超" not in str(_ana_cell(row, "訊號")) and s is None):
             # s is None 代表被主榜過濾掉的（高風險/高價等），重算放鬆版評分
             sw = score_stock_relaxed(row, dampen=_score_dampen)
             if sw is not None:
-                watch_scored.append((sw, [code, name, sw, consec, chip_pct, chip_lbl,
-                                          risk_disp, health, close, chg_pct, amp_lbl, dealer,
-                                          buy_label, buy_low, buy_high,
-                                          vol_ratio, margin_trend, short_trend]))
+                rw = _make_rec_row({
+                    "代號": code, "股票名稱": name, "評分": sw, "連續天數": consec,
+                    "籌碼集中度%": chip_pct, "籌碼集中度評級": chip_lbl,
+                    "出貨風險": risk_disp, "融資健康度": health,
+                    "現價": close, "當日漲跌%": chg_pct, "振幅%": amp_lbl, "自營商標記": dealer,
+                    "推薦買進價位": buy_label, "買進區間低": buy_low, "買進區間高": buy_high,
+                    "量比": vol_ratio, "融資趨勢": margin_trend, "融券趨勢": short_trend,
+                })
+                watch_scored.append((sw, rw))
 
     # 依評分降冪，取前5；觀察組另取前5（排除已在主榜的代號）
+    # ★ v11.46 r 現在是完整長度的 RECOMMEND_HEADERS 列（含「排名」欄位空位），
+    #   所以取代號要用 REC_IDX["代號"]，不能再假設是 r[0]（r[0] 現在是排名欄）
     scored.sort(key=lambda x: x[0], reverse=True)
     top5 = scored[:5]
-    top5_codes = {r[0] for _, r in top5}
+    top5_codes = {r[REC_IDX["代號"]] for _, r in top5}
 
     watch_scored.sort(key=lambda x: x[0], reverse=True)
-    watch5 = [x for x in watch_scored if x[1][0] not in top5_codes][:5]
+    watch5 = [x for x in watch_scored if x[1][REC_IDX["代號"]] not in top5_codes][:5]
 
     n_cols = len(RECOMMEND_HEADERS)
     ws = get_or_create(ss, "明日關注", n_cols)
@@ -3490,12 +3583,14 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
 
     rec_rows = []
     for rank, (score, r) in enumerate(top5, 1):
-        rec_rows.append([rank] + r)
+        r[REC_IDX["排名"]] = rank
+        rec_rows.append(r)
 
     # ★ v11.21 觀察組區塊
     watch_rows = []
     for rank, (score, r) in enumerate(watch5, 1):
-        watch_rows.append([rank] + r)
+        r[REC_IDX["排名"]] = rank
+        watch_rows.append(r)
 
     block = [
         [f"資料日期：{disp} ｜ 明日關注推薦（綜合評分前5名）"] + [""] * (n_cols - 1),
@@ -3507,7 +3602,6 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
     if watch_rows:
         block += [
             [f"── ⚠️ 高風險觀察組（條件放寬，僅供參考）"] + [""] * (n_cols - 1),
-            RECOMMEND_HEADERS,
         ] + watch_rows
 
     prepend_block(ws, block, disp, "資料日期：", n_cols)
@@ -3520,8 +3614,8 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
     except Exception as e:
         print(f"  ⚠️ 警訊 工作表寫入失敗（不影響明日關注）：{e}")
 
-    top5_names = ', '.join(r[1] for _, r in top5)
-    watch_names = ', '.join(r[1] for _, r in watch5)
+    top5_names = ', '.join(r[REC_IDX["股票名稱"]] for _, r in top5)
+    watch_names = ', '.join(r[REC_IDX["股票名稱"]] for _, r in watch5)
     print(f"  ✅ 明日關注 更新完成（Top5：{top5_names}）")
     if watch_names:
         print(f"  ⚠️ 觀察組：{watch_names}")
@@ -3561,18 +3655,18 @@ def _parse_rec_sheet(all_vals, disp_today):
                 if "高風險觀察組" in c0:     # ★ v11.21 觀察組 header
                     group = "觀察組"
                     i += 1
-                    if i < len(all_vals) and all_vals[i] and all_vals[i][0] == "排名":
-                        i += 1
                     continue
                 if c0.startswith("── "):     # 其他分隔行跳過
                     i += 1
                     continue
-                if len(row) >= 4 and row[1] and row[1].strip().isdigit():
+                _code_cell = _rec_cell(row, "代號")
+                if len(row) >= 4 and _code_cell and _code_cell.isdigit():
                     try:
-                        close = float(row[9].strip()) if len(row) > 9 and row[9].strip() else 0.0
+                        _close_cell = _rec_cell(row, "現價")
+                        close = float(_close_cell) if _close_cell else 0.0
                     except ValueError:
                         close = 0.0
-                    stocks.append((row[1].strip(), row[2].strip(), row[3].strip(), close, group))
+                    stocks.append((_code_cell, _rec_cell(row, "股票名稱"), _rec_cell(row, "評分"), close, group))
                 i += 1
             if stocks:
                 result[disp] = stocks
@@ -3727,7 +3821,7 @@ def _archive_performance(ss, expired_rows):
 
     new_rows = [
         r for r in expired_rows
-        if (str(r[0]).strip(), str(r[1]).strip()) not in existing_keys
+        if (str(r[PERF_IDX["推薦日"]]).strip(), str(r[PERF_IDX["代號"]]).strip()) not in existing_keys
     ]
 
     if not new_rows:
@@ -3741,7 +3835,7 @@ def _archive_performance(ss, expired_rows):
     full = existing + new_rows
     # ★ v11.36 依推薦日降序排列（新資料在最上面），header 固定在第一列
     header_row, body_rows = full[0], full[1:]
-    body_rows.sort(key=lambda r: r[0] if r else "", reverse=True)
+    body_rows.sort(key=lambda r: r[PERF_IDX["推薦日"]] if r else "", reverse=True)
     full = [header_row] + body_rows
     ws.clear()
     if ws.row_count < len(full) + 10:
@@ -3795,7 +3889,7 @@ def update_performance(ss, date_str, current_prices):
             rows.append(r[:N_COLS])
 
     # ── 步驟1：新增今日5筆（若今日推薦不在列表中）──
-    today_codes_in_rows = {r[1] for r in rows if r[0] == disp_today}
+    today_codes_in_rows = {r[PERF_IDX["代號"]] for r in rows if r[PERF_IDX["推薦日"]] == disp_today}
     today_recs = rec_map.get(disp_today, [])
 
     # 今日推薦在 rec_map 裡的 key 是 disp_today，
@@ -3819,40 +3913,36 @@ def update_performance(ss, date_str, current_prices):
                 if "高風險觀察組" in c0:    # ★ v11.21
                     group = "觀察組"
                     j += 1
-                    if j < len(rec_vals) and rec_vals[j] and rec_vals[j][0] == "排名":
-                        j += 1
                     continue
                 if c0.startswith("── "):
                     j += 1
                     continue
-                if len(r) >= 4 and r[1] and r[1].strip().isdigit():
+                _code_cell = _rec_cell(r, "代號")
+                if len(r) >= 4 and _code_cell and _code_cell.isdigit():
                     try:
-                        close = float(r[9].strip()) if len(r) > 9 and r[9].strip() else 0.0
+                        _close_cell = _rec_cell(r, "現價")
+                        close = float(_close_cell) if _close_cell else 0.0
                     except ValueError:
                         close = 0.0
-                    risk          = r[7].strip() if len(r) > 7 else ""
-                    margin_health = r[8].strip() if len(r) > 8 else ""
-                    # ★ v11.42 推薦買進價位（文字+低+高），index 13/14/15，對應 RECOMMEND_HEADERS
-                    buy_label = r[13].strip() if len(r) > 13 else ""
-                    buy_low   = r[14].strip() if len(r) > 14 else ""
-                    buy_high  = r[15].strip() if len(r) > 15 else ""
-                    # ★ v11.44 連續天數/籌碼集中度%/籌碼集中度評級/振幅%/自營商標記，
-                    #   index 4/5/6/11/12，對應 RECOMMEND_HEADERS——直接抄真值供回測用，不必重建
-                    consec   = r[4].strip()  if len(r) > 4  else ""
-                    chip_pct = r[5].strip()  if len(r) > 5  else ""
-                    chip_lbl = r[6].strip()  if len(r) > 6  else ""
-                    amp      = r[11].strip() if len(r) > 11 else ""
-                    dealer   = r[12].strip() if len(r) > 12 else ""
-                    # ★ v11.45 量比/融資趨勢/融券趨勢，index 16/17/18，對應 RECOMMEND_HEADERS（T39）
-                    vol_ratio    = r[16].strip() if len(r) > 16 else ""
-                    margin_trend = r[17].strip() if len(r) > 17 else ""
-                    short_trend  = r[18].strip() if len(r) > 18 else ""
-                    today_stocks.append((r[1].strip(), r[2].strip(), r[3].strip(), close, group, risk, margin_health,
+                    # ★ v11.46 全部改用 REC_IDX/_rec_cell 具名讀取，不再寫死 r[7]/r[9]/r[13]...等 index
+                    #   （原本這裡的 index 全靠人工對照 RECOMMEND_HEADERS 數，改順序或漏改都容易出錯）
+                    risk          = _rec_cell(r, "出貨風險")
+                    margin_health = _rec_cell(r, "融資健康度")
+                    buy_label = _rec_cell(r, "推薦買進價位")
+                    buy_low   = _rec_cell(r, "買進區間低")
+                    buy_high  = _rec_cell(r, "買進區間高")
+                    consec   = _rec_cell(r, "連續天數")
+                    chip_pct = _rec_cell(r, "籌碼集中度%")
+                    chip_lbl = _rec_cell(r, "籌碼集中度評級")
+                    amp      = _rec_cell(r, "振幅%")
+                    dealer   = _rec_cell(r, "自營商標記")
+                    vol_ratio    = _rec_cell(r, "量比")
+                    margin_trend = _rec_cell(r, "融資趨勢")
+                    short_trend  = _rec_cell(r, "融券趨勢")
+                    today_stocks.append((_code_cell, _rec_cell(r, "股票名稱"), _rec_cell(r, "評分"), close, group, risk, margin_health,
                                           buy_label, buy_low, buy_high,
                                           consec, chip_pct, chip_lbl, amp, dealer,
                                           vol_ratio, margin_trend, short_trend))
-                    # ★ v11.23 出貨風險/融資健康度；v11.42 買進價位；v11.44 連續天數/籌碼集中度/振幅/自營商標記；
-                    #   v11.45 量比/融資趨勢/融券趨勢
                 j += 1
             break
 
@@ -3861,35 +3951,32 @@ def update_performance(ss, date_str, current_prices):
          consec, chip_pct, chip_lbl, amp, dealer,
          vol_ratio, margin_trend, short_trend) in today_stocks:
         if code not in today_codes_in_rows:
-            new_rows.append([disp_today, code, name, score,
-                             base_close if base_close > 0 else "",
-                             "", "", "", "", "", group,
-                             risk, margin_health,
-                             buy_label, buy_low, buy_high,
-                             consec, chip_pct, chip_lbl, amp, dealer,
-                             vol_ratio, margin_trend, short_trend])
-            # ★ v11.23 出貨風險/融資健康度；v11.42 買進價位；v11.44 連續天數/籌碼集中度/振幅/自營商標記；
-            #   v11.45 量比/融資趨勢/融券趨勢
+            # ★ v11.46 改用 _make_perf_row(dict) 依 PERF_IDX 組列，T+1~T+5 欄留空，步驟2再依交易日填入
+            new_rows.append(_make_perf_row({
+                "推薦日": disp_today, "代號": code, "股票名稱": name, "推薦評分": score,
+                "推薦收盤": base_close if base_close > 0 else "",
+                "組別": group, "出貨風險": risk, "融資健康度": margin_health,
+                "建議買進價位": buy_label, "建議買進低": buy_low, "建議買進高": buy_high,
+                "連續天數": consec, "籌碼集中度%": chip_pct, "籌碼集中度評級": chip_lbl,
+                "振幅%": amp, "自營商標記": dealer,
+                "量比": vol_ratio, "融資趨勢": margin_trend, "融券趨勢": short_trend,
+            }))
 
     rows = new_rows + rows
 
     # ── 年度假日預載（避免迴圈內重複查詢）★ v11.25 ──
     from datetime import datetime as _dt
-    _years = {int(r[0][:4]) for r in rows if r and r[0] and r[0][:4].isdigit()}
+    _years = {int(r[PERF_IDX["推薦日"]][:4]) for r in rows if r and r[PERF_IDX["推薦日"]] and r[PERF_IDX["推薦日"]][:4].isdigit()}
     for _y in _years:
         ensure_holidays_loaded(_y)
 
     # ── 步驟2：填入今日收盤到 T+1 / T+2 / T+3 / T+4 / T+5 欄 ──
-    # col index: 推薦日[0] 代號[1] 名稱[2] 評分[3]
-    #            推薦收盤[4] T+1[5] T+2[6] T+3[7] T+4[8] T+5[9]
-    #            組別[10] 出貨風險[11] 融資健康度[12]
-    #            建議買進價位[13] 建議買進低[14] 建議買進高[15]   ★ v11.42
-    #            連續天數[16] 籌碼集中度%[17] 籌碼集中度評級[18] 振幅%[19] 自營商標記[20]   ★ v11.44
-    #            量比[21] 融資趨勢[22] 融券趨勢[23]   ★ v11.45
+    # ★ v11.46 欄位 index 全部改由 PERF_IDX 對照 PERFORMANCE_HEADERS 取得，不再手動寫死/註解對照
+    _t_plus_headers = ["T+1收盤", "T+2收盤", "T+3收盤", "T+4收盤", "T+5收盤"]
     for r in rows:
-        rec_disp   = r[0]
-        code       = r[1]
-        base_close_raw = r[4]
+        rec_disp   = r[PERF_IDX["推薦日"]]
+        code       = r[PERF_IDX["代號"]]
+        base_close_raw = r[PERF_IDX["推薦收盤"]]
         try:
             base_close = float(str(base_close_raw)) if base_close_raw != "" else 0.0
         except ValueError:
@@ -3897,8 +3984,9 @@ def update_performance(ss, date_str, current_prices):
 
         _, today_close, _, _, _ = current_prices.get(code, (0.0, 0.0, 0, "N/A", None))
 
-        for slot, col_idx in [(1, 5), (2, 6), (3, 7), (4, 8), (5, 9)]:
+        for slot, t_header in enumerate(_t_plus_headers, 1):
             if _n_trading_days_after(rec_disp, slot) == disp_today:
+                col_idx = PERF_IDX[t_header]
                 if r[col_idx] == "":   # 尚未填入才寫
                     r[col_idx] = _fmt_close(today_close, base_close)
                 break
@@ -3913,8 +4001,8 @@ def update_performance(ss, date_str, current_prices):
         except Exception:
             return False
 
-    expired = [r for r in rows if _is_expired(r[0])]
-    rows    = [r for r in rows if not _is_expired(r[0])]
+    expired = [r for r in rows if _is_expired(r[PERF_IDX["推薦日"]])]
+    rows    = [r for r in rows if not _is_expired(r[PERF_IDX["推薦日"]])]
 
     # T+3 填完的筆搬入歷史工作表
     if expired:

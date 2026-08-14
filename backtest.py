@@ -164,6 +164,29 @@ def get_or_create(ss, name, cols=10):
         return ss.add_worksheet(title=name, rows=500, cols=cols)
 
 
+# ── 「推薦成效／推薦歷史」欄位對照 ──────────────────────────────
+# ★ v1.6 backtest.py 是獨立腳本（不 import fetch_and_update.py），
+#   所以這裡自己保留一份欄名順序，必須跟 fetch_and_update.py 的
+#   PERFORMANCE_HEADERS 手動保持一致（兩邊改動時記得互相對照）。
+PERFORMANCE_HEADERS = [
+    "推薦日", "代號", "股票名稱", "推薦評分",
+    "推薦收盤", "T+1收盤", "T+2收盤", "T+3收盤", "T+4收盤", "T+5收盤",
+    "組別", "出貨風險", "融資健康度",
+    "建議買進價位", "建議買進低", "建議買進高",
+    "連續天數", "籌碼集中度%", "籌碼集中度評級", "振幅%", "自營商標記",
+    "量比", "融資趨勢", "融券趨勢",
+]
+PERF_IDX = {name: i for i, name in enumerate(PERFORMANCE_HEADERS)}
+
+
+def _perf_cell(row, key, default=""):
+    """安全讀取「推薦成效／推薦歷史」列的某一欄（依 PERF_IDX 對照，越界或空值回傳 default）。"""
+    idx = PERF_IDX[key]
+    if len(row) > idx and row[idx] not in (None, ""):
+        return str(row[idx]).strip()
+    return default
+
+
 # ── 資料讀取 ───────────────────────────────────────────────────
 
 def load_perf_history(ss):
@@ -187,41 +210,46 @@ def load_perf_history(ss):
         try: return float(s)
         except: return None
 
+    def _fk(row, key):
+        """數值欄：依 PERF_IDX 取值後轉 float（取不到回傳 None）。"""
+        idx = PERF_IDX[key]
+        return _f(row[idx]) if len(row) > idx else None
+
     result = []
     date_pat = re.compile(r"^\d{4}/\d{2}/\d{2}$")
     for row in rows[1:]:
         if not row or not date_pat.match(str(row[0]).strip()):
             continue
         result.append({
-            "rec_date":     row[0].strip(),
-            "code":         row[1].strip() if len(row) > 1 else "",
-            "name":         row[2].strip() if len(row) > 2 else "",
-            "score":        _f(row[3])     if len(row) > 3 else None,
-            "base_close":   _f(row[4])     if len(row) > 4 else None,
-            "t1":           _f(row[5])     if len(row) > 5 else None,
-            "t2":           _f(row[6])     if len(row) > 6 else None,
-            "t3":           _f(row[7])     if len(row) > 7 else None,
-            "t4":           _f(row[8])     if len(row) > 8 else None,
-            "t5":           _f(row[9])     if len(row) > 9 else None,
-            "group":        row[10].strip() if len(row) > 10 else "",
-            "risk":         row[11].strip() if len(row) > 11 else "",   # ★ v11.23
-            "margin_health":row[12].strip() if len(row) > 12 else "", # ★ v11.23
+            "rec_date":     _perf_cell(row, "推薦日"),
+            "code":         _perf_cell(row, "代號"),
+            "name":         _perf_cell(row, "股票名稱"),
+            "score":        _fk(row, "推薦評分"),
+            "base_close":   _fk(row, "推薦收盤"),
+            "t1":           _fk(row, "T+1收盤"),
+            "t2":           _fk(row, "T+2收盤"),
+            "t3":           _fk(row, "T+3收盤"),
+            "t4":           _fk(row, "T+4收盤"),
+            "t5":           _fk(row, "T+5收盤"),
+            "group":        _perf_cell(row, "組別"),
+            "risk":         _perf_cell(row, "出貨風險"),          # ★ v11.23
+            "margin_health":_perf_cell(row, "融資健康度"),        # ★ v11.23
             # ★ v1.3 對應 fetch_and_update.py v11.42 新增的三欄（法人成本價／5日均線組成的買進參考）
-            "buy_label":    row[13].strip() if len(row) > 13 else "",
-            "buy_low":      _f(row[14])     if len(row) > 14 else None,
-            "buy_high":     _f(row[15])     if len(row) > 15 else None,
+            "buy_label":    _perf_cell(row, "建議買進價位"),
+            "buy_low":      _fk(row, "建議買進低"),
+            "buy_high":     _fk(row, "建議買進高"),
             # ★ v1.4 對應 fetch_and_update.py v11.44 新增的五欄：推薦當日的真值（不再由 backtest 自己重建近似值）
             # v11.44 之前封存的舊資料沒有這幾欄，會是空字串，_rebuild_features() 會 fallback 到舊的重建邏輯
-            "consec_real":   row[16].strip() if len(row) > 16 else "",
-            "chip_pct_real": row[17].strip() if len(row) > 17 else "",
-            "chip_lbl_real": row[18].strip() if len(row) > 18 else "",
-            "amp":           row[19].strip() if len(row) > 19 else "",
-            "dealer":        row[20].strip() if len(row) > 20 else "",
+            "consec_real":   _perf_cell(row, "連續天數"),
+            "chip_pct_real": _perf_cell(row, "籌碼集中度%"),
+            "chip_lbl_real": _perf_cell(row, "籌碼集中度評級"),
+            "amp":           _perf_cell(row, "振幅%"),
+            "dealer":        _perf_cell(row, "自營商標記"),
             # ★ v1.5 對應 fetch_and_update.py v11.45 新增的三欄：量比/融資趨勢/融券趨勢（T39）
             # v11.45 之前封存的舊資料沒有這幾欄，會是空字串
-            "vol_ratio_real":    row[21].strip() if len(row) > 21 else "",
-            "margin_trend_real": row[22].strip() if len(row) > 22 else "",
-            "short_trend_real":  row[23].strip() if len(row) > 23 else "",
+            "vol_ratio_real":    _perf_cell(row, "量比"),
+            "margin_trend_real": _perf_cell(row, "融資趨勢"),
+            "short_trend_real":  _perf_cell(row, "融券趨勢"),
         })
     print(f"  ✅ 推薦歷史讀取 {len(result)} 筆")
     return result
