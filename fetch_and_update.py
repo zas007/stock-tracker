@@ -19,7 +19,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.45"  # ← 每次 commit 只改這裡
+VERSION = "v11.47"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -57,6 +57,10 @@ try:
     })
     # ★ v11.35 情境式降權係數
     ALERT_DAMPEN_FACTOR = getattr(_cfg, "ALERT_DAMPEN_FACTOR", {"red": 0.5, "yellow": 0.75, "green": 1.0})
+    # ★ v11.47 佔股本比重評分門檻（K21：連續買超累計張數 佔 集保總股數 比重，單位：%）
+    SHARES_PCT_HIGH = getattr(_cfg, "SHARES_PCT_HIGH", 3.0)
+    SHARES_PCT_MID  = getattr(_cfg, "SHARES_PCT_MID", 1.5)
+    SHARES_PCT_LOW  = getattr(_cfg, "SHARES_PCT_LOW", 0.5)
     print("✅ 已載入 config.py")
 except ImportError:
     print("⚠️ 找不到 config.py，使用主程式內建預設值")
@@ -80,6 +84,9 @@ except ImportError:
         "green":  None,
     }
     ALERT_DAMPEN_FACTOR = {"red": 0.5, "yellow": 0.75, "green": 1.0}
+    SHARES_PCT_HIGH = 3.0
+    SHARES_PCT_MID  = 1.5
+    SHARES_PCT_LOW  = 0.5
 
 # ═══════════════════════════════════════════════
 # ★ 固定系統設定
@@ -604,7 +611,10 @@ def fetch_tdcc_data(codes):
     CSV 欄位：資料日期, 證券代號, 持股分級(1~15), 人數, 股數, 占集保庫存數比例%
     大戶定義：持股分級 >= 13（持股 50,000 股 / 50 張以上）
     weekly_chg：與快取舊值比較（呼叫端計算），此函式回傳 weekly_chg=0.0 佔位。
-    回傳 dict：{code: (big_pct: float, weekly_chg: float, tdcc_date: str)}
+    ★ v11.47 額外回傳 total_shares：該股集保庫存總股數（全部級距加總），
+      台股絕大多數股票幾乎全數集中保管，可直接當作「股本」的估計值，
+      供「佔股本比重%」計算使用，不需另外打股本 API。
+    回傳 dict：{code: (big_pct: float, weekly_chg: float, tdcc_date: str, total_shares: int)}
     """
     import urllib.request
     import csv
@@ -660,7 +670,7 @@ def fetch_tdcc_data(codes):
             continue
         big = sum(v for k, v in level_map.items() if k >= BIG_LEVEL)
         big_pct = round(big / total * 100, 2)
-        result[code] = (big_pct, 0.0, tdcc_date)  # weekly_chg 由 fetch_tdcc_if_needed 補算
+        result[code] = (big_pct, 0.0, tdcc_date, total)  # weekly_chg 由 fetch_tdcc_if_needed 補算，total=股本估計值(股)
 
     print(f"  📊 集保 CSV 解析完成（日期：{tdcc_date}，命中 {len(result)}/{len(codes)} 支）")
     return result
@@ -668,7 +678,9 @@ def fetch_tdcc_data(codes):
 
 def load_tdcc_cache(ss):
     """
-    讀取「集保快取」工作表，回傳 dict：{code: (big_pct, weekly_chg, tdcc_date)}
+    讀取「集保快取」工作表，回傳 dict：{code: (big_pct, weekly_chg, tdcc_date, total_shares)}
+    ★ v11.47 新增第5欄「總股數」（股本估計值，供佔股本比重使用）。
+      相容舊快取（只有4欄、沒有總股數）：total_shares 補 0（代表未知，呼叫端會跳過該欄計算）。
     """
     try:
         ws = ss.worksheet("集保快取")
@@ -678,10 +690,12 @@ def load_tdcc_cache(ss):
             if len(row) < 4:
                 continue
             code, big_pct, weekly_chg, tdcc_date = row[0], row[1], row[2], row[3]
+            total_shares_str = row[4] if len(row) >= 5 else ""
             if not code:
                 continue
             try:
-                result[code] = (float(big_pct), float(weekly_chg), tdcc_date)
+                total_shares = int(float(total_shares_str)) if total_shares_str else 0
+                result[code] = (float(big_pct), float(weekly_chg), tdcc_date, total_shares)
             except (ValueError, TypeError):
                 continue
         return result
@@ -699,10 +713,10 @@ def update_tdcc_cache(ss, codes, new_data):
     existing = load_tdcc_cache(ss)
     merged = dict(existing)
     merged.update(new_data)
-    rows = [["代號", "大戶%", "週變化", "集保日期"]]
-    for code, (big_pct, weekly_chg, tdcc_date) in sorted(merged.items()):
-        rows.append([code, big_pct, weekly_chg, tdcc_date])
-    ws = get_or_create(ss, "集保快取", cols=4)
+    rows = [["代號", "大戶%", "週變化", "集保日期", "總股數"]]   # ★ v11.47 新增總股數欄
+    for code, (big_pct, weekly_chg, tdcc_date, total_shares) in sorted(merged.items()):
+        rows.append([code, big_pct, weekly_chg, tdcc_date, total_shares])
+    ws = get_or_create(ss, "集保快取", cols=5)
     ws.clear()
     ws.update(range_name="A1", values=rows)
     print(f"  💾 集保快取 更新 {len(new_data)} 筆（共 {len(merged)} 筆）")
@@ -713,7 +727,7 @@ def fetch_tdcc_if_needed(ss, codes):
     """
     比對快取最新集保日期，有新資料才下載 CSV。
     weekly_chg 由本函式計算（新 big_pct - 快取舊 big_pct）。
-    回傳 dict：{code: (big_pct, weekly_chg, tdcc_date)}（含快取舊值）
+    回傳 dict：{code: (big_pct, weekly_chg, tdcc_date, total_shares)}（含快取舊值，★v11.47 新增 total_shares）
     """
     existing = load_tdcc_cache(ss)
     cached_dates = [v[2] for v in existing.values() if v[2]]
@@ -734,10 +748,10 @@ def fetch_tdcc_if_needed(ss, codes):
 
     # 補算 weekly_chg：新 big_pct - 快取舊 big_pct
     for code in new_data:
-        new_pct, _, date = new_data[code]
+        new_pct, _, date, total_shares = new_data[code]
         old_pct = existing[code][0] if code in existing else new_pct
         weekly_chg = round(new_pct - old_pct, 2)
-        new_data[code] = (new_pct, weekly_chg, date)
+        new_data[code] = (new_pct, weekly_chg, date, total_shares)
 
     print(f"  📡 集保有新資料（{latest_tdcc}），更新快取...")
     merged = update_tdcc_cache(ss, codes, new_data)
@@ -2235,6 +2249,8 @@ def _apply_banner_merges(ws, n_cols):
 # ★ v11.34 為「明日關注」表中所有「⚠️ 大盤警訊：」列上色。
 # 因為此表用 prepend 方式每天把舊資料往下推，儲存格底色不會跟著內容移動，
 # 所以每次寫入後都要重新掃描全表、依當時內容重新上色（等於每次都是重畫，而不是只畫最上面新增的那一列）。
+# ★ v11.47 只有「最新一筆」（掃描到的第一筆，因為 prepend 最新永遠在最上面）依等級上色，
+# 其餘歷史列一律清成白底 —— 避免每天新增一筆警訊列、底色跟著越堆越多，整張表越來越花。
 def _apply_alert_colors(ws, n_cols):
     try:
         rows = ws.get_all_values()
@@ -2245,18 +2261,23 @@ def _apply_alert_colors(ws, n_cols):
     col_letter_end = chr(ord("A") + n_cols - 1)
     requests_by_color = {}   # color_key(str) -> [row_num, ...]
     white = {"red": 1, "green": 1, "blue": 1}
+    found_latest = False   # ★ v11.47 只有掃到的第一筆（最新）才上色，其餘清白底
 
     for i, row in enumerate(rows, start=1):
         cell = row[0] if row else ""
         if not cell.startswith("⚠️ 大盤警訊："):
             continue
-        if "🔴" in cell:
-            level = "red"
-        elif "🟡" in cell:
-            level = "yellow"
+        if not found_latest:
+            if "🔴" in cell:
+                level = "red"
+            elif "🟡" in cell:
+                level = "yellow"
+            else:
+                level = "green"
+            color = ALERT_COLOR.get(level) or white
+            found_latest = True
         else:
-            level = "green"
-        color = ALERT_COLOR.get(level) or white
+            color = white   # ★ v11.47 歷史舊警訊列一律清除底色
         key = json.dumps(color, sort_keys=True)
         requests_by_color.setdefault(key, []).append(i)
 
@@ -2440,6 +2461,41 @@ def _consecutive_days(entries, code, all_dates, net_by_date):
     return count
 
 
+def _consec_net_sum(code, all_dates, net_by_date, consec):
+    """
+    ★ v11.47 加總「目前連續買超天數」(consec，由 _consecutive_days 算出的三法人最大連續天數)
+    這段期間內的三法人合計淨買超張數，供「佔股本比重%」的分子使用。
+    做法：從 all_dates 尾端（最新一天）往回取 consec 天的 net_by_date（三法人合計）加總。
+    consec 本身就是靠同一份 net_by_date 從尾端連續正值算出來的，這裡直接複用同一個窗口，
+    不需要重新判斷正負號。
+    """
+    if consec <= 0:
+        return 0
+    daily_net = net_by_date.get(code, {})
+    total = 0
+    taken = 0
+    for i in range(len(all_dates) - 1, -1, -1):
+        if taken >= consec:
+            break
+        total += daily_net.get(all_dates[i], 0)
+        taken += 1
+    return total
+
+
+def calc_shares_pct(consec_net_lots, total_shares):
+    """
+    ★ v11.47 佔股本比重% = 連續買超期間累計張數 × 1000股 / 集保總股數（股本估計值） × 100
+    total_shares 來源：集保庫存總股數（TDCC，見 fetch_tdcc_data），每週更新一次。
+    資料不足（total_shares 未知、或累計張數 <=0）時回傳 ""，不強行計算。
+    """
+    if not total_shares or total_shares <= 0:
+        return ""
+    if not consec_net_lots or consec_net_lots <= 0:
+        return ""
+    pct = consec_net_lots * 1000 / total_shares * 100
+    return round(pct, 3)
+
+
 ANALYSIS_HEADERS = [
     "代號","股票名稱",
     "外資累計天數","外資連續天數","外資買超(張)","外資加權均價","外資趨勢",
@@ -2459,6 +2515,8 @@ ANALYSIS_HEADERS = [
     "融資趨勢",     # ★ v11.29 [39]
     "法人加權成本價", # ★ v11.41 [40] 三大法人合計加權成本價（FIFO扣減後剩餘部位）
     "5日均線價",      # ★ v11.41 [41] 5日均線數值
+    "連續買超累計張數", # ★ v11.47 [42] 目前連續買超天數內三法人合計淨買超張數
+    "佔股本比重%",      # ★ v11.47 [43] 連續買超累計張數 佔 集保總股數(股本估計值) 比重
 ]
 
 # ★ v11.46 由 ANALYSIS_HEADERS 自動產生欄名→index 對照表（單一真相來源），
@@ -2563,10 +2621,11 @@ def build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net
     # ★ v11.41 5日均線數值（[34]的5日線欄只存文字標記，這裡另外存數字供「推薦買進價位」使用）
     ma5_value = (ma5_map or {}).get(code, ("", "", ""))[1] if ma5_map else ""
 
-    # ★ v11.15 集保大戶%
+    # ★ v11.15 集保大戶%（★ v11.47 tdcc_entry 第4個元素改為 total_shares，供佔股本比重使用）
     tdcc_entry    = (tdcc_map or {}).get(code)
     tdcc_big_pct  = tdcc_entry[0] if tdcc_entry else None
     tdcc_weekly   = tdcc_entry[1] if tdcc_entry else None
+    tdcc_total_shares = tdcc_entry[3] if (tdcc_entry and len(tdcc_entry) >= 4) else None
     if tdcc_big_pct is not None:
         arrow = "↑" if (tdcc_weekly or 0) > 0 else ("↓" if (tdcc_weekly or 0) < 0 else "➡")
         tdcc_label = f"{tdcc_big_pct:.1f}%（{arrow}{abs(tdcc_weekly or 0):.1f}）"
@@ -2575,6 +2634,11 @@ def build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net
 
     # ★ v11.21 振幅%
     amplitude = (amp_map or {}).get(code, "")
+
+    # ★ v11.47 連續買超累計張數 + 佔股本比重%（K21：佔股本比重擴充）
+    max_consec       = max(f_consec, t_consec, d_consec)
+    consec_net_lots  = _consec_net_sum(code, all_dates, net_by_date, max_consec)
+    shares_pct       = calc_shares_pct(consec_net_lots, tdcc_total_shares)
 
     return _make_ana_row({
         "代號": code, "股票名稱": s["name"],
@@ -2601,6 +2665,8 @@ def build_row(s, current_prices, current_margin, sell_hist, disp, all_dates, net
         "融資趨勢": margin_trend,     # ★ v11.29
         "法人加權成本價": all_wavg or "",  # ★ v11.41 三大法人合計加權成本價（FIFO扣減後剩餘部位），供「推薦買進價位」使用
         "5日均線價": ma5_value or "",      # ★ v11.41 供「推薦買進價位」使用
+        "連續買超累計張數": consec_net_lots if consec_net_lots else "",  # ★ v11.47
+        "佔股本比重%": shares_pct,                                        # ★ v11.47
     })
 
 
@@ -2952,6 +3018,7 @@ RECOMMEND_HEADERS = [
     "量比",       # ANALYSIS_HEADERS[31]，今日量÷近10日均量，無燈號分級的原始數值
     "融資趨勢",   # ANALYSIS_HEADERS[39]，近5天融資增減文字標籤（↗大增/增N張／↘大減/減N張／➡持平）
     "融券趨勢",   # ANALYSIS_HEADERS[33]，近期融券餘額連續同向天數文字標籤
+    "佔股本比重%", # ★ v11.47 連續買超累計張數 佔 集保總股數(股本估計值) 比重，已納入評分(0~+8分)
 ]
 
 PERFORMANCE_HEADERS = [
@@ -2977,6 +3044,7 @@ PERFORMANCE_HEADERS = [
     "量比",           # ANALYSIS_HEADERS[31] 原始數值
     "融資趨勢",       # ANALYSIS_HEADERS[39] 文字標籤
     "融券趨勢",       # ANALYSIS_HEADERS[33] 文字標籤
+    "佔股本比重%",    # ★ v11.47 對應 RECOMMEND_HEADERS[19]，供 backtest.py 日後驗證評分效果
 ]
 
 # ★ v11.46 由 RECOMMEND_HEADERS / PERFORMANCE_HEADERS 自動產生欄名→index 對照表，
@@ -3227,6 +3295,30 @@ def _score_tdcc(big_pct, weekly_chg):
     return max(-5, min(base + delta, 5))
 
 
+def _score_shares_pct(pct):
+    """
+    佔股本比重評分（0 ~ +8 分）。★ v11.47（K21：籌碼集中指標擴充）
+    pct: float，連續買超期間累計張數 佔 該股集保總股數(股本估計值) 的比重（%）。
+    用意：籌碼集中度%（買超張數/當日成交量）反映的是「當天買盤有多兇」，
+    但同一天買超金額大的通常是大型股，佔股本比重天生就低；
+    佔股本比重% 換一個基期（股本），衡量「這波連續買超，法人到底吃下了多少籌碼」，
+    跟籌碼集中度%互補，不重複扣分/加分同一件事。
+    資料不足（pct 為 "" 或 None）時回傳 0（中性，不加不扣）。
+    門檻可調：SHARES_PCT_HIGH/MID/LOW（config.py，預設 3.0% / 1.5% / 0.5%）
+    """
+    try:
+        pct = float(pct)
+    except (TypeError, ValueError):
+        return 0
+    if pct >= SHARES_PCT_HIGH:
+        return 8
+    elif pct >= SHARES_PCT_MID:
+        return 5
+    elif pct >= SHARES_PCT_LOW:
+        return 2
+    return 0
+
+
 def _dealer_label(d_consec):
     """自營商連續買超標記"""
     if d_consec >= 5:  return f"🔥 自營{d_consec}天"
@@ -3293,6 +3385,7 @@ def score_stock(row, dampen=1.0):
     today_amount = _ana_cell(row, "今日買超金額", default=0)
     amplitude    = _ana_cell(row, "振幅%")
     margin_trend = _ana_cell(row, "融資趨勢")
+    shares_pct   = _ana_cell(row, "佔股本比重%", default=None)   # ★ v11.47
     try:
         today_amount = float(today_amount) if today_amount else 0
     except (ValueError, TypeError):
@@ -3360,7 +3453,8 @@ def score_stock(row, dampen=1.0):
         _score_tdcc(tdcc_big_pct, tdcc_weekly_chg) +  # ★ v11.15 -5 ~ +5分
         _score_net_amount(today_amount) +      # ★ v11.18 0~8分
         _score_momentum(chg_val) +             # ★ v11.21 -2 ~ +5分
-        _score_margin_trend(margin_trend)      # ★ v11.29 -6 ~ +6分
+        _score_margin_trend(margin_trend) +    # ★ v11.29 -6 ~ +6分
+        _score_shares_pct(shares_pct)          # ★ v11.47 0~+8分（K21：佔股本比重）
     )
     return max(0, min(score, 100))
 
@@ -3393,6 +3487,7 @@ def score_stock_relaxed(row, dampen=1.0):
     short_trend  = _ana_cell(row, "融券趨勢")
     today_amount = _ana_cell(row, "今日買超金額", default=0)
     margin_trend = _ana_cell(row, "融資趨勢")
+    shares_pct   = _ana_cell(row, "佔股本比重%", default=None)   # ★ v11.47
     try:
         today_amount = float(today_amount) if today_amount else 0
     except (ValueError, TypeError):
@@ -3442,7 +3537,8 @@ def score_stock_relaxed(row, dampen=1.0):
         _score_tdcc(tdcc_big_pct, tdcc_weekly_chg) +
         _score_net_amount(today_amount) +
         _score_momentum(chg_val) +
-        _score_margin_trend(margin_trend)      # ★ v11.29
+        _score_margin_trend(margin_trend) +    # ★ v11.29
+        _score_shares_pct(shares_pct)          # ★ v11.47 0~+8分（K21：佔股本比重）
     )
     return max(0, min(score, 100))
 
@@ -3533,6 +3629,7 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
         vol_ratio     = _ana_cell(row, "量比")
         short_trend   = _ana_cell(row, "融券趨勢")
         margin_trend  = _ana_cell(row, "融資趨勢")
+        shares_pct    = _ana_cell(row, "佔股本比重%")   # ★ v11.47
 
         s = score_stock(row, dampen=_score_dampen)
         if s is not None:
@@ -3545,6 +3642,7 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
                 "現價": close, "當日漲跌%": chg_pct, "振幅%": amp_lbl, "自營商標記": dealer,
                 "推薦買進價位": buy_label, "買進區間低": buy_low, "買進區間高": buy_high,
                 "量比": vol_ratio, "融資趨勢": margin_trend, "融券趨勢": short_trend,
+                "佔股本比重%": shares_pct,   # ★ v11.47
             })
             scored.append((s, r))
 
@@ -3562,6 +3660,7 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
                     "現價": close, "當日漲跌%": chg_pct, "振幅%": amp_lbl, "自營商標記": dealer,
                     "推薦買進價位": buy_label, "買進區間低": buy_low, "買進區間高": buy_high,
                     "量比": vol_ratio, "融資趨勢": margin_trend, "融券趨勢": short_trend,
+                    "佔股本比重%": shares_pct,   # ★ v11.47
                 })
                 watch_scored.append((sw, rw))
 
@@ -3939,17 +4038,18 @@ def update_performance(ss, date_str, current_prices):
                     vol_ratio    = _rec_cell(r, "量比")
                     margin_trend = _rec_cell(r, "融資趨勢")
                     short_trend  = _rec_cell(r, "融券趨勢")
+                    shares_pct   = _rec_cell(r, "佔股本比重%")   # ★ v11.47
                     today_stocks.append((_code_cell, _rec_cell(r, "股票名稱"), _rec_cell(r, "評分"), close, group, risk, margin_health,
                                           buy_label, buy_low, buy_high,
                                           consec, chip_pct, chip_lbl, amp, dealer,
-                                          vol_ratio, margin_trend, short_trend))
+                                          vol_ratio, margin_trend, short_trend, shares_pct))
                 j += 1
             break
 
     new_rows = []
     for (code, name, score, base_close, group, risk, margin_health, buy_label, buy_low, buy_high,
          consec, chip_pct, chip_lbl, amp, dealer,
-         vol_ratio, margin_trend, short_trend) in today_stocks:
+         vol_ratio, margin_trend, short_trend, shares_pct) in today_stocks:
         if code not in today_codes_in_rows:
             # ★ v11.46 改用 _make_perf_row(dict) 依 PERF_IDX 組列，T+1~T+5 欄留空，步驟2再依交易日填入
             new_rows.append(_make_perf_row({
@@ -3960,6 +4060,7 @@ def update_performance(ss, date_str, current_prices):
                 "連續天數": consec, "籌碼集中度%": chip_pct, "籌碼集中度評級": chip_lbl,
                 "振幅%": amp, "自營商標記": dealer,
                 "量比": vol_ratio, "融資趨勢": margin_trend, "融券趨勢": short_trend,
+                "佔股本比重%": shares_pct,   # ★ v11.47
             }))
 
     rows = new_rows + rows

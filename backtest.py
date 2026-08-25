@@ -66,6 +66,11 @@ try:
     CHIP_HIGH     = _cfg.CHIP_HIGH
     CHIP_MID      = _cfg.CHIP_MID
     MARGIN_WARN   = _cfg.MARGIN_WARN
+    # ★ v1.7 對應 fetch_and_update.py v11.47（K21）新增的佔股本比重門檻，
+    #   用 getattr 給預設值，避免舊版 config.py（還沒補上這三行）直接噴錯
+    SHARES_PCT_HIGH = getattr(_cfg, "SHARES_PCT_HIGH", 3.0)
+    SHARES_PCT_MID  = getattr(_cfg, "SHARES_PCT_MID", 1.5)
+    SHARES_PCT_LOW  = getattr(_cfg, "SHARES_PCT_LOW", 0.5)
     print("✅ 已載入 config.py")
 except ImportError:
     print("❌ 找不到 config.py，請確認 backtest.py 和 config.py 在同一目錄")
@@ -175,6 +180,7 @@ PERFORMANCE_HEADERS = [
     "建議買進價位", "建議買進低", "建議買進高",
     "連續天數", "籌碼集中度%", "籌碼集中度評級", "振幅%", "自營商標記",
     "量比", "融資趨勢", "融券趨勢",
+    "佔股本比重%",   # ★ v1.7 對應 fetch_and_update.py v11.47（K21）
 ]
 PERF_IDX = {name: i for i, name in enumerate(PERFORMANCE_HEADERS)}
 
@@ -250,6 +256,9 @@ def load_perf_history(ss):
             "vol_ratio_real":    _perf_cell(row, "量比"),
             "margin_trend_real": _perf_cell(row, "融資趨勢"),
             "short_trend_real":  _perf_cell(row, "融券趨勢"),
+            # ★ v1.7 對應 fetch_and_update.py v11.47 新增的一欄：佔股本比重%（K21）
+            # v11.47 之前封存的舊資料沒有這欄，會是空字串
+            "shares_pct_real":   _perf_cell(row, "佔股本比重%"),
         })
     print(f"  ✅ 推薦歷史讀取 {len(result)} 筆")
     return result
@@ -457,6 +466,8 @@ def _rebuild_features(rec, hist_map):
         "vol_ratio":     rec.get("vol_ratio_real", ""),
         "margin_trend":  rec.get("margin_trend_real", ""),
         "short_trend":   rec.get("short_trend_real", ""),
+        # ★ v1.7 佔股本比重%，直接讀真值（無法重建，只有 v11.47 起才有資料，v11.47 前為空字串→切面歸類「未知」）
+        "shares_pct":    rec.get("shares_pct_real", ""),
     }
 
 
@@ -658,6 +669,24 @@ def calc_win_rate_matrix(detail_rows):
     sections.append(("【融券趨勢 × T+1 勝率】",
         _stats(detail_rows, _short_trend_lbl, "t1_pnl")))
 
+    # 切面 19：★ v1.7 佔股本比重% × T+1 勝率（K21，對應 fetch_and_update.py v11.47，
+    #   v11.47 前無資料，歸類「未知」；門檻跟評分公式 _score_shares_pct 的分級一致，
+    #   直接對照就能看出「連續買超吃下越多股本」是否真的跟後續勝率正相關）
+    def _shares_pct_bucket(r):
+        v = str(r.get("shares_pct", "")).strip()
+        if not v:
+            return "未知"
+        try:
+            sp = float(v)
+        except ValueError:
+            return "未知"
+        if sp >= SHARES_PCT_HIGH:  return f"≥{SHARES_PCT_HIGH}%（重倉吃貨）"
+        elif sp >= SHARES_PCT_MID: return f"{SHARES_PCT_MID}~{SHARES_PCT_HIGH}%"
+        elif sp >= SHARES_PCT_LOW: return f"{SHARES_PCT_LOW}~{SHARES_PCT_MID}%"
+        else:                      return f"<{SHARES_PCT_LOW}%"
+    sections.append(("【佔股本比重% × T+1 勝率】",
+        _stats(detail_rows, _shares_pct_bucket, "t1_pnl")))
+
     # 切面 18：★ v1.3 推薦收盤買 vs 建議買進低點買 × T+1~T+5 勝率
     # 直接回答「照建議買進價位買，勝率比照推薦收盤價買高多少%」
     # ★ 對應 fetch_and_update.py v11.42；v11.42 之前累積的推薦成效資料沒有這三欄，
@@ -708,6 +737,7 @@ DETAIL_HEADERS = [
     "建議買進價位", "建議買進低", "建議買進高",   # ★ v1.3
     "T+1漲跌%(建議買進)", "T+2漲跌%(建議買進)", "T+3漲跌%(建議買進)",
     "T+4漲跌%(建議買進)", "T+5漲跌%(建議買進)",   # ★ v1.3
+    "佔股本比重%",   # ★ v1.7 對應 fetch_and_update.py v11.47（K21）
 ]
 
 def _win_label(pnl):
@@ -754,6 +784,7 @@ def write_detail_sheet(ss, detail_rows, dry_run=False):
             r.get("buy_label",""), r.get("buy_low","") or "", r.get("buy_high","") or "",
             r.get("t1_pnl_buy","待補"), r.get("t2_pnl_buy","待補"), r.get("t3_pnl_buy","待補"),
             r.get("t4_pnl_buy","待補"), r.get("t5_pnl_buy","待補"),
+            r.get("shares_pct",""),
         ])
 
     if dry_run:
@@ -1185,6 +1216,7 @@ def _demo_dry_run():
          "consec":8,"consec_source":"真值","chip_pct":25.3,"chip_lbl":"🔵 高度集中","chip_source":"真值",
          "accel_lbl":"🚀 加速","amp":"4.2%","dealer":"⭐連續3天 📢利多",
          "vol_ratio":"2.4","margin_trend":"↗ 大增","short_trend":"回補 3天",
+         "shares_pct":"3.5",
          "base_close":950.0,
          "t1":960.0,"t1_pnl":1.05, "t2":945.0,"t2_pnl":-0.53,
          "t3":970.0,"t3_pnl":2.11, "t4":975.0,"t4_pnl":2.63,
@@ -1194,6 +1226,7 @@ def _demo_dry_run():
          "consec":4,"consec_source":"真值","chip_pct":15.1,"chip_lbl":"🟦 中度集中","chip_source":"真值",
          "accel_lbl":"📈 溫和加速","amp":"1.8%","dealer":"",
          "vol_ratio":"1.3","margin_trend":"➡ 持平","short_trend":"持平",
+         "shares_pct":"1.1",
          "base_close":2500.0,
          "t1":2480.0,"t1_pnl":-0.80, "t2":2530.0,"t2_pnl":1.20,
          "t3":2550.0,"t3_pnl":2.00,  "t4":2540.0,"t4_pnl":1.60,
@@ -1203,6 +1236,7 @@ def _demo_dry_run():
          "consec":3,"consec_source":"重建近似值","chip_pct":11.2,"chip_lbl":"🟦 中度集中","chip_source":"重建近似值",
          "accel_lbl":"➡ 持平","amp":"","dealer":"",
          "vol_ratio":"","margin_trend":"","short_trend":"",
+         "shares_pct":"",
          "base_close":180.0,
          "t1":None,"t1_pnl":None, "t2":None,"t2_pnl":None,
          "t3":None,"t3_pnl":None, "t4":None,"t4_pnl":None,
