@@ -19,7 +19,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.47"  # ← 每次 commit 只改這裡
+VERSION = "v11.48"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -2251,6 +2251,10 @@ def _apply_banner_merges(ws, n_cols):
 # 所以每次寫入後都要重新掃描全表、依當時內容重新上色（等於每次都是重畫，而不是只畫最上面新增的那一列）。
 # ★ v11.47 只有「最新一筆」（掃描到的第一筆，因為 prepend 最新永遠在最上面）依等級上色，
 # 其餘歷史列一律清成白底 —— 避免每天新增一筆警訊列、底色跟著越堆越多，整張表越來越花。
+# ★ v11.48 修正遺漏：舊版只掃描「⚠️ 大盤警訊：」開頭列，「外資大台指淨部位：」這一列
+#   從未被納入清白範圍，若曾經沾到底色（例如舊版邏輯或格式殘留）就永遠不會被自動清掉，
+#   導致舊資料區塊看起來「多一列底色」（見使用者回報截圖：08/25 那組外資部位列殘留粉紅底）。
+#   這裡一併掃描「外資大台指淨部位：」列，一律強制清白（此列本身不代表警訊等級，不應上色）。
 def _apply_alert_colors(ws, n_cols):
     try:
         rows = ws.get_all_values()
@@ -2265,6 +2269,11 @@ def _apply_alert_colors(ws, n_cols):
 
     for i, row in enumerate(rows, start=1):
         cell = row[0] if row else ""
+        if cell.startswith("外資大台指淨部位："):
+            # ★ v11.48 這一列永遠不該帶警訊底色，一律強制清白
+            key = json.dumps(white, sort_keys=True)
+            requests_by_color.setdefault(key, []).append(i)
+            continue
         if not cell.startswith("⚠️ 大盤警訊："):
             continue
         if not found_latest:
@@ -4982,12 +4991,12 @@ def main():
         if key not in selected_keys:
             continue
         if not write_with_retry(name, fn):
-            ans = input("繼續其他工作表？(Y/n): ").strip().lower()
-            if ans == "n":
+            if not _confirm_continue("繼續其他工作表？(Y/n)"):
                 _wait_close(); sys.exit(1)
 
     print(f"\n🎉 完成！")
     print(f"  https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}")
+    _rotate_log()   # ★ v11.48 只有完整跑到這裡（確認成功）才清理舊 log，中途崩潰不會觸發
     _ask_continue("Step 4/5 寫入 Sheets", start_time=_t4)
     _wait_close()
 
@@ -5014,6 +5023,82 @@ def _wait_close(timeout: int = 15) -> None:
     t = threading.Thread(target=_read, daemon=True)
     t.start()
     event.wait(timeout)
+
+
+def _rotate_log(keep_runs: int = 14) -> None:
+    """
+    ★ v11.48 log.txt 自動清理。
+    crontab 用 `>> log.txt 2>&1` 純 append，程式本身從未清過，檔案只會越來越大
+    （2026/08 已累積超過7000行）。這裡以每次執行最先印出的「✅ 已載入 config.py」
+    當作區塊分界，把 log 切成一個個「完整執行區塊」，只保留最近 keep_runs 次，
+    整段留或整段刪，不會砍到一半留下殘缺片段。
+
+    ★ 刻意放在流程「結尾」（main() 跑到🎉完成才會呼叫這裡），而不是「開頭」：
+    只有這次執行已經證明環境/程式/API 都正常，才信任它去動 log 檔案；
+    中途崩潰（像 2026/08/26 18:00 那次 UTF-8 解碼錯誤 + input() EOFError）
+    完全不會走到這裡，崩潰當下的完整紀錄會被保留，直到下一次成功執行才會
+    被納入「最近14次」的範圍一併整理，不會在排查問題時反而先被清掉。
+    """
+    log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "log.txt")
+    if not os.path.exists(log_path):
+        return
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+
+        marker = "✅ 已載入 config.py\n"
+        # 找出每個執行區塊的起始行號
+        start_idxs = [i for i, line in enumerate(lines) if line == marker]
+        if len(start_idxs) <= keep_runs:
+            return   # 執行次數還沒超過保留上限，不用清
+
+        cutoff = start_idxs[-keep_runs]   # 倒數第 keep_runs 次執行的起始行
+        new_lines = lines[cutoff:]
+        removed_runs = len(start_idxs) - keep_runs
+
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.writelines(new_lines)
+        print(f"  🗑️  log.txt 清理完成：移除 {removed_runs} 次舊執行紀錄，"
+              f"保留最近 {keep_runs} 次（{len(lines)} → {len(new_lines)} 行）")
+    except Exception as e:
+        print(f"  ⚠️ log.txt 清理失敗（不影響本次資料寫入）：{e}")
+
+
+def _confirm_continue(prompt: str, timeout: int = 10, default: bool = True) -> bool:
+    """
+    ★ v11.48 取代原本第4985行的裸 input()。
+    背景/cron 執行沒有終端輸入時，input() 收到 EOF 會噴出未捕捉的 Traceback，
+    導致單一工作表寫入失敗就讓整批（含明日關注、推薦成效等後續步驟）全部中止
+    （見 2026/08/26 18:00 log 紀錄）。
+    改用跟 _wait_close/_ask_continue 一樣的 threading 逾時模式：
+    有互動終端時可手動輸入 y/n，無人操作或背景執行時 {timeout} 秒後自動採用 default（預設繼續）。
+    """
+    import sys, threading
+    print(f"{prompt}（{timeout} 秒後自動{'繼續' if default else '中止'}）: ", end="", flush=True)
+    result = []
+    event  = threading.Event()
+
+    def _read():
+        try:
+            val = sys.stdin.readline().strip().lower()
+        except Exception:
+            val = ""
+        result.append(val)
+        event.set()
+
+    t = threading.Thread(target=_read, daemon=True)
+    t.start()
+    triggered = event.wait(timeout)
+
+    if not triggered:
+        print(f"  ⏩ 自動{'繼續' if default else '中止'}。")
+        return default
+    ans = result[0] if result else ""
+    if ans == "n":
+        return False
+    if ans == "y":
+        return True
+    return default
 
 
 def _ask_continue(step_name: str, timeout: int = 5, start_time=None) -> None:
