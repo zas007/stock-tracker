@@ -19,7 +19,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.48"  # ← 每次 commit 只改這裡
+VERSION = "v11.49"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -2205,7 +2205,7 @@ def prepend_block(ws, new_block, disp, date_marker_prefix, sep_cols):
     ws.update(range_name="A1", values=full_data)
 
 
-def _apply_banner_merges(ws, n_cols):
+def _apply_banner_merges(ws, n_cols, max_merge_days=2):
     """
     ★ v11.39 手機版寬度有限，「資料日期」「外資大台指淨部位」「⚠️ 大盤警訊：」
     這幾條橫幅列的文字目前只塞在 A 欄，右側被截斷看不到完整內容。
@@ -2214,6 +2214,15 @@ def _apply_banner_merges(ws, n_cols):
     所以跟 _apply_alert_colors 一樣，每次寫入後都要重新掃描全表：
       1. 先解除目前範圍內所有舊合併（避免殘留在錯位的列上）
       2. 重新比對目前內容，只合併「現在」符合橫幅格式的列
+
+    ★ v11.49 修正兩個問題（使用者回報：明日關注表格排名2~4整列看起來空白，
+      實際是被殘留的舊合併儲存格吃掉，只有沒被舊合併涵蓋到的欄位還看得到值）：
+    1. 「解除舊合併」若失敗（例如 429），過去仍會繼續往下嘗試合併「現在」的橫幅列，
+       但殘留的舊合併範圍還卡在原本（錯位的）列位置上，這次新寫入的資料剛好位移到
+       那個殘留範圍時就會被合併吃掉、顯示空白（資料其實有寫入，只是被合併蓋住）。
+       改成：解除失敗就直接跳過本次重新合併，並印出明顯警示，避免疊加在殘留合併上。
+    2. 只合併「最近 max_merge_days 天」的橫幅列，更舊的歷史區塊不合併
+       （減少每次全表重算/合併的 API 呼叫量，連帶降低觸發 429 的機率）。
     """
     try:
         rows = ws.get_all_values()
@@ -2229,19 +2238,32 @@ def _apply_banner_merges(ws, n_cols):
     try:
         ws.unmerge_cells(f"A1:{col_letter_end}{last_row}")
     except Exception as e:
-        print(f"  ⚠️ 解除舊合併失敗（不影響資料）：{e}")
+        print(f"  ❌ 解除舊合併失敗，本次跳過重新合併（避免新資料位移到殘留合併範圍上而顯示空白）：{e}")
+        print(f"     ⚠️ 請人工檢查「明日關注」工作表是否有殘留的合併儲存格！")
+        return
+
+    # ★ v11.49 只合併最近 max_merge_days 天：找第 (max_merge_days+1) 個「資料日期：」列，
+    #   在它之前（不含）的範圍才合併，更舊的區塊維持不合併
+    date_row_indices = [
+        i for i, row in enumerate(rows, start=1)
+        if row and str(row[0]).startswith("資料日期：")
+    ]
+    if len(date_row_indices) > max_merge_days:
+        merge_limit_row = date_row_indices[max_merge_days] - 1
+    else:
+        merge_limit_row = last_row
 
     banner_prefixes = ("資料日期：", "外資大台指淨部位：", "⚠️ 大盤警訊：")
     merges = [
         {"range": f"A{i}:{col_letter_end}{i}"}
         for i, row in enumerate(rows, start=1)
-        if row and str(row[0]).startswith(banner_prefixes)
+        if i <= merge_limit_row and row and str(row[0]).startswith(banner_prefixes)
     ]
     if not merges:
         return
     try:
         ws.batch_merge(merges)
-        print(f"  ✅ 橫幅列合併 {len(merges)} 列")
+        print(f"  ✅ 橫幅列合併 {len(merges)} 列（僅最近 {max_merge_days} 天）")
     except Exception as e:
         print(f"  ⚠️ 橫幅合併失敗（不影響資料）：{e}")
 
