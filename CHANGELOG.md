@@ -5,6 +5,26 @@ Google Sheets ID：`1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g`
 
 ---
 
+## v11.51 — 2026/09/09
+
+### 修正
+
+- **「推薦歷史」舊資料因 429 被永久覆蓋消失（本次事故）**
+  * 起因：使用者回報「推薦成效」某次寫入失敗，事後發現「推薦歷史」分頁只剩最新一批資料（同一天的幾筆），先前逐日累積的歷史紀錄全部不見
+  * 根因排查：全專案幾乎所有工作表的整表寫回都是「`ws.clear()` 清空 → `ws.update()` 整批寫回」兩步驟。`write_with_retry()` 的重試機制是**整個業務函式重跑**，而不是只重試失敗的那一次 API 呼叫；若 `clear()` 成功、緊接著 `update()` 卻撞到 429，例外會被 `write_with_retry` 抓到並重跑整個函式——但重跑時會重新從 Sheets `get_all_values()` 讀「既有資料」，此時讀到的已經是被 `clear()` 清空的空表，於是這次只把「當批新資料」當成全部內容寫回，清空前累積的舊資料就此永久消失。此事故確切發生點是「推薦歷史」在 `_archive_performance()` 內的 clear+update 之間卡到 429
+  * 影響範圍：排查後發現同樣「clear+update」寫法還存在於：推薦成效、歷史紀錄、對照分析、族群熱度、集保快取、快取、融資歷史、融券歷史、成交量歷史、收盤價歷史、重大訊息歷史、警訊，以及 `prepend_block()`（明日關注／每日快照／今日買超排行／今日賣超排行／族群聯動 共用）、`purge_old_rows()`（所有 31 天清舊資料的動作），全部都有同一種「clear 成功但 update 失敗就會資料遺失」的風險，只是「推薦歷史」這次剛好撞上
+  * 新邏輯：新增共用函式 `safe_rewrite(ws, values, label)`，取代上述全部 15 處呼叫點。重試範圍縮小到「清空+寫回」這一組動作本身（429 時最多重試 5 次，等待時間遞增），且**完全不重新讀取 Sheets**——固定沿用呼叫端已經在記憶體算好、包含「舊+新」完整內容的 `values` 反覆嘗試寫回。因此即使中途連續撞到 429，最多只是這次執行跑比較久，資料本身不會消失；若重試次數用盡仍失敗，會印出明確警告並回傳 `False`，提示需要重新執行程式或到 Google Sheets 版本記錄復原，不會再靜默吞掉例外造成誤判
+  * 這次事故遺失的「推薦歷史」舊資料，程式修正本身無法自動復原，已請使用者自行到 Google Sheets「檔案 → 版本記錄」嘗試找回被覆蓋前的版本
+
+### 備忘
+
+- 版本 v11.49 → v11.50（`每日更新.sh` banner 版號同步）→ v11.51（本次 `safe_rewrite` 修正）
+- 換到新 Mac（Apple Silicon）執行時遇到兩個環境問題，跟本次程式改動無關，記錄供之後對照：
+  1. `./每日更新.sh` 出現 `Permission denied`：新複製到別台電腦的檔案不會帶執行權限，執行一次 `chmod +x 每日更新.sh` 即可，之後這台電腦都會記得
+  2. 執行時出現 `ImportError: dlopen(..._cffi_backend...cpython-39-darwin.so...): incompatible architecture (have 'x86_64', need 'arm64...')`：代表目前這個 Terminal／Python 環境裝的是 Intel(x86_64) 版本的 `cryptography` 等套件，但實際跑在 Apple Silicon(arm64) 上。排查步驟：先用 `arch` 確認終端機是否被設定成用 Rosetta(i386) 開啟，若是需改用原生模式開啟；接著執行 `pip3 install --user --force-reinstall --no-cache-dir cryptography gspread google-auth google-auth-oauthlib` 重新安裝成對應架構的版本
+
+---
+
 ## v11.49 — 2026/09/01
 
 ### 修正

@@ -19,7 +19,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.49"  # ← 每次 commit 只改這裡
+VERSION = "v11.51"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -717,9 +717,8 @@ def update_tdcc_cache(ss, codes, new_data):
     for code, (big_pct, weekly_chg, tdcc_date, total_shares) in sorted(merged.items()):
         rows.append([code, big_pct, weekly_chg, tdcc_date, total_shares])
     ws = get_or_create(ss, "集保快取", cols=5)
-    ws.clear()
-    ws.update(range_name="A1", values=rows)
-    print(f"  💾 集保快取 更新 {len(new_data)} 筆（共 {len(merged)} 筆）")
+    if safe_rewrite(ws, rows, label="集保快取"):
+        print(f"  💾 集保快取 更新 {len(new_data)} 筆（共 {len(merged)} 筆）")
     return merged
 
 
@@ -1379,11 +1378,8 @@ def update_news_history(ss, date_str, news_items):
     ]
 
     full = kept + new_rows
-    ws.clear()
-    if ws.row_count < len(full) + 10:
-        ws.add_rows(len(full) + 10 - ws.row_count)
-    ws.update(range_name="A1", values=full)
-    print(f"  ✅ 重大訊息歷史 寫入 {len(new_rows)} 筆（{disp}）")
+    if safe_rewrite(ws, full, label="重大訊息歷史"):
+        print(f"  ✅ 重大訊息歷史 寫入 {len(new_rows)} 筆（{disp}）")
 
 
 def load_news_for_codes(ss, codes, date_str, days=3):
@@ -1445,11 +1441,8 @@ def update_short_history(ss, date_str, current_margin):
     new_rows.sort(key=lambda r: r[1])   # 依代號排序
 
     full = kept + new_rows
-    ws.clear()
-    if ws.row_count < len(full) + 10:
-        ws.add_rows(len(full) + 10 - ws.row_count)
-    ws.update(range_name="A1", values=full)
-    print(f"  ✅ 融券歷史 寫入 {len(new_rows)} 筆（{disp}）")
+    if safe_rewrite(ws, full, label="融券歷史"):
+        print(f"  ✅ 融券歷史 寫入 {len(new_rows)} 筆（{disp}）")
 
 
 # ★ v11.29 融資歷史工作表
@@ -1487,11 +1480,8 @@ def update_margin_history(ss, date_str, current_margin):
     new_rows.sort(key=lambda r: r[1])   # 依代號排序
 
     full = kept + new_rows
-    ws.clear()
-    if ws.row_count < len(full) + 10:
-        ws.add_rows(len(full) + 10 - ws.row_count)
-    ws.update(range_name="A1", values=full)
-    print(f"  ✅ 融資歷史 寫入 {len(new_rows)} 筆（{disp}）")
+    if safe_rewrite(ws, full, label="融資歷史"):
+        print(f"  ✅ 融資歷史 寫入 {len(new_rows)} 筆（{disp}）")
 
 
 def load_margin_history(ss):
@@ -1552,10 +1542,7 @@ def update_alert_log(ss, date_str, level, alert_line, margin_codes, ship_codes):
     body_rows.sort(key=lambda r: r[0] if r else "", reverse=True)
     full = [header_row] + body_rows
 
-    ws.clear()
-    if ws.row_count < len(full) + 10:
-        ws.add_rows(len(full) + 10 - ws.row_count)
-    ws.update(range_name="A1", values=full)
+    safe_rewrite(ws, full, label="警訊")
 
     # 視覺強化：依等級為新寫入的這一列上底色（紅底/黃底，正常則清除底色）
     # ★ v11.36：改降序後不假設固定在第2列，直接找出 disp 對應的實際列號
@@ -1631,11 +1618,8 @@ def update_volume_history(ss, date_str, current_prices):
     new_rows.sort(key=lambda r: r[1])   # 依代號排序
 
     full = kept + new_rows
-    ws.clear()
-    if ws.row_count < len(full) + 10:
-        ws.add_rows(len(full) + 10 - ws.row_count)
-    ws.update(range_name="A1", values=full)
-    print(f"  ✅ 成交量歷史 寫入 {len(new_rows)} 筆（{disp}）")
+    if safe_rewrite(ws, full, label="成交量歷史"):
+        print(f"  ✅ 成交量歷史 寫入 {len(new_rows)} 筆（{disp}）")
 
 
 def load_volume_history(ss):
@@ -1706,11 +1690,8 @@ def update_price_history(ss, date_str, current_prices):
     new_rows.sort(key=lambda r: r[1])   # 依代號排序
 
     full = kept + new_rows
-    ws.clear()
-    if ws.row_count < len(full) + 10:
-        ws.add_rows(len(full) + 10 - ws.row_count)
-    ws.update(range_name="A1", values=full)
-    print(f"  ✅ 收盤價歷史 寫入 {len(new_rows)} 筆（{disp}）")
+    if safe_rewrite(ws, full, label="收盤價歷史"):
+        print(f"  ✅ 收盤價歷史 寫入 {len(new_rows)} 筆（{disp}）")
 
 
 def load_price_history(ss):
@@ -2132,6 +2113,52 @@ def get_or_create(ss, name, cols=15):
     try: return ss.worksheet(name)
     except: return ss.add_worksheet(title=name, rows=300, cols=cols)
 
+def safe_rewrite(ws, values, label=None, max_retries=5, base_wait=20):
+    """
+    ★ v11.51 新增：「整表清空再寫回」的安全版本，取代散落各處的
+        ws.clear(); ws.update(range_name="A1", values=full)
+    寫法。
+
+    緣起（本次事故根因）：舊寫法若在 clear() 成功、update() 尚未成功前
+    卡到 429，外層 write_with_retry() 會整個業務函式重跑——但重跑時
+    會重新從 Sheets 讀「既有資料」，這時讀到的已經是被 clear() 清空的
+    空表，等於把清空前的舊資料（例如「推薦歷史」的長期累積）永久覆蓋掉。
+
+    這裡改成：重試只針對「清空 + 寫回」這一組動作本身，並且完全不重新
+    讀取 Sheets——固定沿用呼叫端已經在記憶體裡組好、包含「舊+新」完整
+    內容的 values，反覆嘗試寫回，直到成功或用盡重試次數。因此即使中途
+    連續撞到 429，最多只是「這次跑比較久」，資料本身不會消失。
+
+    - ws: 目標工作表
+    - values: 要整表寫回的完整內容（含標題列），呼叫端必須先在記憶體算好
+    - label: 只用於印訊息（預設用 ws.title）
+    - 回傳 True/False；若最終仍失敗會印出明確警告並回傳 False（不拋例外，
+      讓外層自行決定要不要中止，但不會再誤刪資料——因為 values 是同一份）
+    """
+    label = label or ws.title
+    for attempt in range(1, max_retries + 1):
+        try:
+            ws.clear()
+            if ws.row_count < len(values) + 10:
+                ws.add_rows(len(values) + 10 - ws.row_count)
+            ws.update(range_name="A1", values=values)
+            return True
+        except Exception as e:
+            err = str(e)
+            if "429" in err and attempt < max_retries:
+                wait = base_wait * attempt
+                print(f"  ⏳ {label}：429 Quota，{wait} 秒後重試寫回"
+                      f"（沿用同一份資料重試，不重新讀取 Sheets，避免資料遺失）"
+                      f"...（{attempt}/{max_retries}）")
+                time.sleep(wait)
+            else:
+                print(f"  ❌ {label} 寫入最終失敗：{e}"
+                      f"\n     ⚠️ 工作表可能已被清空但尚未寫回，請儘快重新執行本程式，"
+                      f"或到 Google Sheets「檔案 → 版本記錄」復原。")
+                return False
+    return False
+
+
 def purge_old_rows(ws, cutoff_date_str, date_col=0, header_rows=1):
     """
     清除工作表中日期超過保留期限的列。
@@ -2166,11 +2193,8 @@ def purge_old_rows(ws, cutoff_date_str, date_col=0, header_rows=1):
         kept.append(row)
 
     if removed > 0:
-        ws.clear()
-        if ws.row_count < len(kept) + 10:
-            ws.add_rows(len(kept) + 10 - ws.row_count)
-        ws.update(range_name="A1", values=kept)
-        print(f"  🗑️  {ws.title}：清除 {removed} 筆超過1個月的舊資料")
+        if safe_rewrite(ws, kept, label=f"{ws.title}（清除舊資料）"):
+            print(f"  🗑️  {ws.title}：清除 {removed} 筆超過1個月的舊資料")
     return removed
 
 def prepend_block(ws, new_block, disp, date_marker_prefix, sep_cols):
@@ -2199,10 +2223,7 @@ def prepend_block(ws, new_block, disp, date_marker_prefix, sep_cols):
     else:
         full_data = new_block
 
-    ws.clear()
-    if ws.row_count < len(full_data) + 10:
-        ws.add_rows(len(full_data) + 10 - ws.row_count)
-    ws.update(range_name="A1", values=full_data)
+    safe_rewrite(ws, full_data, label=ws.title)
 
 
 def _apply_banner_merges(ws, n_cols, max_merge_days=2):
@@ -2285,16 +2306,19 @@ def _apply_alert_colors(ws, n_cols):
         return
 
     col_letter_end = chr(ord("A") + n_cols - 1)
-    requests_by_color = {}   # color_key(str) -> [row_num, ...]
     white = {"red": 1, "green": 1, "blue": 1}
     found_latest = False   # ★ v11.47 只有掃到的第一筆（最新）才上色，其餘清白底
+    # ★ v11.50 改用 batch_format 一次送出所有底色設定，避免逐列個別呼叫 ws.format()
+    #   （舊版每列各打一次 Sheets API，明日關注表常有數十列警訊，
+    #    幾十次連續 write 極易撞上 Sheets 每分鐘寫入配額，觸發 429，
+    #    進而波及同一輪後續要寫入的其他工作表，如「推薦成效」）
+    formats = []
 
     for i, row in enumerate(rows, start=1):
         cell = row[0] if row else ""
         if cell.startswith("外資大台指淨部位："):
             # ★ v11.48 這一列永遠不該帶警訊底色，一律強制清白
-            key = json.dumps(white, sort_keys=True)
-            requests_by_color.setdefault(key, []).append(i)
+            formats.append({"range": f"A{i}:{col_letter_end}{i}", "format": {"backgroundColor": white}})
             continue
         if not cell.startswith("⚠️ 大盤警訊："):
             continue
@@ -2309,16 +2333,15 @@ def _apply_alert_colors(ws, n_cols):
             found_latest = True
         else:
             color = white   # ★ v11.47 歷史舊警訊列一律清除底色
-        key = json.dumps(color, sort_keys=True)
-        requests_by_color.setdefault(key, []).append(i)
+        formats.append({"range": f"A{i}:{col_letter_end}{i}", "format": {"backgroundColor": color}})
 
-    for key, row_nums in requests_by_color.items():
-        color = json.loads(key)
-        for row_num in row_nums:
-            try:
-                ws.format(f"A{row_num}:{col_letter_end}{row_num}", {"backgroundColor": color})
-            except Exception as e:
-                print(f"  ⚠️ 第 {row_num} 列底色設定失敗：{e}")
+    if not formats:
+        return
+
+    try:
+        ws.batch_format(formats)   # 單次 API 呼叫送出全部 range，取代原本逐列的迴圈
+    except Exception as e:
+        print(f"  ⚠️ 底色批次設定失敗（不影響資料寫入）：{e}")
 
 
 # ═══════════════════════════════════════════════
@@ -2409,11 +2432,8 @@ def append_history(ss, date_str, foreign, trust, dealer, f_sell, t_sell, d_sell)
     header_row, body_rows = full[0], full[1:]
     body_rows.sort(key=lambda r: r[0] if r else "", reverse=True)
     full = [header_row] + body_rows
-    ws.clear()
-    if ws.row_count < len(full) + 10:
-        ws.add_rows(len(full) + 10 - ws.row_count)
-    ws.update(range_name="A1", values=full)
-    print(f"  ✅ 歷史紀錄 新增 {len(new_rows)} 筆（合計 {len(full)-1} 筆，日期降序）")
+    if safe_rewrite(ws, full, label="歷史紀錄"):
+        print(f"  ✅ 歷史紀錄 新增 {len(new_rows)} 筆（合計 {len(full)-1} 筆，日期降序）")
 
 
 # ═══════════════════════════════════════════════
@@ -2819,11 +2839,8 @@ def update_sector_heatmap(ss, date_str, ss_hist_rows=None):
             disp,
         ])
 
-    ws.clear()
-    if ws.row_count < len(data) + 5:
-        ws.add_rows(len(data) + 5 - ws.row_count)
-    ws.update(range_name="A1", values=data)
-    print(f"  ✅ 族群熱度 更新完成（{len(results)} 個族群有近期活動）")
+    if safe_rewrite(ws, data, label="族群熱度"):
+        print(f"  ✅ 族群熱度 更新完成（{len(results)} 個族群有近期活動）")
 
 
 
@@ -3011,11 +3028,8 @@ def update_analysis(ss, date_str, current_prices, current_margin, amp_map=None):
         [f"統計截至：{disp}（每次執行自動更新至最新）"] + [""] * (n_cols - 1),
         ANALYSIS_HEADERS
     ] + all_rows
-    ws_ana.clear()
-    if ws_ana.row_count < len(ana_data) + 5:
-        ws_ana.add_rows(len(ana_data) + 5 - ws_ana.row_count)
-    ws_ana.update(range_name="A1", values=ana_data)
-    print(f"  ✅ 對照分析 更新完成（{len(ana_data)-2} 支，合計累計天數由低至高）")
+    if safe_rewrite(ws_ana, ana_data, label="對照分析"):
+        print(f"  ✅ 對照分析 更新完成（{len(ana_data)-2} 支，合計累計天數由低至高）")
 
     # ── 每日快照（prepend 累積）──
     ws_snap    = get_or_create(ss, "每日快照", n_cols)
@@ -3967,11 +3981,8 @@ def _archive_performance(ss, expired_rows):
     header_row, body_rows = full[0], full[1:]
     body_rows.sort(key=lambda r: r[PERF_IDX["推薦日"]] if r else "", reverse=True)
     full = [header_row] + body_rows
-    ws.clear()
-    if ws.row_count < len(full) + 10:
-        ws.add_rows(len(full) + 10 - ws.row_count)
-    ws.update(range_name="A1", values=full)
-    print(f"  ✅ 推薦歷史 新增 {len(new_rows)} 筆（累計 {len(full)-1} 筆，日期降序）")
+    if safe_rewrite(ws, full, label="推薦歷史"):
+        print(f"  ✅ 推薦歷史 新增 {len(new_rows)} 筆（累計 {len(full)-1} 筆，日期降序）")
 
 
 def update_performance(ss, date_str, current_prices):
@@ -4144,12 +4155,9 @@ def update_performance(ss, date_str, current_prices):
     header_row = [PERFORMANCE_HEADERS]
     full_data  = header_row + rows
 
-    ws_perf.clear()
-    if ws_perf.row_count < len(full_data) + 10:
-        ws_perf.add_rows(len(full_data) + 10 - ws_perf.row_count)
-    ws_perf.update(range_name="A1", values=full_data)
     archived_count = len(expired)
-    print(f"  ✅ 推薦成效 更新完成（追蹤中：{len(rows)} 筆，本次封存：{archived_count} 筆）")
+    if safe_rewrite(ws_perf, full_data, label="推薦成效"):
+        print(f"  ✅ 推薦成效 更新完成（追蹤中：{len(rows)} 筆，本次封存：{archived_count} 筆）")
 
 
 # ═══════════════════════════════════════════════
@@ -4500,11 +4508,8 @@ def save_cache(ss, date_str, foreign, trust, dealer, f_sell, t_sell, d_sell,
         ["futures_signal", ""],   # ★ v11.6 預留，由 update_recommendation 寫入
     ]
     ws = get_or_create(ss, "快取", cols=2)
-    ws.clear()
-    if ws.row_count < len(rows) + 5:
-        ws.add_rows(len(rows) + 5 - ws.row_count)
-    ws.update(range_name="A1", values=rows)
-    print(f"  💾 快取已寫入 Sheets（日期：{date_str}，共 {len(rows)} 列）")
+    if safe_rewrite(ws, rows, label="快取"):
+        print(f"  💾 快取已寫入 Sheets（日期：{date_str}，共 {len(rows)} 列）")
 
 def load_cache(ss, date_str):
     """

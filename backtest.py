@@ -654,8 +654,14 @@ def calc_win_rate_matrix(detail_rows):
         _stats(detail_rows, _vol_ratio_bucket, "t1_pnl")))
 
     # 切面 16：★ v1.5 融資趨勢 × T+1 勝率（T39，v11.45 前無資料，歸類「未知」）
+    # ★ v1.8 修正：margin_trend_real 原始字串含精確張數（如「↘ 減37張」「↘ 大減1974張」），
+    #   若直接當 key 分組，幾乎每個張數都是獨立一組（n=1），勝率完全失真、全部樣本不足。
+    #   改成只留方向類別（大增/增/大減/減/持平），對應 calc_margin_trend() 本來就只有的 4+1 種分類。
     def _margin_trend_lbl(r):
         v = str(r.get("margin_trend", "")).strip()
+        if not v:
+            return "未知"
+        v = re.sub(r"\d+張\s*$", "", v).strip()
         return v if v else "未知"
     sections.append(("【融資趨勢 × T+1 勝率】",
         _stats(detail_rows, _margin_trend_lbl, "t1_pnl")))
