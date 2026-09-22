@@ -1,6 +1,6 @@
 """
 台灣股市三大法人買超推薦回測腳本 — backtest.py
-版本：v1.5
+版本：v1.9
 
 用途：
   對歷史推薦重建評分，比對 T+1/T+2/T+3 實際漲跌，
@@ -23,7 +23,7 @@
   A欄 = 代號（如 2330），B欄 = 備註（可空）
   第一列為標題列，從第二列開始填代號
 
-架子狀態（v1.5）：
+架子狀態（v1.9）：
   ✅ 資料讀取（Sheets 歷史紀錄 + 推薦歷史）
   ✅ 評分特徵重建邏輯（連續天數、籌碼集中度、加速度）
   ✅ 輸出格式（明細 + 勝率矩陣）
@@ -41,6 +41,19 @@
        只是沒往下傳，v11.45 補上後直接讀真值即可；v11.45 之前累積的舊資料沒有這幾欄，歸類「未知」
   🚧 買超加速度仍為重建近似值（尚未接真值，fetch_and_update.py 未存這欄，見備忘錄待處理清單 T41）
   🚧 相對強弱%、集保大戶、5日線尚未接進回測（見備忘錄待處理清單 T40）
+  ✅ 新舊評分公式(v1舊/v2新)對照比較 ★ v1.8 新增（T42，對應 2026/09/17 回測分析出的5項改進方案）
+     └ 「回測勝率」新增【新舊評分公式比較｜舊公式(v1)分組】【…新公式(v2)分組】兩個切面，
+       「回測明細」新增「重算分數(舊v1)/(新v2)」「分組(舊v1)/(新v2)」四欄；
+       重算分數不含集保大戶/今日買超金額/當日動能/大型股補償（回測資料重建不出來，
+       v1/v2 都不計入，見程式內「新舊評分公式比較」區塊開頭說明）；
+       確認 v2 高分組勝率明顯優於 v1 高分組後，才考慮把 v2 邏輯搬回
+       fetch_and_update.py score_stock() 正式上線（目前正式評分邏輯尚未變動）
+  ✅ ★ v1.9 新增：上面 v1.8 的比較有選股偏誤（股票池是v1選出來的舊名單，看不到v2獨有的選股），
+     fetch_and_update.py v11.52 起在正式選股當下就同步用v2公式對「v1候選池」重新排名，
+     把「v2會選、但v1沒選進主榜/觀察組」的股票額外寫進「明日關注」的
+     「🆕 v2評分限定候選」區塊追蹤，這裡新增讀取這份真值（「另一版本評分」「評分公式版本」
+     兩欄，「回測明細」可查看），並新增【評分公式版本(正式環境真值) × T+1 勝率】切面
+     ——這才是真正沒有選股偏誤的比較，但需要 v11.52 後新資料累積幾週才有足夠樣本
   ⚠️  樣本 < 20 筆時勝率標注「樣本不足」
 
 注意：
@@ -181,6 +194,7 @@ PERFORMANCE_HEADERS = [
     "連續天數", "籌碼集中度%", "籌碼集中度評級", "振幅%", "自營商標記",
     "量比", "融資趨勢", "融券趨勢",
     "佔股本比重%",   # ★ v1.7 對應 fetch_and_update.py v11.47（K21）
+    "另一版本評分", "評分公式版本",   # ★ v1.9 對應 fetch_and_update.py v11.52（T42 新舊評分公式並行）
 ]
 PERF_IDX = {name: i for i, name in enumerate(PERFORMANCE_HEADERS)}
 
@@ -259,6 +273,10 @@ def load_perf_history(ss):
             # ★ v1.7 對應 fetch_and_update.py v11.47 新增的一欄：佔股本比重%（K21）
             # v11.47 之前封存的舊資料沒有這欄，會是空字串
             "shares_pct_real":   _perf_cell(row, "佔股本比重%"),
+            # ★ v1.9 對應 fetch_and_update.py v11.52 新增的兩欄：新舊評分公式並行比較（T42）
+            # v11.52 之前封存的舊資料沒有這兩欄，會是空字串（"評分公式版本"一律歸類「未知(v11.52前)」）
+            "other_score_real":  _fk(row, "另一版本評分"),
+            "formula_ver_real":  _perf_cell(row, "評分公式版本"),
         })
     print(f"  ✅ 推薦歷史讀取 {len(result)} 筆")
     return result
@@ -376,6 +394,231 @@ def fetch_tn_prices(code, base_date_disp):
     return result
 
 
+# ── ★ v1.8 新舊評分公式比較（T42）───────────────────────────────
+# 背景：2026/09/17 用「回測勝率」矩陣分析後，發現正式評分公式（fetch_and_update.py
+# score_stock()）裡有幾個因子的評分方向跟回測結果對不起來（例如爆量給最高分，但回測
+# 顯示爆量表現最差）。這裡先在 backtest.py 用同一批歷史資料分別套用「舊公式(v1，
+# 目前正式上線的邏輯)」與「新公式(v2，本次改進方案)」重算一次分數，各自依分數切三等分
+# （高/中/低分組）比較 T+1 勝率，用來驗證新公式的排序能力是否真的比舊公式好——
+# 確認有效後才會把 v2 的邏輯搬回 fetch_and_update.py 正式上線，避免憑感覺改分數。
+#
+# ⚠️ 限制：這裡重算的分數「不等於」正式推薦當時的完整評分，因為以下因子在
+# 「推薦歷史」工作表沒有存原始數值，回測階段補不回來，v1/v2 兩邊都不計入
+# （兩邊一起拿掉，比較還是公平，只是絕對分數會跟 Sheets「推薦評分」欄位對不上，
+# 這是預期中的落差，不是算錯）：
+#   - 集保大戶（-5~+5分）
+#   - 今日法人買超金額（0~8分）
+#   - 當日漲跌%動能（-2~+5分）
+#   - 連續天數矩陣的「大型股補償」（買超金額≥1億/3億時偏低分×1.5~2）
+#
+# 改動對照（對應 2026/09/17 分析出的 5 項改進方案）：
+#   1. 量比：舊公式爆量(≥3倍)給最高分，回測顯示爆量表現最差 → 新公式改 1~2倍最高分，爆量降分
+#   2. 融資趨勢：舊公式「大減」比「減」分高，回測顯示「大減」勝率反而較低 → 新公式縮小差距並反轉排序
+#   3. 連續天數矩陣：回測顯示 3~5天是甜蜜點、6~10天勝率反而下滑（倒U型），
+#      舊公式卻是單調遞增 → 新公式改倒U型
+#   4. 買超加速度：回測顯示是樣本數夠大、訊號最強的因子之一，舊公式只佔0~3分 → 新公式加大到-2~+8分
+#   5. 振幅%：舊公式沒有這個因子，回測顯示2~5%最好、≥5%最差 → 新公式新增，範圍-5~+5分
+# ─────────────────────────────────────────────────────────────
+
+def _bt_score_margin(health):
+    """融資健康度評分（25分）— v1/v2 共用，非本次改進項目"""
+    return {"✅ 籌碼乾淨": 25, "🟡 小幅跟進": 15,
+            "⚠️ 散戶大量跟進": 5, "🔴 法人不買散戶買": 0}.get(str(health).strip(), 0)
+
+
+def _bt_score_risk(risk):
+    """出貨風險評分（15分）— v1/v2 共用，非本次改進項目"""
+    return {"🟢 低": 15, "🟡 中": 7, "🔴 高": 0}.get(str(risk).strip(), 0)
+
+
+def _bt_score_short_trend(short_trend):
+    """融券趨勢評分（-8~+8分）— v1/v2 共用，非本次改進項目"""
+    s = str(short_trend).strip()
+    if not s:
+        return 0
+    m = re.search(r"連[增減](\d+)天", s)
+    days = int(m.group(1)) if m else 0
+    if "↘" in s: return 8 if days >= 3 else 4
+    if "↗" in s: return -8 if days >= 2 else -4
+    return 0
+
+
+def _bt_score_shares_pct(pct):
+    """佔股本比重評分（0~+8分）— v1/v2 共用，非本次改進項目"""
+    try:
+        pct = float(pct)
+    except (TypeError, ValueError):
+        return 0
+    if pct >= SHARES_PCT_HIGH: return 8
+    elif pct >= SHARES_PCT_MID: return 5
+    elif pct >= SHARES_PCT_LOW: return 2
+    return 0
+
+
+def _bt_score_matrix(consec, chip_lbl, version="v1"):
+    """
+    連續天數 × 籌碼集中度 矩陣評分。
+    v1（舊公式，目前正式上線）：天數越長分越高（單調遞增）。
+    v2（新公式，本次改進方案③）：改成倒U型，3~5天是甜蜜點，6~10天分數回落。
+    不含大型股補償（回測重建不出今日買超金額，v1/v2 都略過，見上方限制說明）。
+    """
+    try:
+        consec = int(consec)
+    except (TypeError, ValueError):
+        consec = 0
+    if version == "v1":
+        rows = {
+            "🔵 高度集中": [(3, 26), (7, 33), (999, 40)],
+            "🟦 中度集中": [(3, 15), (7, 21), (999, 27)],
+        }.get(chip_lbl, [(3, 4), (7, 7), (999, 10)])
+        for limit, score in rows:
+            if consec <= limit:
+                return score
+        return rows[-1][1]
+    # v2：倒U型
+    if chip_lbl == "🔵 高度集中":
+        if consec <= 2:    return 20
+        elif consec <= 5:  return 40
+        elif consec <= 10: return 24
+        else:              return 33
+    elif chip_lbl == "🟦 中度集中":
+        if consec <= 2:    return 12
+        elif consec <= 5:  return 27
+        elif consec <= 10: return 16
+        else:              return 22
+    else:  # 偏低
+        if consec <= 2:    return 3
+        elif consec <= 5:  return 10
+        elif consec <= 10: return 5
+        else:              return 8
+
+
+def _bt_score_volume_ratio(vr, version="v1"):
+    """
+    量比評分（改進方案①）。
+    v1（舊公式）：爆量(≥3倍)給最高 7 分。
+    v2（新公式）：1~2倍溫和放量給最高 7 分，爆量降到 1 分（回測顯示爆量表現最差）。
+    """
+    if vr is None or vr == "":
+        return 3
+    try:
+        vr = float(vr)
+    except (ValueError, TypeError):
+        return 2
+    if version == "v1":
+        if vr >= 3.0: return 7
+        if vr >= 2.0: return 5
+        if vr >= 1.5: return 4
+        if vr >= 1.0: return 2
+        return 1
+    if vr >= 3.0: return 1     # 爆量：回測表現最差，大幅降分
+    if vr >= 2.0: return 4     # 明顯放量：普通
+    if vr >= 1.0: return 7     # 1~2倍：回測表現最好，最高分
+    if vr >= 0.5: return 4     # 溫和縮量
+    return 2                    # 極度縮量
+
+
+def _bt_score_margin_trend(margin_trend, version="v1"):
+    """
+    融資趨勢評分（改進方案②）。
+    v1（舊公式）：「大減」給 +6 分，比「減」的 +3 分高。
+    v2（新公式）：回測顯示「大減」勝率(37.0%)反而低於「減」(57.1%)，縮小差距並反轉排序。
+    """
+    s = re.sub(r"\d+張\s*$", "", str(margin_trend).strip()).strip()  # 去掉真值字串的張數（如「↘ 減37張」）
+    if not s or s == "➡ 持平":
+        return 0
+    if version == "v1":
+        if "↘" in s: return 6 if "大減" in s else 3
+        if "↗" in s: return -6 if "大增" in s else -3
+        return 0
+    if "↘" in s: return 3 if "大減" in s else 6
+    if "↗" in s: return -6 if "大增" in s else -3
+    return 0
+
+
+def _bt_score_accel(accel_label, version="v1"):
+    """
+    買超加速度評分（改進方案④）。
+    v1（舊公式）：範圍只有 0~3 分。
+    v2（新公式）：回測顯示🚀加速是樣本夠大(n=31)且訊號最強的因子(58.1%勝率)，
+      加大到 -2~+8 分；📉減速回測勝率偏弱(38.9%)，額外給負分。
+    """
+    s = str(accel_label).strip()
+    if version == "v1":
+        if not s: return 1
+        if "🚀" in s: return 3
+        if "📈" in s: return 2
+        if "➡" in s: return 1
+        if "📉" in s: return 0
+        return 1
+    if not s: return 1        # 資料不足：中性分
+    if "🚀" in s: return 8
+    if "📈" in s: return 4
+    if "➡" in s: return 1
+    if "📉" in s: return -2
+    return 1
+
+
+def _bt_score_amplitude(amp, version="v1"):
+    """
+    振幅%評分（改進方案⑤，v1舊公式沒有這個因子）。
+    v2（新公式）：回測顯示 2~5% 表現最好(58.1%)，≥5%表現最差(26.7%)，範圍 -5~+5 分。
+    """
+    if version == "v1":
+        return 0
+    v = str(amp).strip()
+    if not v:
+        return 0
+    try:
+        a = float(v.replace("⚡", "").replace("%", ""))
+    except ValueError:
+        return 0
+    if a < 2:   return 2
+    elif a < 5: return 5
+    else:       return -5
+
+
+def _bt_recalc_score(feat, version="v1"):
+    """
+    用回測重建出的特徵，套用指定版本(v1舊/v2新)的評分公式重算一次總分。
+    僅供 v1/v2 對照比較用，不等於正式推薦當時的完整評分（見上方限制說明）。
+    """
+    return (
+        _bt_score_matrix(feat.get("consec", 0), feat.get("chip_lbl", ""), version) +
+        _bt_score_margin(feat.get("margin_health", "")) +
+        _bt_score_risk(feat.get("risk", "")) +
+        _bt_score_volume_ratio(feat.get("vol_ratio", ""), version) +
+        _bt_score_accel(feat.get("accel_lbl", ""), version) +
+        _bt_score_short_trend(feat.get("short_trend", "")) +
+        _bt_score_margin_trend(feat.get("margin_trend", ""), version) +
+        _bt_score_shares_pct(feat.get("shares_pct", "")) +
+        _bt_score_amplitude(feat.get("amp", ""), version)
+    )
+
+
+def _assign_tercile_buckets(detail_rows, score_key, bucket_key):
+    """
+    依 score_key 數值由小到大排序後三等分，把分組標籤寫回每筆 row 的 bucket_key 欄位。
+    用排名（等筆數）三等分而非固定分數門檻，因為 v1/v2 兩個公式的總分尺度不同，
+    用排名才能公平比較「同樣抓前1/3」時，兩個公式各自抓到的股票勝率誰比較好。
+    """
+    scored = [(i, r[score_key]) for i, r in enumerate(detail_rows) if r.get(score_key) is not None]
+    if not scored:
+        for r in detail_rows:
+            r[bucket_key] = "未知"
+        return
+    scored.sort(key=lambda x: x[1])
+    n = len(scored)
+    idx_1, idx_2 = n // 3, 2 * n // 3
+    labels = {}
+    for rank, (i, _) in enumerate(scored):
+        if rank < idx_1:      labels[i] = "低分組（後1/3）"
+        elif rank < idx_2:    labels[i] = "中分組（中1/3）"
+        else:                 labels[i] = "高分組（前1/3）"
+    for i, r in enumerate(detail_rows):
+        r[bucket_key] = labels.get(i, "未知")
+
+
 # ── 特徵重建 ──────────────────────────────────────────────────
 
 def _rebuild_features(rec, hist_map):
@@ -447,7 +690,7 @@ def _rebuild_features(rec, hist_map):
     else:
         accel_lbl = ""
 
-    return {
+    feat = {
         "code":          code,
         "name":          rec.get("name", ""),
         "rec_date":      rec_date,
@@ -468,7 +711,17 @@ def _rebuild_features(rec, hist_map):
         "short_trend":   rec.get("short_trend_real", ""),
         # ★ v1.7 佔股本比重%，直接讀真值（無法重建，只有 v11.47 起才有資料，v11.47 前為空字串→切面歸類「未知」）
         "shares_pct":    rec.get("shares_pct_real", ""),
+        # ★ v1.9 對應 fetch_and_update.py v11.52（T42）：正式環境當時實際記錄的「另一版本分數」與
+        # 「評分公式版本」真值（v11.52 前無資料，為空字串）。跟上面 recalc_v1/v2（用回測重建特徵事後算的
+        # 近似分數）不同，這兩欄是正式選股當下用完整資訊（含集保大戶/今日買超金額/當日動能/大型股補償）
+        # 算出來的真值，之後資料累積夠了，應該優先用這組真值分析，recalc_v1/v2 只是資料不足時的替代方案。
+        "other_score":   rec.get("other_score_real", ""),
+        "formula_ver":   rec.get("formula_ver_real", ""),
     }
+    # ★ v1.8 新舊評分公式(v1舊/v2新)重算，供對照比較用（見上方「新舊評分公式比較」區塊限制說明）
+    feat["recalc_v1"] = _bt_recalc_score(feat, "v1")
+    feat["recalc_v2"] = _bt_recalc_score(feat, "v2")
+    return feat
 
 
 # ── 損益計算 ──────────────────────────────────────────────────
@@ -507,6 +760,10 @@ def calc_win_rate_matrix(detail_rows):
             })
         return result
 
+    # ★ v1.8 先依 v1(舊)/v2(新) 重算分數各自三等分分組，供下面的比較切面使用
+    _assign_tercile_buckets(detail_rows, "recalc_v1", "recalc_v1_bucket")
+    _assign_tercile_buckets(detail_rows, "recalc_v2", "recalc_v2_bucket")
+
     sections = []
 
     # 切面 1：籌碼集中度
@@ -540,6 +797,41 @@ def calc_win_rate_matrix(detail_rows):
         else:         return "40分以下"
     sections.append(("【推薦評分分桶 × T+1 勝率】",
         _stats(detail_rows, _score_bucket, "t1_pnl")))
+
+    # 切面 4b：★ v1.8 新舊評分公式比較（T42，2026/09/17 改進方案①②③④⑤）
+    # 用同一批資料分別套 v1(舊，目前正式上線)/v2(新，本次改進方案) 重算分數，各自三等分，
+    # 比較「高分組」的 T+1 勝率誰比較高——若 v2 高分組明顯贏 v1 高分組，代表新公式排序能力較好。
+    # ⚠️ 重要限制（選股偏誤）：這裡的股票池是「推薦歷史」裡既有的名單，而這份名單本身就是用
+    #   v1(舊公式)選出來的——v2 版可能會選出完全不同的股票，那些股票根本不會出現在這份名單裡。
+    #   所以本切面只能回答「用新公式幫v1選過的舊名單重新排序，效果如何」，
+    #   不能回答「如果一開始就用新公式選股，結果會怎樣」。
+    #   真正解決這個問題的方法見下面切面 4c：v11.52 起 fetch_and_update.py 會在正式選股當下，
+    #   對「v1主榜+觀察組通過篩選的整批候選股」同步套用v2公式重新排名，
+    #   找出「v2會選、但v1完全沒選進主榜/觀察組」的股票，額外寫入「明日關注」的
+    #   「🆕 v2評分限定候選」區塊並照樣追蹤 T+1~T+5 表現——累積幾週後，切面4c才是
+    #   真正沒有選股偏誤的 v1 vs v2 比較，本切面(4b)屆時只當輔助參考。
+    # ⚠️ 重算分數也不含集保大戶/今日買超金額/當日動能/大型股補償（回測資料重建不出來，
+    #    v1/v2 都不計入，見上方「新舊評分公式比較」程式區塊開頭的限制說明）。
+    sections.append(("【新舊評分公式比較｜舊公式(v1)分組 × T+1 勝率】",
+        _stats(detail_rows, lambda r: r.get("recalc_v1_bucket") or "未知", "t1_pnl")))
+    sections.append(("【新舊評分公式比較｜新公式(v2)分組 × T+1 勝率】",
+        _stats(detail_rows, lambda r: r.get("recalc_v2_bucket") or "未知", "t1_pnl")))
+
+    # 切面 4c：★ v1.9 對應 fetch_and_update.py v11.52（T42）
+    # 用正式環境「評分公式版本」真值分組（不是事後重算），才是真正公平的 v1/v2 對照：
+    #   "v1"：目前正式選股邏輯選中的股票（主榜/觀察組）
+    #   "v2限定候選"：v2公式選中、但v1完全沒選進主榜/觀察組的股票——這組資料才能回答
+    #     「v2真正選股（不是幫v1選過的股票重新排序）勝率如何」，解決上面 4b 用回測重建特徵
+    #     事後重算所受的先天限制（4b只能在v1已選過的股票池裡重新排序，看不到v2獨有的選股）。
+    # ⚠️ v11.52 之前的舊資料沒有這個欄位，只有這次改版之後累積的新資料才會有標記，
+    #    樣本會需要幾週才夠，這段期間本切面多半只會看到「未知(v11.52前)」。
+    def _formula_ver_lbl(r):
+        v = str(r.get("formula_ver", "")).strip()
+        if not v:
+            return "未知(v11.52前)"
+        return v
+    sections.append(("【評分公式版本(正式環境真值) × T+1 勝率】★需v11.52後新資料累積",
+        _stats(detail_rows, _formula_ver_lbl, "t1_pnl")))
 
     # 切面 5：出貨風險
     def _risk_lbl(r):
@@ -744,6 +1036,8 @@ DETAIL_HEADERS = [
     "T+1漲跌%(建議買進)", "T+2漲跌%(建議買進)", "T+3漲跌%(建議買進)",
     "T+4漲跌%(建議買進)", "T+5漲跌%(建議買進)",   # ★ v1.3
     "佔股本比重%",   # ★ v1.7 對應 fetch_and_update.py v11.47（K21）
+    "重算分數(舊v1)", "分組(舊v1)", "重算分數(新v2)", "分組(新v2)",   # ★ v1.8 T42 新舊評分公式比較
+    "另一版本評分(真值)", "評分公式版本(真值)",   # ★ v1.9 對應 fetch_and_update.py v11.52
 ]
 
 def _win_label(pnl):
@@ -791,6 +1085,9 @@ def write_detail_sheet(ss, detail_rows, dry_run=False):
             r.get("t1_pnl_buy","待補"), r.get("t2_pnl_buy","待補"), r.get("t3_pnl_buy","待補"),
             r.get("t4_pnl_buy","待補"), r.get("t5_pnl_buy","待補"),
             r.get("shares_pct",""),
+            r.get("recalc_v1",""), r.get("recalc_v1_bucket",""),
+            r.get("recalc_v2",""), r.get("recalc_v2_bucket",""),
+            r.get("other_score",""), r.get("formula_ver",""),
         ])
 
     if dry_run:
@@ -838,7 +1135,7 @@ def write_summary_sheet(ss, sections, dry_run=False):
 # ── 主流程 ─────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="台灣股市推薦回測腳本 v1.5")
+    parser = argparse.ArgumentParser(description="台灣股市推薦回測腳本 v1.9")
     parser.add_argument("--days",    type=int, default=0,
                         help="只回測最近 N 天的推薦（0 = 全部）")
     parser.add_argument("--dry-run", action="store_true",
@@ -848,7 +1145,7 @@ def main():
     args = parser.parse_args()
 
     print("=" * 50)
-    print("  台灣股市推薦回測腳本 v1.5")
+    print("  台灣股市推薦回測腳本 v1.9")
     print("=" * 50)
 
     # ── dry-run 快速驗證 ──

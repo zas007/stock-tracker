@@ -19,7 +19,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.51"  # ← 每次 commit 只改這裡
+VERSION = "v11.54"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -3064,6 +3064,9 @@ RECOMMEND_HEADERS = [
     "融資趨勢",   # ANALYSIS_HEADERS[39]，近5天融資增減文字標籤（↗大增/增N張／↘大減/減N張／➡持平）
     "融券趨勢",   # ANALYSIS_HEADERS[33]，近期融券餘額連續同向天數文字標籤
     "佔股本比重%", # ★ v11.47 連續買超累計張數 佔 集保總股數(股本估計值) 比重，已納入評分(0~+8分)
+    # ★ v11.52 T42：新舊評分公式(v1/v2)並行比較，見 score_stock_v2() 上方說明
+    "另一版本評分",     # 本列若由v1入選，這裡填v2分數；若由v2入選(見「評分公式版本」)，這裡填v1分數
+    "評分公式版本",     # "v1"＝目前正式選股邏輯／"v2"＝本次改進方案，僅「🆕 v2評分限定候選」區塊會是v2
 ]
 
 PERFORMANCE_HEADERS = [
@@ -3090,6 +3093,9 @@ PERFORMANCE_HEADERS = [
     "融資趨勢",       # ANALYSIS_HEADERS[39] 文字標籤
     "融券趨勢",       # ANALYSIS_HEADERS[33] 文字標籤
     "佔股本比重%",    # ★ v11.47 對應 RECOMMEND_HEADERS[19]，供 backtest.py 日後驗證評分效果
+    # ★ v11.52 T42：新舊評分公式(v1/v2)並行比較，對應 RECOMMEND_HEADERS 新增的兩欄
+    "另一版本評分",
+    "評分公式版本",
 ]
 
 # ★ v11.46 由 RECOMMEND_HEADERS / PERFORMANCE_HEADERS 自動產生欄名→index 對照表，
@@ -3403,6 +3409,263 @@ def _score_momentum(chg_pct):
     return -2                       # 大跌
 
 
+# ═══════════════════════════════════════════════
+# ★ v11.52 新舊評分公式(v1舊/v2新)並行比較（T42）
+# 背景：2026/09/17 用「回測勝率」矩陣分析後，發現 v1（目前正式上線）有幾個因子的
+# 評分方向跟回測結果對不起來（例如爆量給最高分，但回測顯示爆量表現最差）。
+# 這裡新增 v2 公式（本次改進方案①②③④⑤），並行計算但「不」取代 v1 的實際選股：
+# update_recommendation() 依然用 v1 分數決定主榜/觀察組要推薦哪幾支股票，
+# v2 分數只是額外記錄下來，供之後回測比較用。
+#
+# ★ 這樣設計解決了「用歷史資料事後重算分數比較」的先天問題：backtest.py 原本的
+# 新舊公式比較只能在「v1已經選過的股票池」裡重新排序，沒辦法反映 v2 真正會選出
+# 但 v1 篩掉的股票；這裡是在正式選股當下，對「v1主榜+觀察組通過篩選的整批候選股」
+# 同步套用 v2 公式重新排名，找出「v2會選、但v1沒選進主榜/觀察組」的股票，
+# 額外寫入「明日關注」的「🆕 v2評分限定候選」區塊並照樣追蹤 T+1~T+5 表現，
+# 之後才有 v2 真正選股邏輯下的、非事後重算的勝率資料可以驗證。
+#
+# 改動對照（同 backtest.py v1.8 的版本，正式環境這裡改用真值算，比回測用重建近似值更準）：
+#   1. 量比：v1爆量(≥3倍)給最高分 → v2改1~2倍溫和放量給最高分，爆量降分
+#   2. 融資趨勢：v1「大減」比「減」分高 → v2縮小差距並反轉排序
+#   3. 連續天數矩陣：v1單調遞增 → v2改倒U型（3~5天甜蜜點，6~10天回落）
+#   4. 買超加速度：v1只佔0~3分 → v2加大到-2~+8分
+#   5. 振幅%：v1沒有這個因子 → v2新增，範圍-5~+5分
+# ═══════════════════════════════════════════════
+
+def _score_matrix_v2(consec, chip_lbl, today_amount=0, dampen=1.0):
+    """連續天數×籌碼集中度矩陣（v2：倒U型，3~5天甜蜜點，6~10天回落）。大型股補償邏輯與v1相同。"""
+    if chip_lbl == "🔵 高度集中":
+        if consec <= 2:    base = 20
+        elif consec <= 5:  base = 40
+        elif consec <= 10: base = 24
+        else:              base = 33
+    elif chip_lbl == "🟦 中度集中":
+        if consec <= 2:    base = 12
+        elif consec <= 5:  base = 27
+        elif consec <= 10: base = 16
+        else:              base = 22
+    else:  # 偏低
+        if consec <= 2:    base = 3
+        elif consec <= 5:  base = 10
+        elif consec <= 10: base = 5
+        else:              base = 8
+        try:
+            amt = float(today_amount) if today_amount else 0
+        except (ValueError, TypeError):
+            amt = 0
+        if amt >= 300_000_000:
+            base = min(int(base * 2 + 0.5), 27)
+        elif amt >= 100_000_000:
+            base = min(int(base * 1.5 + 0.5), 20)
+    return int(base * dampen)
+
+
+def _score_volume_ratio_v2(vr):
+    """量比評分（v2：1~2倍溫和放量給最高分，爆量降分，回測顯示爆量表現最差）"""
+    if vr is None or vr == "": return 3
+    try:
+        vr = float(vr)
+    except (ValueError, TypeError):
+        return 2
+    if vr >= 3.0: return 1
+    if vr >= 2.0: return 4
+    if vr >= 1.0: return 7
+    if vr >= 0.5: return 4
+    return 2
+
+
+def _score_margin_trend_v2(margin_trend):
+    """融資趨勢評分（v2：回測顯示「大減」勝率反而低於「減」，縮小差距並反轉排序）"""
+    s = str(margin_trend).strip()
+    if not s or s == "➡ 持平":
+        return 0
+    if "↘" in s: return 3 if "大減" in s else 6
+    if "↗" in s: return -6 if "大增" in s else -3
+    return 0
+
+
+def _score_accel_v2(accel_label):
+    """買超加速度評分（v2：加大到-2~+8分，🚀加速是回測樣本夠大、訊號最強的因子）"""
+    s = str(accel_label).strip()
+    if not s: return 1
+    if "🚀" in s: return 8
+    if "📈" in s: return 4
+    if "➡" in s: return 1
+    if "📉" in s: return -2
+    return 1
+
+
+def _score_amplitude_v2(amplitude):
+    """振幅%評分（v2新增因子，v1沒有；回測顯示2~5%表現最好，≥5%表現最差）"""
+    v = str(amplitude).strip()
+    if not v: return 0
+    try:
+        a = float(v.replace("⚡", "").replace("%", ""))
+    except ValueError:
+        return 0
+    if a < 2:   return 2
+    elif a < 5: return 5
+    else:       return -5
+
+
+def score_stock_v2(row, dampen=1.0):
+    """
+    v2版綜合評分：過濾條件與 score_stock() 完全相同（本次改進方案沒有動過濾邏輯），
+    差異只在矩陣/量比/融資趨勢/買超加速度四項改用新公式，並新增振幅%評分。
+    融資健康度/出貨風險/融券趨勢/集保大戶/今日買超金額/當日動能/佔股本比重維持不變。
+    ⚠️ 目前僅供比較用，不驅動實際選股（update_recommendation 仍用 score_stock()）。
+    """
+    code         = _ana_cell(row, "代號")
+    signal       = _ana_cell(row, "訊號")
+    risk         = _ana_cell(row, "出貨風險")
+    accel_label  = _ana_cell(row, "買超加速度")
+    chip_lbl     = _ana_cell(row, "籌碼集中度評級")
+    health       = _ana_cell(row, "融資健康度")
+    vr_raw       = _ana_cell(row, "量比", default=None)
+    tdcc_raw     = _ana_cell(row, "集保大戶")
+    short_trend  = _ana_cell(row, "融券趨勢")
+    today_amount = _ana_cell(row, "今日買超金額", default=0)
+    amplitude    = _ana_cell(row, "振幅%")
+    margin_trend = _ana_cell(row, "融資趨勢")
+    shares_pct   = _ana_cell(row, "佔股本比重%", default=None)
+    try:
+        today_amount = float(today_amount) if today_amount else 0
+    except (ValueError, TypeError):
+        today_amount = 0
+    try:
+        volume_ratio = float(vr_raw) if (vr_raw is not None and vr_raw != "") else None
+    except (ValueError, TypeError):
+        volume_ratio = None
+
+    tdcc_big_pct, tdcc_weekly_chg = None, None
+    if tdcc_raw:
+        m_pct = re.search(r"([\d.]+)%", str(tdcc_raw))
+        m_chg = re.search(r"[↑↓➡]([\d.]+)", str(tdcc_raw))
+        if m_pct:
+            tdcc_big_pct = float(m_pct.group(1))
+        if m_chg:
+            sign = 1 if "↑" in str(tdcc_raw) else (-1 if "↓" in str(tdcc_raw) else 0)
+            tdcc_weekly_chg = sign * float(m_chg.group(1))
+
+    _finance_codes = set(SECTOR_MAP.get("金融", []))
+    if is_etf_code(code):               return None
+    if code in _finance_codes:          return None
+    if "🔴 今日賣超" in str(signal):     return None
+    if not chip_lbl:                     return None
+    if risk == "🔴 高":                  return None
+
+    try:
+        close_val = float(str(_ana_cell(row, "現價")).replace(",", ""))
+        if close_val > 400:              return None
+    except (ValueError, TypeError):
+        pass
+
+    chg_str = str(_ana_cell(row, "當日漲跌%")).replace("%", "").replace("+", "").strip()
+    try:
+        chg = float(chg_str)
+        if chg > 8.0:                    return None
+    except (ValueError, TypeError):
+        pass
+
+    consec = max(
+        int(_ana_cell(row, "外資連續天數"))   if str(_ana_cell(row, "外資連續天數")).isdigit()   else 0,
+        int(_ana_cell(row, "投信連續天數"))   if str(_ana_cell(row, "投信連續天數")).isdigit()   else 0,
+        int(_ana_cell(row, "自營商連續天數")) if str(_ana_cell(row, "自營商連續天數")).isdigit() else 0,
+    )
+    if consec == 0: return None
+
+    try:
+        chg_val = float(str(_ana_cell(row, "當日漲跌%")).replace("%", "").replace("+", "").strip())
+    except (ValueError, TypeError):
+        chg_val = 0.0
+
+    score = (
+        _score_matrix_v2(consec, chip_lbl, today_amount, dampen) +
+        _score_margin(health) +
+        _score_risk(risk) +
+        _score_volume_ratio_v2(volume_ratio) +
+        _score_accel_v2(accel_label) +
+        _score_short_trend(short_trend) +
+        _score_tdcc(tdcc_big_pct, tdcc_weekly_chg) +
+        _score_net_amount(today_amount) +
+        _score_momentum(chg_val) +
+        _score_margin_trend_v2(margin_trend) +
+        _score_shares_pct(shares_pct) +
+        _score_amplitude_v2(amplitude)
+    )
+    return max(0, min(score, 100))
+
+
+def score_stock_relaxed_v2(row, dampen=1.0):
+    """v2版觀察組評分：過濾條件與 score_stock_relaxed() 相同，評分公式差異同 score_stock_v2()。"""
+    code         = _ana_cell(row, "代號")
+    signal       = _ana_cell(row, "訊號")
+    risk         = _ana_cell(row, "出貨風險")
+    accel_label  = _ana_cell(row, "買超加速度")
+    chip_lbl     = _ana_cell(row, "籌碼集中度評級")
+    health       = _ana_cell(row, "融資健康度")
+    vr_raw       = _ana_cell(row, "量比", default=None)
+    tdcc_raw     = _ana_cell(row, "集保大戶")
+    short_trend  = _ana_cell(row, "融券趨勢")
+    today_amount = _ana_cell(row, "今日買超金額", default=0)
+    amplitude    = _ana_cell(row, "振幅%")
+    margin_trend = _ana_cell(row, "融資趨勢")
+    shares_pct   = _ana_cell(row, "佔股本比重%", default=None)
+    try:
+        today_amount = float(today_amount) if today_amount else 0
+    except (ValueError, TypeError):
+        today_amount = 0
+    try:
+        volume_ratio = float(vr_raw) if (vr_raw is not None and vr_raw != "") else None
+    except (ValueError, TypeError):
+        volume_ratio = None
+
+    tdcc_big_pct, tdcc_weekly_chg = None, None
+    if tdcc_raw:
+        m_pct = re.search(r"([\d.]+)%", str(tdcc_raw))
+        m_chg = re.search(r"[↑↓➡]([\d.]+)", str(tdcc_raw))
+        if m_pct:
+            tdcc_big_pct = float(m_pct.group(1))
+        if m_chg:
+            sign = 1 if "↑" in str(tdcc_raw) else (-1 if "↓" in str(tdcc_raw) else 0)
+            tdcc_weekly_chg = sign * float(m_chg.group(1))
+
+    _finance_codes = set(SECTOR_MAP.get("金融", []))
+    if is_etf_code(code):              return None
+    if code in _finance_codes:         return None
+    if "🔴 今日賣超" in str(signal):    return None
+    if not chip_lbl:                    return None
+    # 不過濾出貨風險🔴、不過濾現價>400、不過濾漲幅>8%（同 score_stock_relaxed）
+
+    consec = max(
+        int(_ana_cell(row, "外資連續天數"))   if str(_ana_cell(row, "外資連續天數")).isdigit()   else 0,
+        int(_ana_cell(row, "投信連續天數"))   if str(_ana_cell(row, "投信連續天數")).isdigit()   else 0,
+        int(_ana_cell(row, "自營商連續天數")) if str(_ana_cell(row, "自營商連續天數")).isdigit() else 0,
+    )
+    if consec == 0: return None
+
+    try:
+        chg_val = float(str(_ana_cell(row, "當日漲跌%")).replace("%", "").replace("+", "").strip())
+    except (ValueError, TypeError):
+        chg_val = 0.0
+
+    score = (
+        _score_matrix_v2(consec, chip_lbl, today_amount, dampen) +
+        _score_margin(health) +
+        _score_risk(risk) +
+        _score_volume_ratio_v2(volume_ratio) +
+        _score_accel_v2(accel_label) +
+        _score_short_trend(short_trend) +
+        _score_tdcc(tdcc_big_pct, tdcc_weekly_chg) +
+        _score_net_amount(today_amount) +
+        _score_momentum(chg_val) +
+        _score_margin_trend_v2(margin_trend) +
+        _score_shares_pct(shares_pct) +
+        _score_amplitude_v2(amplitude)
+    )
+    return max(0, min(score, 100))
+
+
 def score_stock(row, dampen=1.0):
     """
     輸入 build_row 產出的 row，回傳綜合評分（0~100）。
@@ -3504,14 +3767,6 @@ def score_stock(row, dampen=1.0):
     return max(0, min(score, 100))
 
 
-def score_stock_relaxed(row, dampen=1.0):
-    """
-    ★ v11.21 觀察組用：放鬆過濾條件的評分版本。
-    取消：出貨風險🔴過濾、現價>400過濾。
-    保留：ETF過濾、今日賣超過濾、consec==0過濾。
-    評分邏輯與 score_stock 相同（包含動能分）。
-    ★ v11.35 dampen：同 score_stock，大盤警訊🟡/🔴時降權矩陣分數。
-    """
 def score_stock_relaxed(row, dampen=1.0):
     """
     ★ v11.21 觀察組用：放鬆過濾條件的評分版本。
@@ -3678,6 +3933,8 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
 
         s = score_stock(row, dampen=_score_dampen)
         if s is not None:
+            # ★ v11.52 T42：同步算 v2 分數存進「另一版本評分」，不影響 s 決定的實際選股結果
+            s2 = score_stock_v2(row, dampen=_score_dampen)
             # ★ v11.46 改用 _make_rec_row(dict) 依 REC_IDX 組列，不再靠手動排列的 list 位置
             #   （原本這裡曾因為 dealer/amp_lbl 手動排列順序對調而寫錯欄位，見 v11.37 修正）
             r = _make_rec_row({
@@ -3688,6 +3945,7 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
                 "推薦買進價位": buy_label, "買進區間低": buy_low, "買進區間高": buy_high,
                 "量比": vol_ratio, "融資趨勢": margin_trend, "融券趨勢": short_trend,
                 "佔股本比重%": shares_pct,   # ★ v11.47
+                "另一版本評分": s2 if s2 is not None else "", "評分公式版本": "v1",   # ★ v11.52 T42
             })
             scored.append((s, r))
 
@@ -3698,6 +3956,8 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
             # s is None 代表被主榜過濾掉的（高風險/高價等），重算放鬆版評分
             sw = score_stock_relaxed(row, dampen=_score_dampen)
             if sw is not None:
+                # ★ v11.52 T42：同步算 v2 放鬆版分數
+                sw2 = score_stock_relaxed_v2(row, dampen=_score_dampen)
                 rw = _make_rec_row({
                     "代號": code, "股票名稱": name, "評分": sw, "連續天數": consec,
                     "籌碼集中度%": chip_pct, "籌碼集中度評級": chip_lbl,
@@ -3706,6 +3966,7 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
                     "推薦買進價位": buy_label, "買進區間低": buy_low, "買進區間高": buy_high,
                     "量比": vol_ratio, "融資趨勢": margin_trend, "融券趨勢": short_trend,
                     "佔股本比重%": shares_pct,   # ★ v11.47
+                    "另一版本評分": sw2 if sw2 is not None else "", "評分公式版本": "v1",   # ★ v11.52 T42
                 })
                 watch_scored.append((sw, rw))
 
@@ -3718,6 +3979,33 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
 
     watch_scored.sort(key=lambda x: x[0], reverse=True)
     watch5 = [x for x in watch_scored if x[1][REC_IDX["代號"]] not in top5_codes][:5]
+
+    # ★ v11.52 T42：從「v1主榜+觀察組通過篩選的整批候選股」（scored ∪ watch_scored，
+    # 不只是取前5後的 top5/watch5）依「另一版本評分」(v2分數) 重新排序，
+    # 找出「v2會選、但v1完全沒選進主榜/觀察組」的股票——這樣後續才有 v2 真正選股邏輯下、
+    # 非事後重算的勝率資料可以驗證（解決 backtest.py 事後重算只能在v1選過的池子裡排序的先天限制）。
+    v1_selected_codes = top5_codes | {x[1][REC_IDX["代號"]] for x in watch5}
+    _v2_pool = [(r[REC_IDX["另一版本評分"]], r) for _, r in (scored + watch_scored)
+                if r[REC_IDX["另一版本評分"]] != ""]
+    _v2_pool.sort(key=lambda x: x[0], reverse=True)
+    # ★ v11.54 修正：原本只看「v2排名前5名」再篩掉v1已選過的，但v1/v2共用大部分評分因子
+    # （融資健康度/出貨風險/融券趨勢/佔股本比重完全相同，只有矩陣/量比/融資趨勢/加速度/振幅五項不同），
+    # v2的前5名本來就會跟v1名單高度重疊，篩完常常只剩1、2筆，沒辦法真正驗證v2的選股能力。
+    # 改成往下掃「整個」v2排序池，直到湊滿5筆v1完全沒選過的股票，而不是只看v2排名前5名。
+    v2_only = []   # v2選中、但不在v1主榜+觀察組裡的股票
+    _seen_v2_only = set()
+    for v2_score, r in _v2_pool:
+        if len(v2_only) >= 5:
+            break
+        code_ = r[REC_IDX["代號"]]
+        if code_ not in v1_selected_codes and code_ not in _seen_v2_only:
+            # 複製一份，把「評分」換成v2分數，「另一版本評分」換成v1分數，標記評分公式版本=v2
+            r2 = list(r)
+            r2[REC_IDX["評分"]] = v2_score
+            r2[REC_IDX["另一版本評分"]] = r[REC_IDX["評分"]]   # 原本存的是v1分數
+            r2[REC_IDX["評分公式版本"]] = "v2"
+            v2_only.append((v2_score, r2))
+            _seen_v2_only.add(code_)
 
     n_cols = len(RECOMMEND_HEADERS)
     ws = get_or_create(ss, "明日關注", n_cols)
@@ -3748,7 +4036,47 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
             [f"── ⚠️ 高風險觀察組（條件放寬，僅供參考）"] + [""] * (n_cols - 1),
         ] + watch_rows
 
+    # ★ v11.52 T42：v2評分限定候選區塊（v2公式選中但v1未選進主榜/觀察組，「評分」欄=v2分數）
+    #   目的：讓這些股票也一起被「推薦成效/推薦歷史」追蹤 T+1~T+5 表現，
+    #   之後才有 v2 真正選股邏輯下、非backtest.py事後重算的勝率資料可驗證
+    v2_only_rows = []
+    for rank, (score, r2) in enumerate(v2_only, 1):
+        r2[REC_IDX["排名"]] = rank
+        v2_only_rows.append(r2)
+    if v2_only_rows:
+        # ★ v11.53 T42 除錯：印出每一列的長度與完整內容，確認寫入 Sheets 前，
+        # 記憶體裡的資料是否真的是完整 22 欄（排除「組資料當下就已經漏欄」的可能性）
+        for _rank, _r2 in enumerate(v2_only_rows, 1):
+            print(f"  🔍 v2限定候選 debug row{_rank}：長度={len(_r2)}（應為{n_cols}）"
+                  f" 內容={_r2}")
+        block += [
+            [f"── 🆕 v2評分限定候選（新公式選中但v1未入榜，僅供追蹤比較，非正式推薦）"] + [""] * (n_cols - 1),
+        ] + v2_only_rows
+
     prepend_block(ws, block, disp, "資料日期：", n_cols)
+
+    # ★ v11.53 T42 除錯：寫入後立刻回讀，比對 v2限定候選 實際存進 Sheets 的內容
+    # 跟「寫入前記憶體裡預期的內容」是否一致，藉此判斷資料到底是在
+    # prepend_block()/safe_rewrite() 寫入時遺失，還是之後的 _apply_alert_colors/
+    # _apply_banner_merges 造成的（兩者都只動格式/合併，理論上不該動到值，
+    # 但先實測排除，不用再猜）
+    if v2_only_rows:
+        try:
+            _after_write = ws.get_all_values()
+            for _r2 in v2_only_rows:
+                _code_expect = _r2[REC_IDX["代號"]]
+                _found = next((row for row in _after_write
+                               if len(row) > REC_IDX["代號"] and row[REC_IDX["代號"]] == _code_expect), None)
+                if _found is None:
+                    print(f"  ❌ v2限定候選 除錯：代號={_code_expect} 寫入後在 Sheets 裡完全找不到這一列！")
+                elif _found[REC_IDX["股票名稱"]] != _r2[REC_IDX["股票名稱"]] or len(_found) < n_cols:
+                    print(f"  ❌ v2限定候選 除錯：代號={_code_expect} 寫入後資料跟預期不一致"
+                          f"（長度={len(_found)}／應{n_cols}，實際內容={_found}）")
+                else:
+                    print(f"  ✅ v2限定候選 除錯：代號={_code_expect} 寫入後核對正確")
+        except Exception as e:
+            print(f"  ⚠️ v2限定候選 寫入後回讀驗證失敗（不影響本次執行）：{e}")
+
     _apply_alert_colors(ws, n_cols)   # ★ v11.34 重新掃描全表，為每一筆「⚠️ 大盤警訊：」列上底色
     _apply_banner_merges(ws, n_cols)  # ★ v11.39 橫幅列合併儲存格，手機閱讀不被截斷
 
@@ -3760,9 +4088,12 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
 
     top5_names = ', '.join(r[REC_IDX["股票名稱"]] for _, r in top5)
     watch_names = ', '.join(r[REC_IDX["股票名稱"]] for _, r in watch5)
+    v2_only_names = ', '.join(r2[REC_IDX["股票名稱"]] for _, r2 in v2_only)
     print(f"  ✅ 明日關注 更新完成（Top5：{top5_names}）")
     if watch_names:
         print(f"  ⚠️ 觀察組：{watch_names}")
+    if v2_only_names:
+        print(f"  🆕 v2限定候選：{v2_only_names}")
     return futures_line
 
 
@@ -3798,6 +4129,10 @@ def _parse_rec_sheet(all_vals, disp_today):
                     break
                 if "高風險觀察組" in c0:     # ★ v11.21 觀察組 header
                     group = "觀察組"
+                    i += 1
+                    continue
+                if "v2評分限定候選" in c0:   # ★ v11.52 T42 v2限定候選 header
+                    group = "v2限定候選"
                     i += 1
                     continue
                 if c0.startswith("── "):     # 其他分隔行跳過
@@ -4055,6 +4390,10 @@ def update_performance(ss, date_str, current_prices):
                     group = "觀察組"
                     j += 1
                     continue
+                if "v2評分限定候選" in c0:  # ★ v11.52 T42
+                    group = "v2限定候選"
+                    j += 1
+                    continue
                 if c0.startswith("── "):
                     j += 1
                     continue
@@ -4081,17 +4420,21 @@ def update_performance(ss, date_str, current_prices):
                     margin_trend = _rec_cell(r, "融資趨勢")
                     short_trend  = _rec_cell(r, "融券趨勢")
                     shares_pct   = _rec_cell(r, "佔股本比重%")   # ★ v11.47
+                    other_score  = _rec_cell(r, "另一版本評分")   # ★ v11.52 T42
+                    formula_ver  = _rec_cell(r, "評分公式版本", default="v1")   # ★ v11.52 T42
                     today_stocks.append((_code_cell, _rec_cell(r, "股票名稱"), _rec_cell(r, "評分"), close, group, risk, margin_health,
                                           buy_label, buy_low, buy_high,
                                           consec, chip_pct, chip_lbl, amp, dealer,
-                                          vol_ratio, margin_trend, short_trend, shares_pct))
+                                          vol_ratio, margin_trend, short_trend, shares_pct,
+                                          other_score, formula_ver))
                 j += 1
             break
 
     new_rows = []
     for (code, name, score, base_close, group, risk, margin_health, buy_label, buy_low, buy_high,
          consec, chip_pct, chip_lbl, amp, dealer,
-         vol_ratio, margin_trend, short_trend, shares_pct) in today_stocks:
+         vol_ratio, margin_trend, short_trend, shares_pct,
+         other_score, formula_ver) in today_stocks:
         if code not in today_codes_in_rows:
             # ★ v11.46 改用 _make_perf_row(dict) 依 PERF_IDX 組列，T+1~T+5 欄留空，步驟2再依交易日填入
             new_rows.append(_make_perf_row({
@@ -4103,6 +4446,7 @@ def update_performance(ss, date_str, current_prices):
                 "振幅%": amp, "自營商標記": dealer,
                 "量比": vol_ratio, "融資趨勢": margin_trend, "融券趨勢": short_trend,
                 "佔股本比重%": shares_pct,   # ★ v11.47
+                "另一版本評分": other_score, "評分公式版本": formula_ver,   # ★ v11.52 T42
             }))
 
     rows = new_rows + rows

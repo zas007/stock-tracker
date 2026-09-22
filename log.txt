@@ -1,1122 +1,5 @@
 ✅ 已載入 config.py
 ==================================================
-  台灣股市三大法人買超/賣超追蹤 v11.48
-  config.py 獨立設定 ｜ 族群聯動累積 ｜ 分模式執行
-==================================================
-  族群反查表：417 支股票已對應族群
-
-🔌 連接 Google Sheets...
-  ✅ 連接成功
-
-📡 Step 1/5 抓取三大法人資料...
-  執行時間：2026/08/28 18:00  [v11.48]
-  嘗試 20260828...
-  T86 欄位數：19，資料筆數：1326
-
-  ✅ 資料日期：2026/08/28
-  外資  買超 50 筆 / 賣超 50 筆
-  投信  買超 50   筆 / 賣超 50 筆
-  自營商買超 50  筆 / 賣超 50 筆
-  外資買超第1：主動統一升級50 (146,021 張)
-  外資賣超第1：華邦電 (31,132 張)
-  投信買超第1：南亞 (8,561 張)
-  自營商買超第1：主動統一升級50 (206,803 張)
-
-  ▶ [v11.48] 18:00:08  耗時 0.2s  Step 1/5 三大法人 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
-  ℹ️ 快取日期：20260827
-  📋 20260827 快取讀取完成
-  ⚠️ 快取日期不符（20260827 ≠ 20260828），重新抓取
-
-💹 Step 2/5 抓取個股價格與成交量...
-  [batch] STOCK_DAY_ALL 20260828...
-  [batch] ✅ CSV 格式，1366 支
-  [otc] 抓取上櫃行情（20260828）...
-  ⚠️ 價格抓取部分失敗：'utf-8' codec can't decode byte 0xe8 in position 801567: unexpected end of data
-
-  ▶ [v11.48] 18:00:30  耗時 20.2s  Step 2/5 個股價格 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
-
-📋 Step 3/5 抓取融資融券資料...
-  融資融券日期：20260827（全市場 1295 支）
-  ✅ 融資融券 找到 118/118 支
-
-  ▶ [v11.48] 18:00:30  耗時 0.1s  Step 3/5 融資融券 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
-  💾 快取已寫入 Sheets（日期：20260828，共 17 列）
-
-📊 Step 4/5 寫入 Google Sheets...
-  ✅ 今日買超排行 更新完成
-  ✅ 今日賣超排行 更新完成
-  🗑️  歷史紀錄：清除 300 筆超過1個月的舊資料
-  ✅ 歷史紀錄 新增 300 筆（合計 7172 筆，日期降序）
-  📊 集保 CSV 解析完成（日期：20260821，命中 545/546 支）
-  ℹ️ 集保日期未更新（20260821），使用快取
-  📡 保底補抓現價（1 支，快取未涵蓋）...
-  [batch] STOCK_DAY_ALL 20260828...
-  [batch] ✅ CSV 格式，1366 支
-  [batch] 保底命中 0/1 支
-  [otc] 抓取上櫃行情（20260828）...
-  [otc] ✅ 6095 支
-  [otc] 保底命中 0/1 支
-  [skip] 1 支 batch/OTC/快取均未命中，跳過（量比 None）
-  ✅ 現價保底完成
-  📡 保底補抓融資融券（428 支，快取未涵蓋）...
-  融資融券日期：20260827（全市場 1295 支）
-  ✅ 融資融券保底完成（找到 424/428 支）
-  📡 抓取大盤指數...
-  加權指數（FMTQIK）：+0.77%
-  加權指數：+0.77%
-  📡 抓取5日均線（435 支）...
-  [ma5-batch] 收盤價歷史命中 2948/3480 天格，今日現價 226/435 支
-  [ma5-batch] 歷史+現價不足5天，補底 3 支...
-  [ma5-batch] 5日線計算完成（434/435 支有效）
-  ✅ 對照分析 更新完成（284 支，合計累計天數由低至高）
-  ✅ 每日快照 更新完成（最新快照插入最上方）
-  所有買超股票均已在族群表中
-  補抓族群成員行情（10 支不在快取中）...
-  [batch] STOCK_DAY_ALL 20260828...
-  [batch] ✅ CSV 格式，1366 支
-  [batch] 族群補抓命中 0/10 支
-  [otc] 抓取上櫃行情（20260828）...
-  [otc] ✅ 6095 支
-  [otc] 族群補抓命中 6/10 支
-  [skip] 4 支 batch/OTC 均未命中，跳過
-  ✅ 族群聯動 更新完成（19 個族群觸發，累積至工作表頂部）
-  📡 抓取外資期貨未平倉...
-  外資大台指淨部位：🟡 +1,137 口　較前日 🟢 +2,285
-  ⚠️ 大盤警訊：🔴 高風險　融資異常放大 17 檔、出貨風險紅燈 3 檔
-  ⚙️ 情境降權啟動：籌碼集中度/連續天數矩陣分數 ×0.5（依據 red 警訊）
-  ✅ 橫幅列合併 153 列
-  ⚠️ 警訊底色設定失敗（不影響資料寫入）：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ✅ 警訊 寫入完成（2026/08/28 → red）
-  ✅ 明日關注 更新完成（Top5：）
-  ⚠️ 期貨快取存回失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⏳ 429 Quota，等待 30 秒後重試（1/3）...
-  ⏳ 429 Quota，等待 60 秒後重試（2/3）...
-
-❌ 寫入失敗（推薦成效追蹤）：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-繼續其他工作表？(Y/n)（10 秒後自動繼續）:   🗑️  融券歷史：清除 405 筆超過1個月的舊資料
-  ⏳ 429 Quota，等待 30 秒後重試（1/3）...
-  ✅ 融券歷史 寫入 439 筆（2026/08/28）
-  ✅ 族群熱度 更新完成（28 個族群有近期活動）
-  📢 重大訊息（2026/08/27）：命中 0 筆（利多/利空）
-  📢 重大訊息（2026/08/28）：命中 0 筆（利多/利空）
-  ✅ 重大訊息歷史 寫入 0 筆（2026/08/28）
-  🗑️  融資歷史：清除 500 筆超過1個月的舊資料
-  ✅ 融資歷史 寫入 535 筆（2026/08/28）
-  🗑️  成交量歷史：清除 1362 筆超過1個月的舊資料
-  ✅ 成交量歷史 寫入 1145 筆（2026/08/28）
-  ✅ 收盤價歷史 寫入 1148 筆（2026/08/28）
-
-🎉 完成！
-  https://docs.google.com/spreadsheets/d/1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g
-  🗑️  log.txt 清理完成：移除 1 次舊執行紀錄，保留最近 14 次（1777 → 1667 行）
-
-  ▶ [v11.48] 18:06:45  耗時 373.0s  Step 4/5 寫入 Sheets 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
-按 Enter 關閉（15 秒後自動關閉）...
-✅ 已載入 config.py
-==================================================
-  台灣股市三大法人買超/賣超追蹤 v11.48
-  config.py 獨立設定 ｜ 族群聯動累積 ｜ 分模式執行
-==================================================
-  族群反查表：417 支股票已對應族群
-
-🔌 連接 Google Sheets...
-  ✅ 連接成功
-
-📡 Step 1/5 抓取三大法人資料...
-  執行時間：2026/08/31 18:00  [v11.48]
-  嘗試 20260831...
-  T86 欄位數：19，資料筆數：1331
-
-  ✅ 資料日期：2026/08/31
-  外資  買超 50 筆 / 賣超 50 筆
-  投信  買超 50   筆 / 賣超 50 筆
-  自營商買超 50  筆 / 賣超 50 筆
-  外資買超第1：力積電 (73,709 張)
-  外資賣超第1：主動中信台灣收益 (38,860 張)
-  投信買超第1：聯電 (6,339 張)
-  自營商買超第1：元大台灣50反1 (72,897 張)
-
-  ▶ [v11.48] 18:00:14  耗時 5.3s  Step 1/5 三大法人 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
-  ℹ️ 快取日期：20260828
-  📋 20260828 快取讀取完成
-  ⚠️ 快取日期不符（20260828 ≠ 20260831），重新抓取
-
-💹 Step 2/5 抓取個股價格與成交量...
-  [batch] STOCK_DAY_ALL 20260831...
-  [batch] ✅ CSV 格式，1365 支
-  [otc] 抓取上櫃行情（20260831）...
-  [otc] ✅ 5688 支
-  [batch] 命中 121/121，剩餘 0 支...
-
-  ▶ [v11.48] 18:00:27  耗時 11.9s  Step 2/5 個股價格 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
-
-📋 Step 3/5 抓取融資融券資料...
-  融資融券日期：20260828（全市場 1295 支）
-  ✅ 融資融券 找到 121/121 支
-
-  ▶ [v11.48] 18:00:28  耗時 1.3s  Step 3/5 融資融券 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
-  💾 快取已寫入 Sheets（日期：20260831，共 17 列）
-
-📊 Step 4/5 寫入 Google Sheets...
-  ✅ 今日買超排行 更新完成
-  ✅ 今日賣超排行 更新完成
-  🗑️  歷史紀錄：清除 890 筆超過1個月的舊資料
-  ✅ 歷史紀錄 新增 300 筆（合計 6582 筆，日期降序）
-  📊 集保 CSV 解析完成（日期：20260828，命中 533/535 支）
-  📡 集保有新資料（20260828），更新快取...
-  💾 集保快取 更新 533 筆（共 650 筆）
-  📡 保底補抓現價（1 支，快取未涵蓋）...
-  [batch] STOCK_DAY_ALL 20260831...
-  [batch] ✅ CSV 格式，1365 支
-  [batch] 保底命中 0/1 支
-  [otc] 抓取上櫃行情（20260831）...
-  [otc] ❌ 解析失敗：Unterminated string starting at: line 1 column 536349 (char 536348)
-  [otc] ⏳ 等待 3 秒後重試（1/2）...
-  [otc] 抓取上櫃行情（20260831）（重試）...
-  [otc] ❌ 解析失敗：Expecting ',' delimiter: line 1 column 247128 (char 247127)
-  [otc] ⏳ 等待 3 秒後重試（2/2）...
-  [otc] 抓取上櫃行情（20260831）（重試）...
-  [otc] ❌ 解析失敗：Expecting value: line 1 column 338498 (char 338497)
-  [otc] ❌ 重試 3 次仍失敗，回傳空表
-  [skip] 1 支 batch/OTC/快取均未命中，跳過（量比 None）
-  ✅ 現價保底完成
-  📡 保底補抓融資融券（414 支，快取未涵蓋）...
-  融資融券日期：20260828（全市場 1295 支）
-  ✅ 融資融券保底完成（找到 411/414 支）
-  📡 抓取大盤指數...
-  加權指數（FMTQIK）：-0.44%
-  加權指數：-0.44%
-  📡 抓取5日均線（421 支）...
-  [ma5-batch] 收盤價歷史命中 2725/3368 天格，今日現價 420/421 支
-  [ma5-batch] 歷史+現價不足5天，補底 2 支...
-  [ma5-batch] 5日線計算完成（420/421 支有效）
-  ✅ 對照分析 更新完成（272 支，合計累計天數由低至高）
-  ✅ 每日快照 更新完成（最新快照插入最上方）
-  所有買超股票均已在族群表中
-  補抓族群成員行情（5 支不在快取中）...
-  [batch] STOCK_DAY_ALL 20260831...
-  [batch] ✅ CSV 格式，1365 支
-  [batch] 族群補抓命中 0/5 支
-  [otc] 抓取上櫃行情（20260831）...
-  [otc] ❌ 解析失敗：Unterminated string starting at: line 1 column 323194 (char 323193)
-  [otc] ⏳ 等待 3 秒後重試（1/2）...
-  [otc] 抓取上櫃行情（20260831）（重試）...
-  [otc] ✅ 5688 支
-  [otc] 族群補抓命中 0/5 支
-  [skip] 5 支 batch/OTC 均未命中，跳過
-  ✅ 族群聯動 更新完成（18 個族群觸發，累積至工作表頂部）
-  📡 抓取外資期貨未平倉...
-  外資大台指淨部位：🟡 +712 口　較前日 🟡 -425
-  ⚠️ 大盤警訊：🔴 高風險　融資異常放大 18 檔、出貨風險紅燈 6 檔
-  ⚙️ 情境降權啟動：籌碼集中度/連續天數矩陣分數 ×0.5（依據 red 警訊）
-  ⚠️ 解除舊合併失敗（不影響資料）：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 橫幅合併失敗（不影響資料）：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 警訊底色設定失敗（不影響資料寫入）：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ✅ 警訊 寫入完成（2026/08/31 → red）
-  ✅ 明日關注 更新完成（Top5：台塑, 仁寶, 力積電, 統一, 中石化）
-  ⚠️ 觀察組：台化, 建準, 全新, 聯詠, 臻鼎-KY
-  ⚠️ 期貨快取存回失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⏳ 429 Quota，等待 30 秒後重試（1/3）...
-  ⏳ 429 Quota，等待 60 秒後重試（2/3）...
-
-❌ 寫入失敗（推薦成效追蹤）：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-繼續其他工作表？(Y/n)（10 秒後自動繼續）:   ✅ 融券歷史 寫入 431 筆（2026/08/31）
-  ✅ 族群熱度 更新完成（28 個族群有近期活動）
-  📢 重大訊息（2026/08/28）：命中 0 筆（利多/利空）
-  📢 重大訊息（2026/08/31）：命中 0 筆（利多/利空）
-  ✅ 重大訊息歷史 寫入 0 筆（2026/08/31）
-  🗑️  融資歷史：清除 1507 筆超過1個月的舊資料
-  ✅ 融資歷史 寫入 526 筆（2026/08/31）
-  🗑️  成交量歷史：清除 17124 筆超過1個月的舊資料
-  ✅ 成交量歷史 寫入 7050 筆（2026/08/31）
-  ⏳ 429 Quota，等待 30 秒後重試（1/3）...
-  ✅ 收盤價歷史 寫入 7053 筆（2026/08/31）
-
-🎉 完成！
-  https://docs.google.com/spreadsheets/d/1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g
-  🗑️  log.txt 清理完成：移除 1 次舊執行紀錄，保留最近 14 次（1794 → 1678 行）
-
-  ▶ [v11.48] 18:07:21  耗時 410.7s  Step 4/5 寫入 Sheets 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
-按 Enter 關閉（15 秒後自動關閉）...
-✅ 已載入 config.py
-==================================================
-  台灣股市三大法人買超/賣超追蹤 v11.48
-  config.py 獨立設定 ｜ 族群聯動累積 ｜ 分模式執行
-==================================================
-  族群反查表：417 支股票已對應族群
-
-🔌 連接 Google Sheets...
-  ✅ 連接成功
-
-📡 Step 1/5 抓取三大法人資料...
-  執行時間：2026/09/01 10:14  [v11.48]
-  16:30 前自動使用前一交易日（三大法人資料 16:30 後才釋出）
-  嘗試 20260831...
-  T86 欄位數：19，資料筆數：1335
-
-  ✅ 資料日期：2026/08/31
-  外資  買超 50 筆 / 賣超 50 筆
-  投信  買超 50   筆 / 賣超 50 筆
-  自營商買超 50  筆 / 賣超 50 筆
-  外資買超第1：力積電 (73,709 張)
-  外資賣超第1：主動中信台灣收益 (38,860 張)
-  投信買超第1：聯電 (6,339 張)
-  自營商買超第1：元大台灣50反1 (72,897 張)
-
-  ▶ [v11.48] 10:14:09  耗時 1.9s  Step 1/5 三大法人 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
-  ⏩ 自動繼續。
-  ℹ️ 快取日期：20260831
-  📋 20260831 快取讀取完成
-  ✅ 快取命中（日期吻合），跳過 Step 2/3 API 抓取
-
-💹 Step 2/5 抓取全市場行情（快取命中，補抓全市場）...
-  [batch] STOCK_DAY_ALL 20260831...
-  [batch] ✅ CSV 格式，1365 支
-  [otc] 抓取上櫃行情（20260831）...
-  [otc] ✅ 5688 支
-
-  ▶ [v11.48] 10:14:19  耗時 3.0s  Step 2~3/5 行情補抓（快取） 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
-  ⏩ 自動繼續。
-
-📊 Step 4/5 寫入 Google Sheets...
-  ✅ 今日買超排行 更新完成
-  ✅ 今日賣超排行 更新完成
-  ✅ 歷史紀錄 新增 300 筆（合計 6582 筆，日期降序）
-  📊 集保 CSV 解析完成（日期：20260828，命中 533/535 支）
-  ℹ️ 集保日期未更新（20260828），使用快取
-  📡 保底補抓現價（1 支，快取未涵蓋）...
-  [batch] STOCK_DAY_ALL 20260831...
-  [batch] ✅ CSV 格式，1365 支
-  [batch] 保底命中 0/1 支
-  [otc] 抓取上櫃行情（20260831）...
-  [otc] ✅ 5688 支
-  [otc] 保底命中 0/1 支
-  [skip] 1 支 batch/OTC/快取均未命中，跳過（量比 None）
-  ✅ 現價保底完成
-  📡 保底補抓融資融券（414 支，快取未涵蓋）...
-  融資融券日期：20260828（全市場 1295 支）
-  ✅ 融資融券保底完成（找到 411/414 支）
-  📡 抓取大盤指數...
-  加權指數（FMTQIK）：-0.44%
-  加權指數：-0.44%
-  📡 抓取5日均線（421 支）...
-  [ma5-batch] 收盤價歷史命中 0/3368 天格，今日現價 420/421 支
-  [ma5-batch] 歷史+現價不足5天，補底 421 支...
-  [ma5-batch] 5日線計算完成（79/421 支有效）
-  ✅ 對照分析 更新完成（271 支，合計累計天數由低至高）
-  ✅ 每日快照 更新完成（最新快照插入最上方）
-  所有買超股票均已在族群表中
-  補抓族群成員行情（5 支不在快取中）...
-  [batch] STOCK_DAY_ALL 20260831...
-  [batch] ✅ CSV 格式，1365 支
-  [batch] 族群補抓命中 0/5 支
-  [otc] 抓取上櫃行情（20260831）...
-  [otc] ✅ 5688 支
-  [otc] 族群補抓命中 0/5 支
-  [skip] 5 支 batch/OTC 均未命中，跳過
-  ✅ 族群聯動 更新完成（17 個族群觸發，累積至工作表頂部）
-  📡 抓取外資期貨未平倉...
-  外資大台指淨部位：🟡 +712 口　較前日 🟡 -425
-  ⚠️ 大盤警訊：🔴 高風險　融資異常放大 18 檔、出貨風險紅燈 6 檔
-  ⚙️ 情境降權啟動：籌碼集中度/連續天數矩陣分數 ×0.5（依據 red 警訊）
-  ⚠️ 第 877 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 886 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 895 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 904 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 913 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 3 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 解除舊合併失敗（不影響資料）：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 橫幅合併失敗（不影響資料）：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 警訊底色設定失敗（不影響資料寫入）：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ✅ 警訊 寫入完成（2026/08/31 → red）
-  ✅ 明日關注 更新完成（Top5：台塑, 統一, 中石化, 泰金寶-DR, 裕民）
-  ⚠️ 觀察組：台化, 建準, 全新, 聯詠, 晶豪科
-  ⚠️ 期貨快取存回失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⏳ 429 Quota，等待 30 秒後重試（1/3）...
-  ⏳ 429 Quota，等待 60 秒後重試（2/3）...
-
-❌ 寫入失敗（推薦成效追蹤）：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-繼續其他工作表？(Y/n)（10 秒後自動繼續）:   ⏩ 自動繼續。
-  ✅ 融券歷史 寫入 431 筆（2026/08/31）
-  ✅ 族群熱度 更新完成（28 個族群有近期活動）
-  📢 重大訊息（2026/08/28）：命中 0 筆（利多/利空）
-  📢 重大訊息（2026/08/31）：命中 0 筆（利多/利空）
-  ✅ 重大訊息歷史 寫入 0 筆（2026/08/31）
-  ✅ 融資歷史 寫入 526 筆（2026/08/31）
-  ✅ 成交量歷史 寫入 7050 筆（2026/08/31）
-  ✅ 收盤價歷史 寫入 7053 筆（2026/08/31）
-
-🎉 完成！
-  https://docs.google.com/spreadsheets/d/1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g
-  🗑️  log.txt 清理完成：移除 1 次舊執行紀錄，保留最近 14 次（1805 → 1702 行）
-
-  ▶ [v11.48] 10:28:28  耗時 844.7s  Step 4/5 寫入 Sheets 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
-  ⏩ 自動繼續。
-按 Enter 關閉（15 秒後自動關閉）...
-✅ 已載入 config.py
-==================================================
-  台灣股市三大法人買超/賣超追蹤 v11.48
-  config.py 獨立設定 ｜ 族群聯動累積 ｜ 分模式執行
-==================================================
-  族群反查表：417 支股票已對應族群
-
-🔌 連接 Google Sheets...
-  ✅ 連接成功
-
-📡 Step 1/5 抓取三大法人資料...
-  執行時間：2026/09/01 18:00  [v11.48]
-  嘗試 20260901...
-  T86 欄位數：19，資料筆數：1330
-
-  ✅ 資料日期：2026/09/01
-  外資  買超 50 筆 / 賣超 50 筆
-  投信  買超 50   筆 / 賣超 50 筆
-  自營商買超 50  筆 / 賣超 50 筆
-  外資買超第1：主動統一升級50 (270,939 張)
-  外資賣超第1：力積電 (78,073 張)
-  投信買超第1：聯電 (9,028 張)
-  自營商買超第1：群益臺灣加權正2 (224,415 張)
-
-  ▶ [v11.48] 18:00:09  耗時 4.3s  Step 1/5 三大法人 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
-  ℹ️ 快取日期：20260831
-  📋 20260831 快取讀取完成
-  ⚠️ 快取日期不符（20260831 ≠ 20260901），重新抓取
-
-💹 Step 2/5 抓取個股價格與成交量...
-  [batch] STOCK_DAY_ALL 20260901...
-  [batch] ✅ CSV 格式，1369 支
-  [otc] 抓取上櫃行情（20260901）...
-  [otc] ✅ 6100 支
-  [batch] 命中 117/117，剩餘 0 支...
-
-  ▶ [v11.48] 18:00:29  耗時 18.7s  Step 2/5 個股價格 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
-
-📋 Step 3/5 抓取融資融券資料...
-  融資融券日期：20260831（全市場 1295 支）
-  ✅ 融資融券 找到 117/117 支
-
-  ▶ [v11.48] 18:00:30  耗時 1.5s  Step 3/5 融資融券 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
-  💾 快取已寫入 Sheets（日期：20260901，共 17 列）
-
-📊 Step 4/5 寫入 Google Sheets...
-  ✅ 今日買超排行 更新完成
-  ✅ 今日賣超排行 更新完成
-  🗑️  歷史紀錄：清除 282 筆超過1個月的舊資料
-  ✅ 歷史紀錄 新增 300 筆（合計 6600 筆，日期降序）
-  📊 集保 CSV 解析完成（日期：20260828，命中 528/530 支）
-  ℹ️ 集保日期未更新（20260828），使用快取
-  📡 保底補抓現價（1 支，快取未涵蓋）...
-  [batch] STOCK_DAY_ALL 20260901...
-  [batch] ✅ CSV 格式，1369 支
-  [batch] 保底命中 0/1 支
-  [otc] 抓取上櫃行情（20260901）...
-  [otc] ❌ 解析失敗：Unterminated string starting at: line 1 column 551783 (char 551782)
-  [otc] ⏳ 等待 3 秒後重試（1/2）...
-  [otc] 抓取上櫃行情（20260901）（重試）...
-  [otc] ✅ 6100 支
-  [otc] 保底命中 0/1 支
-  [skip] 1 支 batch/OTC/快取均未命中，跳過（量比 None）
-  ✅ 現價保底完成
-  📡 保底補抓融資融券（413 支，快取未涵蓋）...
-  融資融券日期：20260831（全市場 1295 支）
-  ✅ 融資融券保底完成（找到 410/413 支）
-  📡 抓取大盤指數...
-  ⚠️ 大盤指數取得失敗，相對強弱欄留空
-  ⚠️ 大盤指數取得失敗，相對強弱欄留空
-  📡 抓取5日均線（422 支）...
-  [ma5-batch] 收盤價歷史命中 421/3376 天格，今日現價 421/422 支
-  [ma5-batch] 歷史+現價不足5天，補底 422 支...
-  [ma5-batch] 5日線計算完成（137/422 支有效）
-  ✅ 對照分析 更新完成（268 支，合計累計天數由低至高）
-  ✅ 每日快照 更新完成（最新快照插入最上方）
-  發現 1 支新股票不在族群表：['1808']
-  正在查詢官方產業別...
-  ✅ 官方產業別 載入 5940 支
-  ✅ 自動補入 SECTOR_MAP：{'1808': '建設營造'}
-  補抓族群成員行情（4 支不在快取中）...
-  [batch] STOCK_DAY_ALL 20260901...
-  [batch] ✅ CSV 格式，1369 支
-  [batch] 族群補抓命中 0/4 支
-  [otc] 抓取上櫃行情（20260901）...
-  [otc] ❌ 解析失敗：Unterminated string starting at: line 1 column 673540 (char 673539)
-  [otc] ⏳ 等待 3 秒後重試（1/2）...
-  [otc] 抓取上櫃行情（20260901）（重試）...
-  [otc] ✅ 6100 支
-  [otc] 族群補抓命中 0/4 支
-  [skip] 4 支 batch/OTC 均未命中，跳過
-  ✅ 族群聯動 更新完成（17 個族群觸發，累積至工作表頂部）
-  📡 抓取外資期貨未平倉...
-  外資大台指淨部位：🟢 +4,251 口　較前日 🟢🟢 +3,539
-  ⚠️ 大盤警訊：🔴 高風險　外資期貨單日變動 3,539 口、融資異常放大 29 檔、出貨風險紅燈 9 檔
-  ⚙️ 情境降權啟動：籌碼集中度/連續天數矩陣分數 ×0.5（依據 red 警訊）
-  ⚠️ 第 481 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 497 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 513 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 529 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 545 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 561 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 577 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 593 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 609 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 625 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 633 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 649 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 665 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 681 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 697 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 713 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 729 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 745 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ✅ 橫幅列合併 159 列
-  ✅ 警訊 寫入完成（2026/09/01 → red）
-  ✅ 明日關注 更新完成（Top5：材料*-KY, 台塑, 廣達, 興富發, 神達）
-  ⚠️ 觀察組：台化, 聯詠, 瑞昱, 華碩, 貿聯-KY
-  ✅ 推薦歷史 新增 43 筆（累計 43 筆，日期降序）
-  ✅ 推薦成效 更新完成（追蹤中：30 筆，本次封存：43 筆）
-  ✅ 融券歷史 寫入 432 筆（2026/09/01）
-  ✅ 族群熱度 更新完成（28 個族群有近期活動）
-  📢 重大訊息（2026/08/31）：命中 0 筆（利多/利空）
-  📢 重大訊息（2026/09/01）：命中 0 筆（利多/利空）
-  ✅ 重大訊息歷史 寫入 0 筆（2026/09/01）
-  🗑️  融資歷史：清除 508 筆超過1個月的舊資料
-  ✅ 融資歷史 寫入 521 筆（2026/09/01）
-  🗑️  成交量歷史：清除 5756 筆超過1個月的舊資料
-  ✅ 成交量歷史 寫入 7466 筆（2026/09/01）
-  ✅ 收盤價歷史 寫入 7469 筆（2026/09/01）
-
-🎉 完成！
-  https://docs.google.com/spreadsheets/d/1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g
-  🗑️  log.txt 清理完成：移除 1 次舊執行紀錄，保留最近 14 次（1818 → 1705 行）
-
-  ▶ [v11.48] 18:21:16  耗時 1243.9s  Step 4/5 寫入 Sheets 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
-按 Enter 關閉（15 秒後自動關閉）...
-✅ 已載入 config.py
-==================================================
-  台灣股市三大法人買超/賣超追蹤 v11.49
-  config.py 獨立設定 ｜ 族群聯動累積 ｜ 分模式執行
-==================================================
-  族群反查表：418 支股票已對應族群
-
-🔌 連接 Google Sheets...
-  ✅ 連接成功
-
-📡 Step 1/5 抓取三大法人資料...
-  執行時間：2026/09/01 19:05  [v11.49]
-  嘗試 20260901...
-  T86 欄位數：19，資料筆數：1330
-
-  ✅ 資料日期：2026/09/01
-  外資  買超 50 筆 / 賣超 50 筆
-  投信  買超 50   筆 / 賣超 50 筆
-  自營商買超 50  筆 / 賣超 50 筆
-  外資買超第1：主動統一升級50 (270,939 張)
-  外資賣超第1：力積電 (78,073 張)
-  投信買超第1：聯電 (9,028 張)
-  自營商買超第1：群益臺灣加權正2 (224,415 張)
-
-  ▶ [v11.49] 19:05:45  耗時 1.9s  Step 1/5 三大法人 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
-  ⏩ 自動繼續。
-  ℹ️ 快取日期：20260901
-  📋 20260901 快取讀取完成
-  ✅ 快取命中（日期吻合），跳過 Step 2/3 API 抓取
-
-💹 Step 2/5 抓取全市場行情（快取命中，補抓全市場）...
-  [batch] STOCK_DAY_ALL 20260901...
-  [batch] ✅ CSV 格式，1369 支
-  [otc] 抓取上櫃行情（20260901）...
-  [otc] ✅ 6100 支
-
-  ▶ [v11.49] 19:05:55  耗時 3.9s  Step 2~3/5 行情補抓（快取） 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
-  ⏩ 自動繼續。
-
-📊 Step 4/5 寫入 Google Sheets...
-  ✅ 今日買超排行 更新完成
-  ✅ 今日賣超排行 更新完成
-  ✅ 歷史紀錄 新增 300 筆（合計 6600 筆，日期降序）
-  📊 集保 CSV 解析完成（日期：20260828，命中 528/530 支）
-  ℹ️ 集保日期未更新（20260828），使用快取
-  📡 保底補抓現價（1 支，快取未涵蓋）...
-  [batch] STOCK_DAY_ALL 20260901...
-  [batch] ✅ CSV 格式，1369 支
-  [batch] 保底命中 0/1 支
-  [otc] 抓取上櫃行情（20260901）...
-  [otc] ❌ 解析失敗：Unterminated string starting at: line 1 column 1024511 (char 1024510)
-  [otc] ⏳ 等待 3 秒後重試（1/2）...
-  [otc] 抓取上櫃行情（20260901）（重試）...
-  [otc] ✅ 6100 支
-  [otc] 保底命中 0/1 支
-  [skip] 1 支 batch/OTC/快取均未命中，跳過（量比 None）
-  ✅ 現價保底完成
-  📡 保底補抓融資融券（413 支，快取未涵蓋）...
-  融資融券日期：20260831（全市場 1295 支）
-  ✅ 融資融券保底完成（找到 410/413 支）
-  📡 抓取大盤指數...
-  ⚠️ 大盤指數取得失敗，相對強弱欄留空
-  ⚠️ 大盤指數取得失敗，相對強弱欄留空
-  📡 抓取5日均線（422 支）...
-  [ma5-batch] 收盤價歷史命中 421/3376 天格，今日現價 421/422 支
-  [ma5-batch] 歷史+現價不足5天，補底 422 支...
-  [ma5-batch] 5日線計算完成（91/422 支有效）
-  ✅ 對照分析 更新完成（268 支，合計累計天數由低至高）
-  ✅ 每日快照 更新完成（最新快照插入最上方）
-  所有買超股票均已在族群表中
-  補抓族群成員行情（4 支不在快取中）...
-  [batch] STOCK_DAY_ALL 20260901...
-  [batch] ✅ CSV 格式，1369 支
-  [batch] 族群補抓命中 0/4 支
-  [otc] 抓取上櫃行情（20260901）...
-  [otc] ✅ 6100 支
-  [otc] 族群補抓命中 0/4 支
-  [skip] 4 支 batch/OTC 均未命中，跳過
-  ✅ 族群聯動 更新完成（17 個族群觸發，累積至工作表頂部）
-  📡 抓取外資期貨未平倉...
-  外資大台指淨部位：🟢 +4,251 口　較前日 🟢🟢 +3,539
-  ⚠️ 大盤警訊：🔴 高風險　外資期貨單日變動 3,539 口、融資異常放大 29 檔、出貨風險紅燈 9 檔
-  ⚙️ 情境降權啟動：籌碼集中度/連續天數矩陣分數 ×0.5（依據 red 警訊）
-  ⚠️ 第 697 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 713 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 729 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 745 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 761 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 777 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 793 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 809 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 825 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 841 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 857 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 866 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 875 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 884 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 893 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 902 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 911 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 920 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 929 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 3 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ❌ 解除舊合併失敗，本次跳過重新合併（避免新資料位移到殘留合併範圍上而顯示空白）：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-     ⚠️ 請人工檢查「明日關注」工作表是否有殘留的合併儲存格！
-  ⚠️ 警訊底色設定失敗（不影響資料寫入）：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ✅ 警訊 寫入完成（2026/09/01 → red）
-  ✅ 明日關注 更新完成（Top5：材料*-KY, 神達, 興富發, 宏碁, 鴻準）
-  ⚠️ 觀察組：台化, 聯詠, 瑞昱, 貿聯-KY, 華碩
-  ⚠️ 期貨快取存回失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⏳ 429 Quota，等待 30 秒後重試（1/3）...
-  ⏳ 429 Quota，等待 60 秒後重試（2/3）...
-
-❌ 寫入失敗（推薦成效追蹤）：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-繼續其他工作表？(Y/n)（10 秒後自動繼續）:   ⏩ 自動繼續。
-  ✅ 融券歷史 寫入 432 筆（2026/09/01）
-  ✅ 族群熱度 更新完成（28 個族群有近期活動）
-  📢 重大訊息（2026/08/31）：命中 0 筆（利多/利空）
-  📢 重大訊息（2026/09/01）：命中 0 筆（利多/利空）
-  ✅ 重大訊息歷史 寫入 0 筆（2026/09/01）
-  ✅ 融資歷史 寫入 521 筆（2026/09/01）
-  ✅ 成交量歷史 寫入 7466 筆（2026/09/01）
-  ✅ 收盤價歷史 寫入 7469 筆（2026/09/01）
-
-🎉 完成！
-  https://docs.google.com/spreadsheets/d/1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g
-  🗑️  log.txt 清理完成：移除 1 次舊執行紀錄，保留最近 14 次（1857 → 1749 行）
-
-  ▶ [v11.49] 19:24:15  耗時 1095.0s  Step 4/5 寫入 Sheets 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
-  ⏩ 自動繼續。
-按 Enter 關閉（15 秒後自動關閉）...
-✅ 已載入 config.py
-==================================================
-  台灣股市推薦回測腳本 v1.5
-==================================================
-
-🔌 連接 Google Sheets...
-  ✅ 連接成功
-
-📂 讀取資料...
-  ✅ 推薦歷史讀取 43 筆
-  ✅ 歷史紀錄讀取 6600 筆
-  ✅ 警訊 讀取 25 筆
-  過濾近 30 天：43 → 43 筆
-
-📊 組裝回測明細（43 筆）...
-  T+1 有效樣本：43/43 筆
-
-📈 計算勝率矩陣...
-
-💾 輸出結果...
-  ✅ 回測明細 寫入 43 筆
-  ✅ 回測勝率 寫入完成（18 個切面）
-
-🎉 完成！
-  https://docs.google.com/spreadsheets/d/1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g
-✅ 已載入 config.py
-==================================================
-  台灣股市三大法人買超/賣超追蹤 v11.49
-  config.py 獨立設定 ｜ 族群聯動累積 ｜ 分模式執行
-==================================================
-  族群反查表：418 支股票已對應族群
-
-🔌 連接 Google Sheets...
-  ✅ 連接成功
-
-📡 Step 1/5 抓取三大法人資料...
-  執行時間：2026/09/02 18:00  [v11.49]
-  嘗試 20260902...
-  T86 欄位數：19，資料筆數：1334
-
-  ✅ 資料日期：2026/09/02
-  外資  買超 50 筆 / 賣超 50 筆
-  投信  買超 50   筆 / 賣超 50 筆
-  自營商買超 50  筆 / 賣超 50 筆
-  外資買超第1：台中銀 (28,713 張)
-  外資賣超第1：主動統一台股增長 (50,968 張)
-  投信買超第1：台新新光金 (9,172 張)
-  自營商買超第1：元大台灣50反1 (113,557 張)
-
-  ▶ [v11.49] 18:00:06  耗時 0.2s  Step 1/5 三大法人 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
-  ℹ️ 快取日期：20260901
-  📋 20260901 快取讀取完成
-  ⚠️ 快取日期不符（20260901 ≠ 20260902），重新抓取
-
-💹 Step 2/5 抓取個股價格與成交量...
-  [batch] STOCK_DAY_ALL 20260902...
-  [batch] ✅ CSV 格式，1371 支
-  [otc] 抓取上櫃行情（20260902）...
-  [otc] ✅ 5703 支
-  [batch] 命中 127/127，剩餘 0 支...
-
-  ▶ [v11.49] 18:00:08  耗時 0.9s  Step 2/5 個股價格 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
-
-📋 Step 3/5 抓取融資融券資料...
-  融資融券日期：20260901（全市場 1297 支）
-  ✅ 融資融券 找到 127/127 支
-
-  ▶ [v11.49] 18:00:08  耗時 0.1s  Step 3/5 融資融券 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
-  💾 快取已寫入 Sheets（日期：20260902，共 17 列）
-
-📊 Step 4/5 寫入 Google Sheets...
-  ✅ 今日買超排行 更新完成
-  ✅ 今日賣超排行 更新完成
-  ✅ 歷史紀錄 新增 300 筆（合計 6900 筆，日期降序）
-  📊 集保 CSV 解析完成（日期：20260828，命中 537/542 支）
-  ℹ️ 集保日期未更新（20260828），使用快取
-  📡 保底補抓現價（1 支，快取未涵蓋）...
-  [batch] STOCK_DAY_ALL 20260902...
-  [batch] ✅ CSV 格式，1371 支
-  [batch] 保底命中 0/1 支
-  [otc] 抓取上櫃行情（20260902）...
-  [otc] ❌ 解析失敗：Expecting value: line 1 column 947635 (char 947634)
-  [otc] ⏳ 等待 3 秒後重試（1/2）...
-  [otc] 抓取上櫃行情（20260902）（重試）...
-  [otc] ✅ 5703 支
-  [otc] 保底命中 0/1 支
-  [skip] 1 支 batch/OTC/快取均未命中，跳過（量比 None）
-  ✅ 現價保底完成
-  📡 保底補抓融資融券（415 支，快取未涵蓋）...
-  融資融券日期：20260901（全市場 1297 支）
-  ✅ 融資融券保底完成（找到 411/415 支）
-  📡 抓取大盤指數...
-  加權指數（FMTQIK）：-1.67%
-  加權指數：-1.67%
-  📡 抓取5日均線（436 支）...
-  [ma5-batch] 收盤價歷史命中 870/3488 天格，今日現價 435/436 支
-  [ma5-batch] 歷史+現價不足5天，補底 436 支...
-  [ma5-batch] 5日線計算完成（45/436 支有效）
-  ✅ 對照分析 更新完成（270 支，合計累計天數由低至高）
-  ✅ 每日快照 更新完成（最新快照插入最上方）
-  發現 4 支新股票不在族群表：['2374', '2465', '3504', '4976']
-  正在查詢官方產業別...
-  ✅ 官方產業別 載入 32320 支
-  ✅ 自動補入 SECTOR_MAP：{'2374': '其他', '2465': '電子代工', '3504': '其他', '4976': '其他'}
-  補抓族群成員行情（6 支不在快取中）...
-  [batch] STOCK_DAY_ALL 20260902...
-  [batch] ✅ CSV 格式，1371 支
-  [batch] 族群補抓命中 0/6 支
-  [otc] 抓取上櫃行情（20260902）...
-  [otc] ✅ 5703 支
-  [otc] 族群補抓命中 0/6 支
-  [skip] 6 支 batch/OTC 均未命中，跳過
-  ✅ 族群聯動 更新完成（19 個族群觸發，累積至工作表頂部）
-  📡 抓取外資期貨未平倉...
-  外資大台指淨部位：🔴 -5,039 口　較前日 🔴🔴🔴🔴🔴 -9,290
-  ⚠️ 大盤警訊：🔴 高風險　外資期貨單日轉空 9,290 口、融資異常放大 30 檔、出貨風險紅燈 6 檔
-  ⚙️ 情境降權啟動：籌碼集中度/連續天數矩陣分數 ×0.5（依據 red 警訊）
-  ⚠️ 第 713 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 729 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 745 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 761 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 777 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 793 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 809 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 825 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 841 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 857 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 873 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 882 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 891 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 900 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 909 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 918 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 927 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 936 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 945 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 3 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ❌ 解除舊合併失敗，本次跳過重新合併（避免新資料位移到殘留合併範圍上而顯示空白）：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-     ⚠️ 請人工檢查「明日關注」工作表是否有殘留的合併儲存格！
-  ⚠️ 警訊底色設定失敗（不影響資料寫入）：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ✅ 警訊 寫入完成（2026/09/02 → red）
-  ✅ 明日關注 更新完成（Top5：宏碁, 統一, 興富發, 大成鋼, 南紡）
-  ⚠️ 觀察組：瑞昱, 麗臺, 揚明光, 佳凌, 華碩
-  ⚠️ 期貨快取存回失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⏳ 429 Quota，等待 30 秒後重試（1/3）...
-  ⏳ 429 Quota，等待 60 秒後重試（2/3）...
-
-❌ 寫入失敗（推薦成效追蹤）：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-繼續其他工作表？(Y/n)（10 秒後自動繼續）:   ✅ 融券歷史 寫入 438 筆（2026/09/02）
-  ✅ 族群熱度 更新完成（29 個族群有近期活動）
-  📢 重大訊息（2026/09/01）：命中 0 筆（利多/利空）
-  📢 重大訊息（2026/09/02）：命中 0 筆（利多/利空）
-  ✅ 重大訊息歷史 寫入 0 筆（2026/09/02）
-  ✅ 融資歷史 寫入 529 筆（2026/09/02）
-  ✅ 成交量歷史 寫入 7071 筆（2026/09/02）
-  ✅ 收盤價歷史 寫入 7074 筆（2026/09/02）
-
-🎉 完成！
-  https://docs.google.com/spreadsheets/d/1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g
-  🗑️  log.txt 清理完成：移除 2 次舊執行紀錄，保留最近 14 次（1903 → 1538 行）
-
-  ▶ [v11.49] 18:07:17  耗時 427.6s  Step 4/5 寫入 Sheets 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
-按 Enter 關閉（15 秒後自動關閉）...
-✅ 已載入 config.py
-==================================================
-  台灣股市推薦回測腳本 v1.5
-==================================================
-
-🔌 連接 Google Sheets...
-  ✅ 連接成功
-
-📂 讀取資料...
-  ✅ 推薦歷史讀取 43 筆
-  ✅ 歷史紀錄讀取 6900 筆
-  ✅ 警訊 讀取 26 筆
-  過濾近 30 天：43 → 43 筆
-
-📊 組裝回測明細（43 筆）...
-  T+1 有效樣本：43/43 筆
-
-📈 計算勝率矩陣...
-
-💾 輸出結果...
-  ✅ 回測明細 寫入 43 筆
-  ✅ 回測勝率 寫入完成（18 個切面）
-
-🎉 完成！
-  https://docs.google.com/spreadsheets/d/1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g
-✅ 已載入 config.py
-==================================================
-  台灣股市三大法人買超/賣超追蹤 v11.49
-  config.py 獨立設定 ｜ 族群聯動累積 ｜ 分模式執行
-==================================================
-  族群反查表：422 支股票已對應族群
-
-🔌 連接 Google Sheets...
-  ✅ 連接成功
-
-📡 Step 1/5 抓取三大法人資料...
-  執行時間：2026/09/03 18:00  [v11.49]
-  嘗試 20260903...
-  T86 欄位數：19，資料筆數：1320
-
-  ✅ 資料日期：2026/09/03
-  外資  買超 50 筆 / 賣超 50 筆
-  投信  買超 50   筆 / 賣超 50 筆
-  自營商買超 50  筆 / 賣超 50 筆
-  外資買超第1：友達 (55,437 張)
-  外資賣超第1：主動統一台股增長 (38,015 張)
-  投信買超第1：緯創 (14,523 張)
-  自營商買超第1：國泰永續高股息 (23,303 張)
-
-  ▶ [v11.49] 18:00:14  耗時 6.2s  Step 1/5 三大法人 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
-  ℹ️ 快取日期：20260902
-  📋 20260902 快取讀取完成
-  ⚠️ 快取日期不符（20260902 ≠ 20260903），重新抓取
-
-💹 Step 2/5 抓取個股價格與成交量...
-  [batch] STOCK_DAY_ALL 20260903...
-  [batch] ✅ CSV 格式，1360 支
-  [otc] 抓取上櫃行情（20260903）...
-  [otc] ❌ 解析失敗：Unterminated string starting at: line 1 column 566538 (char 566537)
-  [otc] ⏳ 等待 3 秒後重試（1/2）...
-  [otc] 抓取上櫃行情（20260903）（重試）...
-  [otc] ✅ 5412 支
-  [batch] 命中 121/121，剩餘 0 支...
-
-  ▶ [v11.49] 18:00:32  耗時 16.0s  Step 2/5 個股價格 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
-
-📋 Step 3/5 抓取融資融券資料...
-  融資融券日期：20260902（全市場 1297 支）
-  ✅ 融資融券 找到 121/121 支
-
-  ▶ [v11.49] 18:00:33  耗時 1.2s  Step 3/5 融資融券 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
-  💾 快取已寫入 Sheets（日期：20260903，共 17 列）
-
-📊 Step 4/5 寫入 Google Sheets...
-  ✅ 今日買超排行 更新完成
-  ✅ 今日賣超排行 更新完成
-  ✅ 歷史紀錄 新增 300 筆（合計 7200 筆，日期降序）
-  📊 集保 CSV 解析完成（日期：20260828，命中 539/544 支）
-  ℹ️ 集保日期未更新（20260828），使用快取
-  📡 保底補抓現價（2 支，快取未涵蓋）...
-  [batch] STOCK_DAY_ALL 20260903...
-  [batch] ✅ CSV 格式，1360 支
-  [batch] 保底命中 0/2 支
-  [otc] 抓取上櫃行情（20260903）...
-  [otc] ✅ 5412 支
-  [otc] 保底命中 0/2 支
-  [skip] 2 支 batch/OTC/快取均未命中，跳過（量比 None）
-  ✅ 現價保底完成
-  📡 保底補抓融資融券（423 支，快取未涵蓋）...
-  融資融券日期：20260902（全市場 1297 支）
-  ✅ 融資融券保底完成（找到 419/423 支）
-  📡 抓取大盤指數...
-  加權指數（FMTQIK）：-0.67%
-  加權指數：-0.67%
-  📡 抓取5日均線（440 支）...
-  [ma5-batch] 收盤價歷史命中 1317/3520 天格，今日現價 438/440 支
-  [ma5-batch] 歷史+現價不足5天，補底 440 支...
-  [ma5-batch] 5日線計算完成（49/440 支有效）
-  ✅ 對照分析 更新完成（277 支，合計累計天數由低至高）
-  ✅ 每日快照 更新完成（最新快照插入最上方）
-  發現 3 支新股票不在族群表：['2520', '7780', '9802']
-  正在查詢官方產業別...
-  ✅ 官方產業別 載入 8271 支
-  ✅ 自動補入 SECTOR_MAP：{'2520': '建設營造', '7780': '傳產', '9802': '其他'}
-  補抓族群成員行情（5 支不在快取中）...
-  [batch] STOCK_DAY_ALL 20260903...
-  [batch] ✅ CSV 格式，1360 支
-  [batch] 族群補抓命中 0/5 支
-  [otc] 抓取上櫃行情（20260903）...
-  [otc] ✅ 5412 支
-  [otc] 族群補抓命中 0/5 支
-  [skip] 5 支 batch/OTC 均未命中，跳過
-  ✅ 族群聯動 更新完成（18 個族群觸發，累積至工作表頂部）
-  📡 抓取外資期貨未平倉...
-  外資大台指淨部位：🟢 +3,704 口　較前日 🟢🟢🟢🟢🟢 +8,743
-  ⚠️ 大盤警訊：🔴 高風險　外資期貨單日轉多 8,743 口、融資異常放大 14 檔、出貨風險紅燈 3 檔
-  ⚙️ 情境降權啟動：籌碼集中度/連續天數矩陣分數 ×0.5（依據 red 警訊）
-  ⚠️ 第 497 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 513 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 529 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 545 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 561 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 577 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 593 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 609 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 625 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 641 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 657 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 665 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 681 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 697 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 713 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 729 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 745 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 761 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 777 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 793 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 809 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 825 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 841 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 857 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 873 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 889 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 898 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 907 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 916 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 925 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 934 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 943 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 952 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 961 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 3 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ❌ 解除舊合併失敗，本次跳過重新合併（避免新資料位移到殘留合併範圍上而顯示空白）：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-     ⚠️ 請人工檢查「明日關注」工作表是否有殘留的合併儲存格！
-  ⚠️ 警訊底色設定失敗（不影響資料寫入）：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ✅ 警訊 寫入完成（2026/09/03 → red）
-  ✅ 明日關注 更新完成（Top5：台灣大, 四維航, 中鋼, 廣達, 遠東新）
-  ⚠️ 觀察組：光聖, 聯茂, 全新, 瑞昱, 華碩
-  ⚠️ 期貨快取存回失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⏳ 429 Quota，等待 30 秒後重試（1/3）...
-  ⏳ 429 Quota，等待 60 秒後重試（2/3）...
-  ✅ 推薦成效 更新完成（追蹤中：10 筆，本次封存：0 筆）
-  ✅ 融券歷史 寫入 443 筆（2026/09/03）
-  ✅ 族群熱度 更新完成（27 個族群有近期活動）
-  📢 重大訊息（2026/09/02）：命中 0 筆（利多/利空）
-  📢 重大訊息（2026/09/03）：命中 0 筆（利多/利空）
-  ✅ 重大訊息歷史 寫入 0 筆（2026/09/03）
-  ⏳ 429 Quota，等待 30 秒後重試（1/3）...
-  ✅ 融資歷史 寫入 534 筆（2026/09/03）
-  ✅ 成交量歷史 寫入 6769 筆（2026/09/03）
-  ✅ 收盤價歷史 寫入 6772 筆（2026/09/03）
-
-🎉 完成！
-  https://docs.google.com/spreadsheets/d/1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g
-  🗑️  log.txt 清理完成：移除 2 次舊執行紀錄，保留最近 14 次（1685 → 1445 行）
-
-  ▶ [v11.49] 18:21:08  耗時 1233.5s  Step 4/5 寫入 Sheets 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
-按 Enter 關閉（15 秒後自動關閉）...
-✅ 已載入 config.py
-==================================================
-  台灣股市三大法人買超/賣超追蹤 v11.49
-  config.py 獨立設定 ｜ 族群聯動累積 ｜ 分模式執行
-==================================================
-  族群反查表：425 支股票已對應族群
-
-🔌 連接 Google Sheets...
-  ✅ 連接成功
-
-📡 Step 1/5 抓取三大法人資料...
-  執行時間：2026/09/07 10:27  [v11.49]
-  16:30 前自動使用前一交易日（三大法人資料 16:30 後才釋出）
-  嘗試 20260904...
-  T86 欄位數：19，資料筆數：1340
-
-  ✅ 資料日期：2026/09/04
-  外資  買超 50 筆 / 賣超 50 筆
-  投信  買超 50   筆 / 賣超 50 筆
-  自營商買超 50  筆 / 賣超 50 筆
-  外資買超第1：仁寶 (69,366 張)
-  外資賣超第1：臺企銀 (19,379 張)
-  投信買超第1：玉山金 (5,238 張)
-  自營商買超第1：群益臺灣加權正2 (55,538 張)
-
-  ▶ [v11.49] 10:27:09  耗時 0.1s  Step 1/5 三大法人 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
-  ⏩ 自動繼續。
-  ℹ️ 快取日期：20260903
-  📋 20260903 快取讀取完成
-  ⚠️ 快取日期不符（20260903 ≠ 20260904），重新抓取
-
-💹 Step 2/5 抓取個股價格與成交量...
-  [batch] STOCK_DAY_ALL 20260904...
-  [batch] ✅ CSV 格式，1368 支
-  [otc] 抓取上櫃行情（20260904）...
-  [otc] ✅ 5328 支
-  [batch] 命中 116/116，剩餘 0 支...
-
-  ▶ [v11.49] 10:27:15  耗時 0.6s  Step 2/5 個股價格 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
-  ⏩ 自動繼續。
-
-📋 Step 3/5 抓取融資融券資料...
-  融資融券日期：20260903（全市場 1297 支）
-  ✅ 融資融券 找到 116/116 支
-
-  ▶ [v11.49] 10:27:20  耗時 0.1s  Step 3/5 融資融券 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
-  ⏩ 自動繼續。
-  💾 快取已寫入 Sheets（日期：20260904，共 17 列）
-
-📊 Step 4/5 寫入 Google Sheets...
-  ✅ 今日買超排行 更新完成
-  ✅ 今日賣超排行 更新完成
-  🗑️  歷史紀錄：清除 300 筆超過1個月的舊資料
-  ✅ 歷史紀錄 新增 300 筆（合計 7200 筆，日期降序）
-  📊 集保 CSV 解析完成（日期：20260904，命中 542/543 支）
-  📡 集保有新資料（20260904），更新快取...
-  💾 集保快取 更新 542 筆（共 659 筆）
-  📡 保底補抓現價（1 支，快取未涵蓋）...
-  [batch] STOCK_DAY_ALL 20260904...
-  [batch] ✅ CSV 格式，1368 支
-  [batch] 保底命中 0/1 支
-  [otc] 抓取上櫃行情（20260904）...
-  [otc] ✅ 5328 支
-  [otc] 保底命中 0/1 支
-  [skip] 1 支 batch/OTC/快取均未命中，跳過（量比 None）
-  ✅ 現價保底完成
-  📡 保底補抓融資融券（427 支，快取未涵蓋）...
-  融資融券日期：20260903（全市場 1297 支）
-  ✅ 融資融券保底完成（找到 424/427 支）
-  📡 抓取大盤指數...
-  加權指數（FMTQIK）：+1.51%
-  加權指數：+1.51%
-  📡 抓取5日均線（432 支）...
-  [ma5-batch] 收盤價歷史命中 1722/3456 天格，今日現價 431/432 支
-  [ma5-batch] 歷史+現價不足5天，補底 2 支...
-  [ma5-batch] 5日線計算完成（430/432 支有效）
-  ✅ 對照分析 更新完成（265 支，合計累計天數由低至高）
-  ✅ 每日快照 更新完成（最新快照插入最上方）
-  所有買超股票均已在族群表中
-  補抓族群成員行情（5 支不在快取中）...
-  [batch] STOCK_DAY_ALL 20260904...
-  [batch] ✅ CSV 格式，1368 支
-  [batch] 族群補抓命中 0/5 支
-  [otc] 抓取上櫃行情（20260904）...
-  [otc] ✅ 5328 支
-  [otc] 族群補抓命中 0/5 支
-  [skip] 5 支 batch/OTC 均未命中，跳過
-  ✅ 族群聯動 更新完成（18 個族群觸發，累積至工作表頂部）
-  📡 抓取外資期貨未平倉...
-  外資大台指淨部位：🟡 -880 口　較前日 🔴🔴🔴 -4,584
-  ⚠️ 大盤警訊：🔴 高風險　外資期貨單日變動 4,584 口、融資異常放大 24 檔、出貨風險紅燈 4 檔
-  ⚙️ 情境降權啟動：籌碼集中度/連續天數矩陣分數 ×0.5（依據 red 警訊）
-  ⚠️ 第 481 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 497 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 513 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 529 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 545 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 561 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 577 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 593 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 609 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 625 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 641 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 657 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 673 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 681 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 697 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 713 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 729 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 761 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 777 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 793 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 809 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 825 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 841 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 857 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 873 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 889 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 905 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 914 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 923 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 932 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 941 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 950 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 959 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 968 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 977 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ⚠️ 第 3 列底色設定失敗：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ❌ 解除舊合併失敗，本次跳過重新合併（避免新資料位移到殘留合併範圍上而顯示空白）：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-     ⚠️ 請人工檢查「明日關注」工作表是否有殘留的合併儲存格！
-  ⚠️ 警訊底色設定失敗（不影響資料寫入）：APIError: [429]: Quota exceeded for quota metric 'Write requests' and limit 'Write requests per minute per user' of service 'sheets.googleapis.com' for consumer 'project_number:27642729489'.
-  ✅ 警訊 寫入完成（2026/09/04 → red）
-  ✅ 明日關注 更新完成（Top5：廣達, 微星, 鴻海, 和碩, 仁寶）
-  ⚠️ 觀察組：同欣電, 鼎元, 威盛, 日電貿, 研華
-  ⏳ 429 Quota，等待 30 秒後重試（1/3）...
-  ✅ 推薦成效 更新完成（追蹤中：20 筆，本次封存：0 筆）
-  ✅ 融券歷史 寫入 445 筆（2026/09/04）
-  ✅ 族群熱度 更新完成（27 個族群有近期活動）
-  📢 重大訊息（2026/09/03）：命中 0 筆（利多/利空）
-  📢 重大訊息（2026/09/04）：命中 0 筆（利多/利空）
-  ✅ 重大訊息歷史 寫入 0 筆（2026/09/04）
-  ✅ 融資歷史 寫入 534 筆（2026/09/04）
-  🗑️  成交量歷史：清除 1369 筆超過1個月的舊資料
-  ✅ 成交量歷史 寫入 6693 筆（2026/09/04）
-  ✅ 收盤價歷史 寫入 6696 筆（2026/09/04）
-
-🎉 完成！
-  https://docs.google.com/spreadsheets/d/1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g
-  🗑️  log.txt 清理完成：移除 1 次舊執行紀錄，保留最近 14 次（1638 → 1525 行）
-
-  ▶ [v11.49] 10:31:14  耗時 227.1s  Step 4/5 寫入 Sheets 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
-  ⏩ 自動繼續。
-按 Enter 關閉（15 秒後自動關閉）...
-✅ 已載入 config.py
-==================================================
   台灣股市三大法人買超/賣超追蹤 v11.49
   config.py 獨立設定 ｜ 族群聯動累積 ｜ 分模式執行
 ==================================================
@@ -1610,4 +493,1297 @@ ImportError: dlopen(/Users/zzz/Library/Python/3.9/lib/python/site-packages/_cffi
 
   ▶ [v11.51] 19:09:12  耗時 199.9s  Step 4/5 寫入 Sheets 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
   ⏩ 自動繼續。
+按 Enter 關閉（15 秒後自動關閉）...
+✅ 已載入 config.py
+==================================================
+  台灣股市三大法人買超/賣超追蹤 v11.51
+  config.py 獨立設定 ｜ 族群聯動累積 ｜ 分模式執行
+==================================================
+  族群反查表：426 支股票已對應族群
+
+🔌 連接 Google Sheets...
+  ✅ 連接成功
+
+📡 Step 1/5 抓取三大法人資料...
+  執行時間：2026/09/10 18:00  [v11.51]
+  嘗試 20260910...
+  T86 欄位數：19，資料筆數：1328
+
+  ✅ 資料日期：2026/09/10
+  外資  買超 50 筆 / 賣超 50 筆
+  投信  買超 50   筆 / 賣超 50 筆
+  自營商買超 50  筆 / 賣超 50 筆
+  外資買超第1：力積電 (28,000 張)
+  外資賣超第1：緯創 (33,755 張)
+  投信買超第1：聯電 (12,517 張)
+  自營商買超第1：主動統一升級50 (42,512 張)
+
+  ▶ [v11.51] 18:00:11  耗時 2.0s  Step 1/5 三大法人 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
+  ℹ️ 快取日期：20260909
+  📋 20260909 快取讀取完成
+  ⚠️ 快取日期不符（20260909 ≠ 20260910），重新抓取
+
+💹 Step 2/5 抓取個股價格與成交量...
+  [batch] STOCK_DAY_ALL 20260910...
+  [batch] ✅ CSV 格式，1367 支
+  [otc] 抓取上櫃行情（20260910）...
+  [otc] ✅ 5206 支
+  [batch] 命中 130/130，剩餘 0 支...
+
+  ▶ [v11.51] 18:00:19  耗時 7.0s  Step 2/5 個股價格 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
+
+📋 Step 3/5 抓取融資融券資料...
+  融資融券日期：20260909（全市場 1297 支）
+  ✅ 融資融券 找到 130/130 支
+
+  ▶ [v11.51] 18:00:20  耗時 1.2s  Step 3/5 融資融券 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
+  💾 快取已寫入 Sheets（日期：20260910，共 17 列）
+
+📊 Step 4/5 寫入 Google Sheets...
+  ✅ 今日買超排行 更新完成
+  ✅ 今日賣超排行 更新完成
+  ✅ 歷史紀錄 新增 300 筆（合計 7200 筆，日期降序）
+  📊 集保 CSV 解析完成（日期：20260904，命中 540/541 支）
+  ℹ️ 集保日期未更新（20260904），使用快取
+  📡 保底補抓現價（1 支，快取未涵蓋）...
+  [batch] STOCK_DAY_ALL 20260910...
+  [batch] ✅ CSV 格式，1367 支
+  [batch] 保底命中 0/1 支
+  [otc] 抓取上櫃行情（20260910）...
+  [otc] ✅ 5206 支
+  [otc] 保底命中 0/1 支
+  [skip] 1 支 batch/OTC/快取均未命中，跳過（量比 None）
+  ✅ 現價保底完成
+  📡 保底補抓融資融券（411 支，快取未涵蓋）...
+  融資融券日期：20260909（全市場 1297 支）
+  ✅ 融資融券保底完成（找到 408/411 支）
+  📡 抓取大盤指數...
+  加權指數（FMTQIK）：-0.51%
+  加權指數：-0.51%
+  📡 抓取5日均線（417 支）...
+  [ma5-batch] 收盤價歷史命中 3322/3336 天格，今日現價 416/417 支
+  [ma5-batch] 歷史+現價不足5天，補底 1 支...
+  [ma5-batch] 5日線計算完成（416/417 支有效）
+  ✅ 對照分析 更新完成（269 支，合計累計天數由低至高）
+  ✅ 每日快照 更新完成（最新快照插入最上方）
+  發現 1 支新股票不在族群表：['2305']
+  正在查詢官方產業別...
+  ✅ 官方產業別 載入 19339 支
+  ✅ 自動補入 SECTOR_MAP：{'2305': '電子代工'}
+  補抓族群成員行情（4 支不在快取中）...
+  [batch] STOCK_DAY_ALL 20260910...
+  [batch] ✅ CSV 格式，1367 支
+  [batch] 族群補抓命中 0/4 支
+  [otc] 抓取上櫃行情（20260910）...
+  [otc] ✅ 5206 支
+  [otc] 族群補抓命中 0/4 支
+  [skip] 4 支 batch/OTC 均未命中，跳過
+  ✅ 族群聯動 更新完成（19 個族群觸發，累積至工作表頂部）
+  📡 抓取外資期貨未平倉...
+  外資大台指淨部位：🟡 -2,049 口　較前日 🔴🔴 -3,213
+  ⚠️ 大盤警訊：🔴 高風險　外資期貨單日變動 3,213 口、融資異常放大 11 檔
+  ⚙️ 情境降權啟動：籌碼集中度/連續天數矩陣分數 ×0.5（依據 red 警訊）
+  ✅ 橫幅列合併 6 列（僅最近 2 天）
+  ✅ 警訊 寫入完成（2026/09/10 → red）
+  ✅ 明日關注 更新完成（Top5：鴻準, 力積電, 慧洋-KY, 國喬, 亞泥）
+  ⚠️ 觀察組：聯發科, 聯詠, 日月光投控, 嘉晶, 光聖
+  ✅ 推薦成效 更新完成（追蹤中：40 筆，本次封存：0 筆）
+  ✅ 融券歷史 寫入 442 筆（2026/09/10）
+  ✅ 族群熱度 更新完成（29 個族群有近期活動）
+  ⚠️ 重大訊息抓取失敗（2026/09/09）：<urlopen error [Errno 54] Connection reset by peer>
+  📢 重大訊息（2026/09/10）：命中 0 筆（利多/利空）
+  ✅ 重大訊息歷史 寫入 0 筆（2026/09/10）
+  ✅ 融資歷史 寫入 532 筆（2026/09/10）
+  ✅ 成交量歷史 寫入 6570 筆（2026/09/10）
+  ✅ 收盤價歷史 寫入 6573 筆（2026/09/10）
+
+🎉 完成！
+  https://docs.google.com/spreadsheets/d/1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g
+
+  ▶ [v11.51] 18:04:15  耗時 233.1s  Step 4/5 寫入 Sheets 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
+按 Enter 關閉（15 秒後自動關閉）...
+✅ 已載入 config.py
+==================================================
+  台灣股市三大法人買超/賣超追蹤 v11.51
+  config.py 獨立設定 ｜ 族群聯動累積 ｜ 分模式執行
+==================================================
+  族群反查表：427 支股票已對應族群
+
+🔌 連接 Google Sheets...
+  ✅ 連接成功
+
+📡 Step 1/5 抓取三大法人資料...
+  執行時間：2026/09/11 18:00  [v11.51]
+  嘗試 20260911...
+  T86 欄位數：19，資料筆數：1325
+
+  ✅ 資料日期：2026/09/11
+  外資  買超 50 筆 / 賣超 50 筆
+  投信  買超 50   筆 / 賣超 50 筆
+  自營商買超 50  筆 / 賣超 50 筆
+  外資買超第1：陽明 (22,998 張)
+  外資賣超第1：友達 (101,830 張)
+  投信買超第1：第一金 (9,873 張)
+  自營商買超第1：元大台灣50反1 (147,788 張)
+
+  ▶ [v11.51] 18:00:07  耗時 2.1s  Step 1/5 三大法人 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
+  ℹ️ 快取日期：20260910
+  📋 20260910 快取讀取完成
+  ⚠️ 快取日期不符（20260910 ≠ 20260911），重新抓取
+
+💹 Step 2/5 抓取個股價格與成交量...
+  [batch] STOCK_DAY_ALL 20260911...
+  [batch] ✅ CSV 格式，1367 支
+  [otc] 抓取上櫃行情（20260911）...
+  [otc] ❌ 解析失敗：Unterminated string starting at: line 1 column 1373977 (char 1373976)
+  [otc] ⏳ 等待 3 秒後重試（1/2）...
+  [otc] 抓取上櫃行情（20260911）（重試）...
+  [otc] ❌ 解析失敗：Unterminated string starting at: line 1 column 1374058 (char 1374057)
+  [otc] ⏳ 等待 3 秒後重試（2/2）...
+  [otc] 抓取上櫃行情（20260911）（重試）...
+  [otc] ❌ 解析失敗：Unterminated string starting at: line 1 column 856107 (char 856106)
+  [otc] ❌ 重試 3 次仍失敗，回傳空表
+  [batch] 命中 122/122，剩餘 0 支...
+
+  ▶ [v11.51] 18:01:16  耗時 67.7s  Step 2/5 個股價格 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
+
+📋 Step 3/5 抓取融資融券資料...
+  融資融券日期：20260910（全市場 1297 支）
+  ✅ 融資融券 找到 122/122 支
+
+  ▶ [v11.51] 18:01:17  耗時 1.4s  Step 3/5 融資融券 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
+  💾 快取已寫入 Sheets（日期：20260911，共 17 列）
+
+📊 Step 4/5 寫入 Google Sheets...
+  ✅ 今日買超排行 更新完成
+  ✅ 今日賣超排行 更新完成
+  🗑️  歷史紀錄：清除 300 筆超過1個月的舊資料
+  ✅ 歷史紀錄 新增 300 筆（合計 7200 筆，日期降序）
+  📊 集保 CSV 解析完成（日期：20260904，命中 538/539 支）
+  ℹ️ 集保日期未更新（20260904），使用快取
+  📡 保底補抓現價（1 支，快取未涵蓋）...
+  [batch] STOCK_DAY_ALL 20260911...
+  [batch] ✅ CSV 格式，1367 支
+  [batch] 保底命中 0/1 支
+  [otc] 抓取上櫃行情（20260911）...
+  [otc] ✅ 5136 支
+  [otc] 保底命中 0/1 支
+  [skip] 1 支 batch/OTC/快取均未命中，跳過（量比 None）
+  ✅ 現價保底完成
+  📡 保底補抓融資融券（417 支，快取未涵蓋）...
+  融資融券日期：20260910（全市場 1297 支）
+  ✅ 融資融券保底完成（找到 414/417 支）
+  📡 抓取大盤指數...
+  加權指數（FMTQIK）：-1.61%
+  加權指數：-1.61%
+  📡 抓取5日均線（423 支）...
+  [ma5-batch] 收盤價歷史命中 3373/3384 天格，今日現價 422/423 支
+  [ma5-batch] 歷史+現價不足5天，補底 1 支...
+  [ma5-batch] 5日線計算完成（422/423 支有效）
+  ✅ 對照分析 更新完成（269 支，合計累計天數由低至高）
+  ✅ 每日快照 更新完成（最新快照插入最上方）
+  發現 3 支新股票不在族群表：['2838', '3229', '6706']
+  正在查詢官方產業別...
+  ✅ 官方產業別 載入 1672 支
+  ✅ 自動補入 SECTOR_MAP：{'2838': '金融', '3229': '其他', '6706': '其他'}
+  補抓族群成員行情（8 支不在快取中）...
+  [batch] STOCK_DAY_ALL 20260911...
+  [batch] ✅ CSV 格式，1367 支
+  [batch] 族群補抓命中 0/8 支
+  [otc] 抓取上櫃行情（20260911）...
+  [otc] ✅ 5136 支
+  [otc] 族群補抓命中 4/8 支
+  [skip] 4 支 batch/OTC 均未命中，跳過
+  ✅ 族群聯動 更新完成（22 個族群觸發，累積至工作表頂部）
+  📡 抓取外資期貨未平倉...
+  外資大台指淨部位：🟡 -368 口　較前日 🟢 +1,681
+  ⚠️ 大盤警訊：🔴 高風險　融資異常放大 16 檔
+  ⚙️ 情境降權啟動：籌碼集中度/連續天數矩陣分數 ×0.5（依據 red 警訊）
+  ✅ 橫幅列合併 6 列（僅最近 2 天）
+  ✅ 警訊 寫入完成（2026/09/11 → red）
+  ✅ 明日關注 更新完成（Top5：長榮, 鴻準, 中華電, 遠傳, 大成鋼）
+  ⚠️ 觀察組：中砂, 惠特, 晟鈦, 華碩, 玉晶光
+  ✅ 推薦成效 更新完成（追蹤中：50 筆，本次封存：0 筆）
+  ✅ 融券歷史 寫入 430 筆（2026/09/11）
+  ✅ 族群熱度 更新完成（30 個族群有近期活動）
+  📢 重大訊息（2026/09/10）：命中 0 筆（利多/利空）
+  📢 重大訊息（2026/09/11）：命中 0 筆（利多/利空）
+  ✅ 重大訊息歷史 寫入 0 筆（2026/09/11）
+  ✅ 融資歷史 寫入 530 筆（2026/09/11）
+  🗑️  成交量歷史：清除 6635 筆超過1個月的舊資料
+  ✅ 成交量歷史 寫入 1368 筆（2026/09/11）
+  ✅ 收盤價歷史 寫入 1371 筆（2026/09/11）
+
+🎉 完成！
+  https://docs.google.com/spreadsheets/d/1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g
+  🗑️  log.txt 清理完成：移除 1 次舊執行紀錄，保留最近 14 次（1721 → 1607 行）
+
+  ▶ [v11.51] 18:05:39  耗時 259.4s  Step 4/5 寫入 Sheets 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
+按 Enter 關閉（15 秒後自動關閉）...
+✅ 已載入 config.py
+==================================================
+  台灣股市三大法人買超/賣超追蹤 v11.51
+  config.py 獨立設定 ｜ 族群聯動累積 ｜ 分模式執行
+==================================================
+  族群反查表：430 支股票已對應族群
+
+🔌 連接 Google Sheets...
+  ✅ 連接成功
+
+📡 Step 1/5 抓取三大法人資料...
+  執行時間：2026/09/14 18:00  [v11.51]
+  嘗試 20260914...
+  T86 欄位數：19，資料筆數：1333
+
+  ✅ 資料日期：2026/09/14
+  外資  買超 50 筆 / 賣超 50 筆
+  投信  買超 50   筆 / 賣超 50 筆
+  自營商買超 50  筆 / 賣超 50 筆
+  外資買超第1：臺企銀 (22,685 張)
+  外資賣超第1：友達 (88,042 張)
+  投信買超第1：彰銀 (6,073 張)
+  自營商買超第1：主動統一升級50 (15,515 張)
+
+  ▶ [v11.51] 18:00:11  耗時 2.0s  Step 1/5 三大法人 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
+  ℹ️ 快取日期：20260911
+  📋 20260911 快取讀取完成
+  ⚠️ 快取日期不符（20260911 ≠ 20260914），重新抓取
+
+💹 Step 2/5 抓取個股價格與成交量...
+  [batch] STOCK_DAY_ALL 20260914...
+  [batch] ✅ CSV 格式，1364 支
+  [otc] 抓取上櫃行情（20260914）...
+  [otc] ❌ 無回應
+  [otc] ⏳ 等待 3 秒後重試（1/2）...
+  [otc] 抓取上櫃行情（20260914）（重試）...
+  [otc] ❌ 解析失敗：Unterminated string starting at: line 1 column 14202 (char 14201)
+  [otc] ⏳ 等待 3 秒後重試（2/2）...
+  [otc] 抓取上櫃行情（20260914）（重試）...
+  [otc] ❌ 解析失敗：Unterminated string starting at: line 1 column 6563 (char 6562)
+  [otc] ❌ 重試 3 次仍失敗，回傳空表
+  [batch] 命中 135/135，剩餘 0 支...
+
+  ▶ [v11.51] 18:00:24  耗時 11.6s  Step 2/5 個股價格 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
+
+📋 Step 3/5 抓取融資融券資料...
+  融資融券日期：20260911（全市場 1297 支）
+  ✅ 融資融券 找到 135/135 支
+
+  ▶ [v11.51] 18:00:25  耗時 1.2s  Step 3/5 融資融券 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
+  💾 快取已寫入 Sheets（日期：20260914，共 17 列）
+
+📊 Step 4/5 寫入 Google Sheets...
+  ✅ 今日買超排行 更新完成
+  ✅ 今日賣超排行 更新完成
+  🗑️  歷史紀錄：清除 900 筆超過1個月的舊資料
+  ✅ 歷史紀錄 新增 300 筆（合計 6600 筆，日期降序）
+  📊 集保 CSV 解析完成（日期：20260911，命中 533/534 支）
+  📡 集保有新資料（20260911），更新快取...
+  💾 集保快取 更新 533 筆（共 670 筆）
+  📡 保底補抓現價（1 支，快取未涵蓋）...
+  [batch] STOCK_DAY_ALL 20260914...
+  [batch] ✅ CSV 格式，1364 支
+  [batch] 保底命中 0/1 支
+  [otc] 抓取上櫃行情（20260914）...
+  [otc] ❌ 無回應
+  [otc] ⏳ 等待 3 秒後重試（1/2）...
+  [otc] 抓取上櫃行情（20260914）（重試）...
+  [otc] ❌ 無回應
+  [otc] ⏳ 等待 3 秒後重試（2/2）...
+  [otc] 抓取上櫃行情（20260914）（重試）...
+  [otc] ❌ 無回應
+  [otc] ❌ 重試 3 次仍失敗，回傳空表
+  [skip] 1 支 batch/OTC/快取均未命中，跳過（量比 None）
+  ✅ 現價保底完成
+  📡 保底補抓融資融券（399 支，快取未涵蓋）...
+  融資融券日期：20260911（全市場 1297 支）
+  ✅ 融資融券保底完成（找到 396/399 支）
+  📡 抓取大盤指數...
+  加權指數（FMTQIK）：-0.7%
+  加權指數：-0.7%
+  📡 抓取5日均線（416 支）...
+  [ma5-batch] 收盤價歷史命中 3320/3328 天格，今日現價 415/416 支
+  [ma5-batch] 歷史+現價不足5天，補底 1 支...
+  [ma5-batch] 5日線計算完成（415/416 支有效）
+  ✅ 對照分析 更新完成（274 支，合計累計天數由低至高）
+  ✅ 每日快照 更新完成（最新快照插入最上方）
+  所有買超股票均已在族群表中
+  補抓族群成員行情（6 支不在快取中）...
+  [batch] STOCK_DAY_ALL 20260914...
+  [batch] ✅ CSV 格式，1364 支
+  [batch] 族群補抓命中 0/6 支
+  [otc] 抓取上櫃行情（20260914）...
+  [otc] ❌ 無回應
+  [otc] ⏳ 等待 3 秒後重試（1/2）...
+  [otc] 抓取上櫃行情（20260914）（重試）...
+  [otc] ❌ 無回應
+  [otc] ⏳ 等待 3 秒後重試（2/2）...
+  [otc] 抓取上櫃行情（20260914）（重試）...
+  [otc] ❌ 無回應
+  [otc] ❌ 重試 3 次仍失敗，回傳空表
+  [skip] 6 支 batch/OTC 均未命中，跳過
+  ✅ 族群聯動 更新完成（17 個族群觸發，累積至工作表頂部）
+  📡 抓取外資期貨未平倉...
+  外資大台指淨部位：🟡 +2,313 口　較前日 🟢 +2,681
+  ⚠️ 大盤警訊：🔴 高風險　融資異常放大 18 檔、出貨風險紅燈 2 檔
+  ⚙️ 情境降權啟動：籌碼集中度/連續天數矩陣分數 ×0.5（依據 red 警訊）
+  ✅ 橫幅列合併 6 列（僅最近 2 天）
+  ✅ 警訊 寫入完成（2026/09/14 → red）
+  ✅ 明日關注 更新完成（Top5：長榮, 台灣大, 遠傳, 宏碁, 宏齊）
+  ⚠️ 觀察組：瑞昱, 健策, 欣興, 聯詠, 金像電
+  ✅ 推薦成效 更新完成（追蹤中：60 筆，本次封存：0 筆）
+  ✅ 融券歷史 寫入 419 筆（2026/09/14）
+  ✅ 族群熱度 更新完成（29 個族群有近期活動）
+  📢 重大訊息（2026/09/11）：命中 0 筆（利多/利空）
+  📢 重大訊息（2026/09/14）：命中 0 筆（利多/利空）
+  ✅ 重大訊息歷史 寫入 0 筆（2026/09/14）
+  ✅ 融資歷史 寫入 525 筆（2026/09/14）
+  🗑️  成交量歷史：清除 18012 筆超過1個月的舊資料
+  ✅ 成交量歷史 寫入 1361 筆（2026/09/14）
+  ✅ 收盤價歷史 寫入 1364 筆（2026/09/14）
+
+🎉 完成！
+  https://docs.google.com/spreadsheets/d/1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g
+  🗑️  log.txt 清理完成：移除 1 次舊執行紀錄，保留最近 14 次（1725 → 1599 行）
+
+  ▶ [v11.51] 18:03:57  耗時 210.6s  Step 4/5 寫入 Sheets 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
+按 Enter 關閉（15 秒後自動關閉）...
+✅ 已載入 config.py
+==================================================
+  台灣股市三大法人買超/賣超追蹤 v11.51
+  config.py 獨立設定 ｜ 族群聯動累積 ｜ 分模式執行
+==================================================
+  族群反查表：430 支股票已對應族群
+
+🔌 連接 Google Sheets...
+  ✅ 連接成功
+
+📡 Step 1/5 抓取三大法人資料...
+  執行時間：2026/09/15 18:00  [v11.51]
+  嘗試 20260915...
+  T86 欄位數：19，資料筆數：1329
+
+  ✅ 資料日期：2026/09/15
+  外資  買超 50 筆 / 賣超 50 筆
+  投信  買超 50   筆 / 賣超 50 筆
+  自營商買超 50  筆 / 賣超 50 筆
+  外資買超第1：中信金 (13,796 張)
+  外資賣超第1：力積電 (72,079 張)
+  投信買超第1：聯電 (7,432 張)
+  自營商買超第1：凱基台灣TOP50 (15,881 張)
+
+  ▶ [v11.51] 18:00:12  耗時 2.0s  Step 1/5 三大法人 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
+  ℹ️ 快取日期：20260914
+  📋 20260914 快取讀取完成
+  ⚠️ 快取日期不符（20260914 ≠ 20260915），重新抓取
+
+💹 Step 2/5 抓取個股價格與成交量...
+  [batch] STOCK_DAY_ALL 20260915...
+  [batch] ✅ CSV 格式，1365 支
+  [otc] 抓取上櫃行情（20260915）...
+  [otc] ❌ 解析失敗：Expecting value: line 1 column 383907 (char 383906)
+  [otc] ⏳ 等待 3 秒後重試（1/2）...
+  [otc] 抓取上櫃行情（20260915）（重試）...
+  [otc] ❌ 解析失敗：Unterminated string starting at: line 1 column 672912 (char 672911)
+  [otc] ⏳ 等待 3 秒後重試（2/2）...
+  [otc] 抓取上櫃行情（20260915）（重試）...
+  [otc] ❌ 解析失敗：Expecting value: line 1 column 61527 (char 61526)
+  [otc] ❌ 重試 3 次仍失敗，回傳空表
+  [batch] 命中 132/132，剩餘 0 支...
+
+  ▶ [v11.51] 18:01:21  耗時 68.0s  Step 2/5 個股價格 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
+
+📋 Step 3/5 抓取融資融券資料...
+  融資融券日期：20260914（全市場 1297 支）
+  ✅ 融資融券 找到 132/132 支
+
+  ▶ [v11.51] 18:01:23  耗時 1.9s  Step 3/5 融資融券 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
+  💾 快取已寫入 Sheets（日期：20260915，共 17 列）
+
+📊 Step 4/5 寫入 Google Sheets...
+  ✅ 今日買超排行 更新完成
+  ✅ 今日賣超排行 更新完成
+  🗑️  歷史紀錄：清除 300 筆超過1個月的舊資料
+  ✅ 歷史紀錄 新增 300 筆（合計 6600 筆，日期降序）
+  📊 集保 CSV 解析完成（日期：20260911，命中 531/532 支）
+  ℹ️ 集保日期未更新（20260911），使用快取
+  📡 保底補抓現價（1 支，快取未涵蓋）...
+  [batch] STOCK_DAY_ALL 20260915...
+  [batch] ✅ CSV 格式，1365 支
+  [batch] 保底命中 0/1 支
+  [otc] 抓取上櫃行情（20260915）...
+  [otc] ✅ 5430 支
+  [otc] 保底命中 0/1 支
+  [skip] 1 支 batch/OTC/快取均未命中，跳過（量比 None）
+  ✅ 現價保底完成
+  📡 保底補抓融資融券（400 支，快取未涵蓋）...
+  融資融券日期：20260914（全市場 1297 支）
+  ✅ 融資融券保底完成（找到 397/400 支）
+  📡 抓取大盤指數...
+  加權指數（FMTQIK）：-0.77%
+  加權指數：-0.77%
+  📡 抓取5日均線（426 支）...
+  [ma5-batch] 收盤價歷史命中 3400/3408 天格，今日現價 425/426 支
+  [ma5-batch] 歷史+現價不足5天，補底 1 支...
+  [ma5-batch] 5日線計算完成（425/426 支有效）
+  ✅ 對照分析 更新完成（289 支，合計累計天數由低至高）
+  ✅ 每日快照 更新完成（最新快照插入最上方）
+  發現 2 支新股票不在族群表：['6108', '6449']
+  正在查詢官方產業別...
+  ✅ 官方產業別 載入 8684 支
+  ✅ 自動補入 SECTOR_MAP：{'6108': '其他', '6449': '其他'}
+  補抓族群成員行情（9 支不在快取中）...
+  [batch] STOCK_DAY_ALL 20260915...
+  [batch] ✅ CSV 格式，1365 支
+  [batch] 族群補抓命中 0/9 支
+  [otc] 抓取上櫃行情（20260915）...
+  [otc] ✅ 5430 支
+  [otc] 族群補抓命中 5/9 支
+  [skip] 4 支 batch/OTC 均未命中，跳過
+  ✅ 族群聯動 更新完成（23 個族群觸發，累積至工作表頂部）
+  📡 抓取外資期貨未平倉...
+  外資大台指淨部位：🟡 -593 口　較前日 🔴 -2,906
+  ⚠️ 大盤警訊：🔴 高風險　融資異常放大 13 檔、出貨風險紅燈 2 檔
+  ⚙️ 情境降權啟動：籌碼集中度/連續天數矩陣分數 ×0.5（依據 red 警訊）
+  ✅ 橫幅列合併 6 列（僅最近 2 天）
+  ✅ 警訊 寫入完成（2026/09/15 → red）
+  ✅ 明日關注 更新完成（Top5：中華電, 巨大, 聯強, 台灣高鐵, 廣達）
+  ⚠️ 觀察組：光鼎, 玉晶光, 光聖, 研華, 聯茂
+  ✅ 推薦歷史 新增 10 筆（累計 605 筆，日期降序）
+  ✅ 推薦成效 更新完成（追蹤中：60 筆，本次封存：10 筆）
+  ✅ 融券歷史 寫入 420 筆（2026/09/15）
+  ✅ 族群熱度 更新完成（31 個族群有近期活動）
+  📢 重大訊息（2026/09/14）：命中 0 筆（利多/利空）
+  📢 重大訊息（2026/09/15）：命中 0 筆（利多/利空）
+  ✅ 重大訊息歷史 寫入 0 筆（2026/09/15）
+  ✅ 融資歷史 寫入 524 筆（2026/09/15）
+  🗑️  成交量歷史：清除 6652 筆超過1個月的舊資料
+  ✅ 成交量歷史 寫入 1367 筆（2026/09/15）
+  ✅ 收盤價歷史 寫入 1370 筆（2026/09/15）
+
+🎉 完成！
+  https://docs.google.com/spreadsheets/d/1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g
+  🗑️  log.txt 清理完成：移除 1 次舊執行紀錄，保留最近 14 次（1727 → 1612 行）
+
+  ▶ [v11.51] 18:04:48  耗時 203.5s  Step 4/5 寫入 Sheets 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
+按 Enter 關閉（15 秒後自動關閉）...
+✅ 已載入 config.py
+==================================================
+  台灣股市三大法人買超/賣超追蹤 v11.51
+  config.py 獨立設定 ｜ 族群聯動累積 ｜ 分模式執行
+==================================================
+  族群反查表：432 支股票已對應族群
+
+🔌 連接 Google Sheets...
+  ✅ 連接成功
+
+📡 Step 1/5 抓取三大法人資料...
+  執行時間：2026/09/16 18:00  [v11.51]
+  嘗試 20260916...
+  T86 欄位數：19，資料筆數：1319
+
+  ✅ 資料日期：2026/09/16
+  外資  買超 50 筆 / 賣超 50 筆
+  投信  買超 50   筆 / 賣超 50 筆
+  自營商買超 50  筆 / 賣超 50 筆
+  外資買超第1：友達 (52,472 張)
+  外資賣超第1：主動統一台股增長 (24,241 張)
+  投信買超第1：永豐金 (16,189 張)
+  自營商買超第1：主動統一升級50 (13,578 張)
+
+  ▶ [v11.51] 18:00:13  耗時 2.1s  Step 1/5 三大法人 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
+  ℹ️ 快取日期：20260915
+  📋 20260915 快取讀取完成
+  ⚠️ 快取日期不符（20260915 ≠ 20260916），重新抓取
+
+💹 Step 2/5 抓取個股價格與成交量...
+  [batch] STOCK_DAY_ALL 20260916...
+  [batch] ✅ CSV 格式，1362 支
+  [otc] 抓取上櫃行情（20260916）...
+  [otc] ❌ 解析失敗：Expecting ',' delimiter: line 1 column 825368 (char 825367)
+  [otc] ⏳ 等待 3 秒後重試（1/2）...
+  [otc] 抓取上櫃行情（20260916）（重試）...
+  [otc] ❌ 解析失敗：Expecting value: line 1 column 383936 (char 383935)
+  [otc] ⏳ 等待 3 秒後重試（2/2）...
+  [otc] 抓取上櫃行情（20260916）（重試）...
+  [otc] ✅ 5746 支
+  [batch] 命中 122/122，剩餘 0 支...
+
+  ▶ [v11.51] 18:00:52  耗時 38.4s  Step 2/5 個股價格 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
+
+📋 Step 3/5 抓取融資融券資料...
+  融資融券日期：20260915（全市場 1297 支）
+  ✅ 融資融券 找到 122/122 支
+
+  ▶ [v11.51] 18:00:54  耗時 1.8s  Step 3/5 融資融券 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
+  💾 快取已寫入 Sheets（日期：20260916，共 17 列）
+
+📊 Step 4/5 寫入 Google Sheets...
+  ✅ 今日買超排行 更新完成
+  ✅ 今日賣超排行 更新完成
+  ✅ 歷史紀錄 新增 300 筆（合計 6900 筆，日期降序）
+  📊 集保 CSV 解析完成（日期：20260911，命中 537/538 支）
+  ℹ️ 集保日期未更新（20260911），使用快取
+  📡 保底補抓現價（1 支，快取未涵蓋）...
+  [batch] STOCK_DAY_ALL 20260916...
+  [batch] ✅ CSV 格式，1362 支
+  [batch] 保底命中 0/1 支
+  [otc] 抓取上櫃行情（20260916）...
+  [otc] ✅ 5746 支
+  [otc] 保底命中 0/1 支
+  [skip] 1 支 batch/OTC/快取均未命中，跳過（量比 None）
+  ✅ 現價保底完成
+  📡 保底補抓融資融券（416 支，快取未涵蓋）...
+  融資融券日期：20260915（全市場 1297 支）
+  ✅ 融資融券保底完成（找到 413/416 支）
+  📡 抓取大盤指數...
+  加權指數（FMTQIK）：+0.74%
+  加權指數：+0.74%
+  📡 抓取5日均線（429 支）...
+  [ma5-batch] 收盤價歷史命中 3424/3432 天格，今日現價 428/429 支
+  [ma5-batch] 歷史+現價不足5天，補底 1 支...
+  [ma5-batch] 5日線計算完成（428/429 支有效）
+  ✅ 對照分析 更新完成（287 支，合計累計天數由低至高）
+  ✅ 每日快照 更新完成（最新快照插入最上方）
+  發現 1 支新股票不在族群表：['2342']
+  正在查詢官方產業別...
+  ✅ 官方產業別 載入 9497 支
+  ✅ 自動補入 SECTOR_MAP：{'2342': '半導體'}
+  補抓族群成員行情（5 支不在快取中）...
+  [batch] STOCK_DAY_ALL 20260916...
+  [batch] ✅ CSV 格式，1362 支
+  [batch] 族群補抓命中 0/5 支
+  [otc] 抓取上櫃行情（20260916）...
+  [otc] ✅ 5746 支
+  [otc] 族群補抓命中 0/5 支
+  [skip] 5 支 batch/OTC 均未命中，跳過
+  ✅ 族群聯動 更新完成（21 個族群觸發，累積至工作表頂部）
+  📡 抓取外資期貨未平倉...
+  外資大台指淨部位：🟡 +2,598 口　較前日 🟢🟢 +3,191
+  ⚠️ 大盤警訊：🔴 高風險　外資期貨單日變動 3,191 口、融資異常放大 12 檔、出貨風險紅燈 2 檔
+  ⚙️ 情境降權啟動：籌碼集中度/連續天數矩陣分數 ×0.5（依據 red 警訊）
+  ✅ 橫幅列合併 6 列（僅最近 2 天）
+  ✅ 警訊 寫入完成（2026/09/16 → red）
+  ✅ 明日關注 更新完成（Top5：慧洋-KY, 瀚宇博, 廣達, 中華化, 可成）
+  ⚠️ 觀察組：麗正, 和益, 華碩, 宏齊, 日月光投控
+  ✅ 推薦歷史 新增 10 筆（累計 615 筆，日期降序）
+  ✅ 推薦成效 更新完成（追蹤中：60 筆，本次封存：10 筆）
+  ✅ 融券歷史 寫入 423 筆（2026/09/16）
+  ✅ 族群熱度 更新完成（29 個族群有近期活動）
+  ⚠️ 重大訊息抓取失敗（2026/09/15）：<urlopen error [Errno 54] Connection reset by peer>
+  📢 重大訊息（2026/09/16）：命中 0 筆（利多/利空）
+  ✅ 重大訊息歷史 寫入 0 筆（2026/09/16）
+  ✅ 融資歷史 寫入 530 筆（2026/09/16）
+  ✅ 成交量歷史 寫入 7105 筆（2026/09/16）
+  ✅ 收盤價歷史 寫入 7108 筆（2026/09/16）
+
+🎉 完成！
+  https://docs.google.com/spreadsheets/d/1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g
+  🗑️  log.txt 清理完成：移除 1 次舊執行紀錄，保留最近 14 次（1731 → 1594 行）
+
+  ▶ [v11.51] 18:04:27  耗時 211.0s  Step 4/5 寫入 Sheets 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
+按 Enter 關閉（15 秒後自動關閉）...
+✅ 已載入 config.py
+==================================================
+  台灣股市推薦回測腳本 v1.5
+==================================================
+
+🔌 連接 Google Sheets...
+  ✅ 連接成功
+
+📂 讀取資料...
+  ✅ 推薦歷史讀取 615 筆
+  ✅ 歷史紀錄讀取 6900 筆
+  ✅ 警訊 讀取 36 筆
+  過濾近 30 天：615 → 77 筆
+
+📊 組裝回測明細（77 筆）...
+  T+1 有效樣本：76/77 筆
+
+📈 計算勝率矩陣...
+
+💾 輸出結果...
+  ✅ 回測明細 寫入 77 筆
+  ✅ 回測勝率 寫入完成（18 個切面）
+
+🎉 完成！
+  https://docs.google.com/spreadsheets/d/1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g
+✅ 已載入 config.py
+==================================================
+  台灣股市三大法人買超/賣超追蹤 v11.51
+  config.py 獨立設定 ｜ 族群聯動累積 ｜ 分模式執行
+==================================================
+  族群反查表：433 支股票已對應族群
+
+🔌 連接 Google Sheets...
+  ✅ 連接成功
+
+📡 Step 1/5 抓取三大法人資料...
+  執行時間：2026/09/17 18:00  [v11.51]
+  嘗試 20260917...
+  T86 欄位數：19，資料筆數：1334
+
+  ✅ 資料日期：2026/09/17
+  外資  買超 50 筆 / 賣超 50 筆
+  投信  買超 50   筆 / 賣超 50 筆
+  自營商買超 50  筆 / 賣超 50 筆
+  外資買超第1：友達 (53,222 張)
+  外資賣超第1：中信台日韓PCB (16,766 張)
+  投信買超第1：南亞 (23,317 張)
+  自營商買超第1：群益臺灣加權正2 (76,267 張)
+
+  ▶ [v11.51] 18:00:09  耗時 2.3s  Step 1/5 三大法人 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
+  ℹ️ 快取日期：20260916
+  📋 20260916 快取讀取完成
+  ⚠️ 快取日期不符（20260916 ≠ 20260917），重新抓取
+
+💹 Step 2/5 抓取個股價格與成交量...
+  [batch] STOCK_DAY_ALL 20260917...
+  [batch] ✅ CSV 格式，1365 支
+  [otc] 抓取上櫃行情（20260917）...
+  [otc] ❌ 解析失敗：Expecting ',' delimiter: line 1 column 551229 (char 551228)
+  [otc] ⏳ 等待 3 秒後重試（1/2）...
+  [otc] 抓取上櫃行情（20260917）（重試）...
+  ⚠️ 價格抓取部分失敗：'utf-8' codec can't decode bytes in position 1128388-1128389: unexpected end of data
+
+  ▶ [v11.51] 18:00:45  耗時 34.4s  Step 2/5 個股價格 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
+
+📋 Step 3/5 抓取融資融券資料...
+  融資融券日期：20260916（全市場 1297 支）
+  ✅ 融資融券 找到 113/113 支
+
+  ▶ [v11.51] 18:00:46  耗時 1.2s  Step 3/5 融資融券 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
+  💾 快取已寫入 Sheets（日期：20260917，共 17 列）
+
+📊 Step 4/5 寫入 Google Sheets...
+  ✅ 今日買超排行 更新完成
+  ✅ 今日賣超排行 更新完成
+  ✅ 歷史紀錄 新增 300 筆（合計 7200 筆，日期降序）
+  📊 集保 CSV 解析完成（日期：20260911，命中 541/542 支）
+  ℹ️ 集保日期未更新（20260911），使用快取
+  📡 保底補抓現價（2 支，快取未涵蓋）...
+  [batch] STOCK_DAY_ALL 20260917...
+  [batch] ✅ CSV 格式，1365 支
+  [batch] 保底命中 0/2 支
+  [otc] 抓取上櫃行情（20260917）...
+  [otc] ❌ 解析失敗：Unterminated string starting at: line 1 column 29874 (char 29873)
+  [otc] ⏳ 等待 3 秒後重試（1/2）...
+  [otc] 抓取上櫃行情（20260917）（重試）...
+  [otc] ✅ 6030 支
+  [otc] 保底命中 0/2 支
+  [skip] 2 支 batch/OTC/快取均未命中，跳過（量比 None）
+  ✅ 現價保底完成
+  📡 保底補抓融資融券（429 支，快取未涵蓋）...
+  融資融券日期：20260916（全市場 1297 支）
+  ✅ 融資融券保底完成（找到 426/429 支）
+  📡 抓取大盤指數...
+  加權指數（FMTQIK）：+0.96%
+  加權指數：+0.96%
+  📡 抓取5日均線（431 支）...
+  [ma5-batch] 收盤價歷史命中 3440/3448 天格，今日現價 223/431 支
+  [ma5-batch] 歷史+現價不足5天，補底 1 支...
+  [ma5-batch] 5日線計算完成（430/431 支有效）
+  ✅ 對照分析 更新完成（282 支，合計累計天數由低至高）
+  ✅ 每日快照 更新完成（最新快照插入最上方）
+  所有買超股票均已在族群表中
+  補抓族群成員行情（8 支不在快取中）...
+  [batch] STOCK_DAY_ALL 20260917...
+  [batch] ✅ CSV 格式，1365 支
+  [batch] 族群補抓命中 0/8 支
+  [otc] 抓取上櫃行情（20260917）...
+  [otc] ❌ 解析失敗：Unterminated string starting at: line 1 column 368802 (char 368801)
+  [otc] ⏳ 等待 3 秒後重試（1/2）...
+  [otc] 抓取上櫃行情（20260917）（重試）...
+  [otc] ✅ 6030 支
+  [otc] 族群補抓命中 4/8 支
+  [skip] 4 支 batch/OTC 均未命中，跳過
+  ✅ 族群聯動 更新完成（19 個族群觸發，累積至工作表頂部）
+  📡 抓取外資期貨未平倉...
+  外資大台指淨部位：🟡 -2,274 口　較前日 🔴🔴🔴 -4,872
+  ⚠️ 大盤警訊：🔴 高風險　外資期貨單日變動 4,872 口、融資異常放大 14 檔、出貨風險紅燈 4 檔
+  ⚙️ 情境降權啟動：籌碼集中度/連續天數矩陣分數 ×0.5（依據 red 警訊）
+  ✅ 橫幅列合併 6 列（僅最近 2 天）
+  ✅ 警訊 寫入完成（2026/09/17 → red）
+  ✅ 明日關注 更新完成（Top5：）
+  ✅ 推薦歷史 新增 10 筆（累計 625 筆，日期降序）
+  ✅ 推薦成效 更新完成（追蹤中：50 筆，本次封存：10 筆）
+  ✅ 融券歷史 寫入 432 筆（2026/09/17）
+  ✅ 族群熱度 更新完成（30 個族群有近期活動）
+  📢 重大訊息（2026/09/16）：命中 0 筆（利多/利空）
+  📢 重大訊息（2026/09/17）：命中 0 筆（利多/利空）
+  ✅ 重大訊息歷史 寫入 0 筆（2026/09/17）
+  ✅ 融資歷史 寫入 534 筆（2026/09/17）
+  ✅ 成交量歷史 寫入 1140 筆（2026/09/17）
+  ✅ 收盤價歷史 寫入 1143 筆（2026/09/17）
+
+🎉 完成！
+  https://docs.google.com/spreadsheets/d/1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g
+  🗑️  log.txt 清理完成：移除 2 次舊執行紀錄，保留最近 14 次（1735 → 1579 行）
+
+  ▶ [v11.51] 18:04:01  耗時 193.4s  Step 4/5 寫入 Sheets 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
+按 Enter 關閉（15 秒後自動關閉）...
+✅ 已載入 config.py
+==================================================
+  台灣股市三大法人買超/賣超追蹤 v11.51
+  config.py 獨立設定 ｜ 族群聯動累積 ｜ 分模式執行
+==================================================
+  族群反查表：433 支股票已對應族群
+
+🔌 連接 Google Sheets...
+  ✅ 連接成功
+
+📡 Step 1/5 抓取三大法人資料...
+  執行時間：2026/09/18 15:53  [v11.51]
+  16:30 前自動使用前一交易日（三大法人資料 16:30 後才釋出）
+  嘗試 20260917...
+  T86 欄位數：19，資料筆數：1337
+
+  ✅ 資料日期：2026/09/17
+  外資  買超 50 筆 / 賣超 50 筆
+  投信  買超 50   筆 / 賣超 50 筆
+  自營商買超 50  筆 / 賣超 50 筆
+  外資買超第1：友達 (53,222 張)
+  外資賣超第1：中信台日韓PCB (16,766 張)
+  投信買超第1：聯電 (27,909 張)
+  自營商買超第1：群益臺灣加權正2 (76,267 張)
+
+  ▶ [v11.51] 15:53:16  耗時 1.9s  Step 1/5 三大法人 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
+  ⏩ 自動繼續。
+  ℹ️ 快取日期：20260917
+  📋 20260917 快取讀取完成
+  ⚠️ 快取價格異常（僅 0/150 支有效收盤價），視為快取不完整，改為重新抓取
+
+💹 Step 2/5 抓取個股價格與成交量...
+  [batch] STOCK_DAY_ALL 20260917...
+  [batch] ⚠️ CSV 回傳日期 1150918（西元20260918）≠ 目標 20260917，batch 不適用
+  [otc] 抓取上櫃行情（20260917）...
+  [otc] ✅ 6211 支
+  [batch] 命中 0/114，剩餘 114 支...
+  [otc] 抓取上櫃行情（20260917）...
+  [otc] ✅ 6211 支
+  [otc] 命中 0/114，補抓 114 支...
+  [補抓 1/114] 2409: 均價=30.17 收盤=30.00 量比=0.89
+  [補抓 2/114] 6770: 均價=71.27 收盤=71.20 量比=0.88
+  [補抓 3/114] 00403A: 均價=10.14 收盤=10.01 量比=1.16
+  [補抓 4/114] 2834: 均價=18.53 收盤=18.75 量比=1.08
+  [補抓 5/114] 1314: 均價=8.84 收盤=8.96 量比=7.81
+  [補抓 6/114] 2609: 均價=61.22 收盤=62.00 量比=1.2
+  [補抓 7/114] 00406A: 均價=9.41 收盤=9.31 量比=2.87
+  [補抓 8/114] 2371: 均價=29.31 收盤=29.70 量比=5.79
+  [補抓 9/114] 2883: 均價=39.81 收盤=39.65 量比=1.0
+  [補抓 10/114] 00631L: 均價=36.64 收盤=36.41 量比=1.18
+  [補抓 11/114] 1101: 均價=24.37 收盤=24.45 量比=1.04
+  [補抓 12/114] 1718: 均價=10.80 收盤=10.90 量比=1.62
+  [補抓 13/114] 2412: 均價=144.20 收盤=145.00 量比=1.25
+  [補抓 14/114] 1301: 均價=63.99 收盤=64.60 量比=1.01
+  [補抓 15/114] 2303: 均價=146.96 收盤=147.50 量比=1.44
+  [補抓 16/114] 2317: 均價=251.92 收盤=250.50 量比=0.88
+  [補抓 17/114] 3231: 均價=186.96 收盤=186.50 量比=0.48
+  [補抓 18/114] 6257: 均價=222.23 收盤=222.50 量比=2.94
+  [補抓 19/114] 6505: 均價=85.36 收盤=86.20 量比=1.26
+  [補抓 20/114] 0050: 均價=108.52 收盤=108.05 量比=0.71
+  [補抓 21/114] 2885: 均價=69.19 收盤=69.00 量比=1.21
+  [補抓 22/114] 1326: 均價=67.85 收盤=68.60 量比=0.68
+  [補抓 23/114] 5880: 均價=27.43 收盤=27.55 量比=0.97
+  [補抓 24/114] 2353: 均價=32.38 收盤=32.40 量比=1.06
+  [補抓 25/114] 0056: 均價=56.33 收盤=56.30 量比=1.26
+  [補抓 26/114] 2605: 均價=36.87 收盤=37.15 量比=1.15
+  [補抓 27/114] 1312: 均價=14.88 收盤=14.95 量比=0.69
+  [補抓 28/114] 00919: 均價=32.16 收盤=32.11 量比=0.7
+  [補抓 29/114] 2610: 均價=20.28 收盤=20.35 量比=1.03
+  [補抓 30/114] 2515: 均價=12.10 收盤=12.05 量比=3.67
+  [補抓 31/114] 2489: 均價=43.41 收盤=43.20 量比=5.71
+  [補抓 32/114] 1409: 均價=24.66 收盤=24.80 量比=0.57
+  [補抓 33/114] 1402: 均價=27.90 收盤=28.10 量比=1.42
+  [補抓 34/114] 2880: 均價=47.88 收盤=47.90 量比=1.15
+  [補抓 35/114] 2615: 均價=117.87 收盤=120.50 量比=0.95
+  [補抓 36/114] 3702: 均價=110.15 收盤=111.00 量比=1.64
+  [補抓 37/114] 2330: 均價=2424.98 收盤=2425.00 量比=0.9
+  [補抓 38/114] 2382: 均價=343.32 收盤=344.00 量比=0.99
+  [補抓 39/114] 2892: 均價=40.56 收盤=40.75 量比=1.02
+  [補抓 40/114] 2399: 均價=49.45 收盤=49.00 量比=4.11
+  [補抓 41/114] 2618: 均價=41.96 收盤=42.05 量比=1.19
+  [補抓 42/114] 2845: 均價=13.68 收盤=13.75 量比=0.65
+  [補抓 43/114] 2103: 均價=27.80 收盤=28.20 量比=1.49
+  [補抓 44/114] 2891: 均價=71.16 收盤=71.20 量比=1.29
+  [補抓 45/114] 6226: 均價=43.53 收盤=43.85 量比=1.01
+  [補抓 46/114] 2884: 均價=46.96 收盤=47.30 量比=0.87
+  [補抓 47/114] 1727: 均價=102.24 收盤=105.00 量比=4.76
+  [補抓 48/114] 00409A: 均價=9.57 收盤=9.53 量比=0.53
+  [補抓 49/114] 1102: 均價=35.12 收盤=35.30 量比=1.51
+  [補抓 50/114] 9945: 均價=28.63 收盤=28.95 量比=2.88
+  [補抓 51/114] 1303: 均價=235.26 收盤=236.00 量比=1.44
+  [補抓 52/114] 2801: 均價=29.44 收盤=29.60 量比=1.56
+  [補抓 53/114] 2887: 均價=44.31 收盤=44.05 量比=1.12
+  [補抓 54/114] 2890: 均價=45.82 收盤=45.95 量比=1.3
+  [補抓 55/114] 2886: 均價=51.50 收盤=51.90 量比=0.95
+  [補抓 56/114] 9904: 均價=24.68 收盤=24.80 量比=1.55
+  [補抓 57/114] 2542: 均價=46.61 收盤=46.85 量比=1.38
+  [補抓 58/114] 3036: 均價=201.38 收盤=204.00 量比=2.78
+  [補抓 59/114] 2603: 均價=239.79 收盤=242.50 量比=0.92
+  [補抓 60/114] 2027: 均價=47.10 收盤=47.10 量比=0.7
+  [補抓 61/114] 8028: 均價=243.16 收盤=244.00 量比=3.01
+  [補抓 62/114] 2481: 均價=165.96 收盤=163.00 量比=1.34
+  [補抓 63/114] 2376: 均價=354.31 收盤=355.00 量比=0.97
+  [補抓 64/114] 4763: 均價=46.40 收盤=47.70 量比=1.11
+  [補抓 65/114] 2633: 均價=25.97 收盤=26.05 量比=1.06
+  [補抓 66/114] 3450: 均價=540.79 收盤=525.00 量比=3.62
+  [補抓 67/114] 3026: 均價=793.17 收盤=760.00 量比=1.4
+  [補抓 68/114] 00922: 均價=42.21 收盤=41.96 量比=0.94
+  [補抓 69/114] 5876: 均價=49.73 收盤=49.95 量比=0.74
+  [補抓 70/114] 2313: 均價=224.94 收盤=218.50 量比=1.15
+  [補抓 71/114] 2408: 均價=494.77 收盤=488.00 量比=0.79
+  [補抓 72/114] 2455: 均價=548.74 收盤=534.00 量比=3.46
+  [補抓 73/114] 009803: 均價=20.95 收盤=20.82 量比=0.34
+  [補抓 74/114] 9910: 均價=68.57 收盤=69.10 量比=0.85
+  [補抓 75/114] 2855: 均價=52.32 收盤=52.50 量比=0.75
+  [補抓 76/114] 3443: 均價=6471.31 收盤=6500.00 量比=1.35
+  [補抓 77/114] 2474: 均價=208.11 收盤=208.50 量比=1.41
+  [補抓 78/114] 1513: 均價=164.88 收盤=165.00 量比=1.13
+  [補抓 79/114] 8070: 均價=50.26 收盤=50.10 量比=1.25
+  [補抓 80/114] 3711: 均價=618.89 收盤=614.00 量比=0.68
+  [補抓 81/114] 6213: 均價=512.07 收盤=495.00 量比=2.74
+  [補抓 82/114] 2606: 均價=76.09 收盤=77.00 量比=0.63
+  [補抓 83/114] 3189: 均價=808.18 收盤=805.00 量比=1.11
+  [補抓 84/114] 4938: 均價=90.11 收盤=90.40 量比=0.81
+  [補抓 85/114] 6805: 均價=2139.39 收盤=2090.00 量比=1.15
+  [補抓 86/114] 00685L: 均價=12.07 收盤=11.98 量比=1.22
+  [補抓 87/114] 00940: 均價=13.01 收盤=12.99 量比=2.15
+  [補抓 88/114] 00988A: 均價=16.04 收盤=15.97 量比=1.09
+  [補抓 89/114] 00680L: 均價=6.24 收盤=6.20 量比=1.11
+  [補抓 90/114] 00878: 均價=34.80 收盤=34.73 量比=0.71
+  [補抓 91/114] 009824: 均價=10.05 收盤=10.05 量比=1.14
+  [補抓 92/114] 00664R: 均價=1.58 收盤=1.59 量比=1.52
+  [補抓 93/114] 00900: 均價=19.78 收盤=19.77 量比=1.6
+  [補抓 94/114] 00405A: 均價=8.57 收盤=8.43 量比=1.37
+  [補抓 95/114] 00404A: 均價=9.58 收盤=9.52 量比=0.53
+  [補抓 96/114] 0052: 均價=62.96 收盤=62.70 量比=0.86
+  [補抓 97/114] 00990A: 均價=14.93 收盤=14.89 量比=0.53
+  [補抓 98/114] 00997A: 均價=10.91 收盤=10.90 量比=0.66
+  [補抓 99/114] 00881: 均價=50.29 收盤=49.81 量比=0.69
+  [補抓 100/114] 00402A: 均價=9.53 收盤=9.52 量比=0.99
+  [補抓 101/114] 00671R: 均價=2.45 收盤=2.46 量比=0.75
+  [補抓 102/114] 00688L: 均價=6.21 收盤=6.19 量比=0.68
+  [補抓 103/114] 00896: 均價=26.75 收盤=26.63 量比=0.41
+  [補抓 104/114] 00642U: 均價=33.33 收盤=33.44 量比=0.8
+  [補抓 105/114] 00407A: 均價=9.47 收盤=9.35 量比=1.04
+  [補抓 106/114] 00907: 均價=17.99 收盤=18.06 量比=3.09
+  [補抓 107/114] 00996A: 均價=13.80 收盤=13.55 量比=1.02
+  [補抓 108/114] 009820: 均價=9.84 收盤=9.82 量比=0.61
+  [補抓 109/114] 00669R: 均價=5.34 收盤=5.34 量比=2.55
+  [補抓 110/114] 2344: 均價=174.31 收盤=170.00 量比=1.03
+  [補抓 111/114] 00915: 均價=32.93 收盤=33.03 量比=0.9
+  [補抓 112/114] 009813: 均價=11.27 收盤=11.27 量比=0.75
+  [補抓 113/114] 00891: 均價=35.65 收盤=35.41 量比=1.02
+  [補抓 114/114] 00947: 均價=37.54 收盤=37.10 量比=0.72
+
+  ▶ [v11.51] 15:56:13  耗時 170.7s  Step 2/5 個股價格 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
+  ⏩ 自動繼續。
+
+📋 Step 3/5 抓取融資融券資料...
+  融資融券日期：20260916（全市場 1297 支）
+  ✅ 融資融券 找到 114/114 支
+
+  ▶ [v11.51] 15:56:20  耗時 1.7s  Step 3/5 融資融券 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
+  ⏩ 自動繼續。
+  💾 快取已寫入 Sheets（日期：20260917，共 17 列）
+
+📊 Step 4/5 寫入 Google Sheets...
+  ✅ 今日買超排行 更新完成
+  ✅ 今日賣超排行 更新完成
+  ✅ 歷史紀錄 新增 300 筆（合計 7200 筆，日期降序）
+  📊 集保 CSV 解析完成（日期：20260911，命中 541/542 支）
+  ℹ️ 集保日期未更新（20260911），使用快取
+  📡 保底補抓現價（316 支，快取未涵蓋）...
+  [batch] STOCK_DAY_ALL 20260917...
+  [batch] ⚠️ CSV 回傳日期 1150918（西元20260918）≠ 目標 20260917，batch 不適用
+  [otc] 抓取上櫃行情（20260917）...
+  [otc] ✅ 6211 支
+  [otc] 保底命中 0/316 支
+  [skip] 316 支 batch/OTC/快取均未命中，跳過（量比 None）
+  ✅ 現價保底完成
+  📡 保底補抓融資融券（428 支，快取未涵蓋）...
+  融資融券日期：20260916（全市場 1297 支）
+  ✅ 融資融券保底完成（找到 425/428 支）
+  📡 抓取大盤指數...
+  加權指數（FMTQIK）：+0.96%
+  加權指數：+0.96%
+  📡 抓取5日均線（431 支）...
+  [ma5-batch] 收盤價歷史命中 3440/3448 天格，今日現價 88/431 支
+  [ma5-batch] 歷史+現價不足5天，補底 1 支...
+  [ma5-batch] 5日線計算完成（430/431 支有效）
+  ✅ 對照分析 更新完成（282 支，合計累計天數由低至高）
+  ✅ 每日快照 更新完成（最新快照插入最上方）
+  所有買超股票均已在族群表中
+  補抓族群成員行情（232 支不在快取中）...
+  [batch] STOCK_DAY_ALL 20260917...
+  [batch] ⚠️ CSV 回傳日期 1150918（西元20260918）≠ 目標 20260917，batch 不適用
+  [otc] 抓取上櫃行情（20260917）...
+  [otc] ✅ 6211 支
+  [otc] 族群補抓命中 0/232 支
+  [skip] 232 支 batch/OTC 均未命中，跳過
+  ✅ 族群聯動 更新完成（18 個族群觸發，累積至工作表頂部）
+  📡 抓取外資期貨未平倉...
+  外資大台指淨部位：🟡 -2,274 口　較前日 🔴🔴🔴 -4,872
+  ⚠️ 大盤警訊：🔴 高風險　外資期貨單日變動 4,872 口、融資異常放大 14 檔
+  ⚙️ 情境降權啟動：籌碼集中度/連續天數矩陣分數 ×0.5（依據 red 警訊）
+  ✅ 橫幅列合併 6 列（僅最近 2 天）
+  ✅ 警訊 寫入完成（2026/09/17 → red）
+  ✅ 明日關注 更新完成（Top5：大同, 新興, 潤泰新, 宏碁, 萬海）
+  ⚠️ 觀察組：富世達, 中華化, 中石化, 創意, 光鼎
+  ✅ 推薦成效 更新完成（追蹤中：57 筆，本次封存：0 筆）
+  ✅ 融券歷史 寫入 432 筆（2026/09/17）
+  ✅ 族群熱度 更新完成（29 個族群有近期活動）
+  📢 重大訊息（2026/09/16）：命中 0 筆（利多/利空）
+  📢 重大訊息（2026/09/17）：命中 0 筆（利多/利空）
+  ✅ 重大訊息歷史 寫入 0 筆（2026/09/17）
+  ✅ 融資歷史 寫入 534 筆（2026/09/17）
+  ✅ 成交量歷史 寫入 6299 筆（2026/09/17）
+  ✅ 收盤價歷史 寫入 6299 筆（2026/09/17）
+
+🎉 完成！
+  https://docs.google.com/spreadsheets/d/1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g
+  🗑️  log.txt 清理完成：移除 2 次舊執行紀錄，保留最近 14 次（1914 → 1751 行）
+
+  ▶ [v11.51] 16:00:05  耗時 218.0s  Step 4/5 寫入 Sheets 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
+  ⏩ 自動繼續。
+按 Enter 關閉（15 秒後自動關閉）...
+✅ 已載入 config.py
+==================================================
+  台灣股市三大法人買超/賣超追蹤 v11.51
+  config.py 獨立設定 ｜ 族群聯動累積 ｜ 分模式執行
+==================================================
+  族群反查表：433 支股票已對應族群
+
+🔌 連接 Google Sheets...
+  ✅ 連接成功
+
+📡 Step 1/5 抓取三大法人資料...
+  執行時間：2026/09/18 18:00  [v11.51]
+  嘗試 20260918...
+  T86 欄位數：19，資料筆數：1335
+
+  ✅ 資料日期：2026/09/18
+  外資  買超 50 筆 / 賣超 50 筆
+  投信  買超 50   筆 / 賣超 50 筆
+  自營商買超 50  筆 / 賣超 50 筆
+  外資買超第1：主動統一升級50 (102,801 張)
+  外資賣超第1：友達 (52,163 張)
+  投信買超第1：聯電 (11,741 張)
+  自營商買超第1：主動統一升級50 (155,587 張)
+
+  ▶ [v11.51] 18:00:29  耗時 2.3s  Step 1/5 三大法人 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
+  ℹ️ 快取日期：20260917
+  📋 20260917 快取讀取完成
+  ⚠️ 快取日期不符（20260917 ≠ 20260918），重新抓取
+
+💹 Step 2/5 抓取個股價格與成交量...
+  [batch] STOCK_DAY_ALL 20260918...
+  [batch] ✅ CSV 格式，1371 支
+  [otc] 抓取上櫃行情（20260918）...
+  [otc] ❌ 無回應
+  [otc] ⏳ 等待 3 秒後重試（1/2）...
+  [otc] 抓取上櫃行情（20260918）（重試）...
+  [otc] ✅ 6211 支
+  [batch] 命中 119/119，剩餘 0 支...
+
+  ▶ [v11.51] 18:01:02  耗時 31.8s  Step 2/5 個股價格 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
+
+📋 Step 3/5 抓取融資融券資料...
+  融資融券日期：20260917（全市場 1297 支）
+  ✅ 融資融券 找到 119/119 支
+
+  ▶ [v11.51] 18:01:04  耗時 1.4s  Step 3/5 融資融券 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
+  💾 快取已寫入 Sheets（日期：20260918，共 17 列）
+
+📊 Step 4/5 寫入 Google Sheets...
+  ✅ 今日買超排行 更新完成
+  ✅ 今日賣超排行 更新完成
+  🗑️  歷史紀錄：清除 300 筆超過1個月的舊資料
+  ✅ 歷史紀錄 新增 300 筆（合計 7200 筆，日期降序）
+  📊 集保 CSV 解析完成（日期：20260911，命中 545/546 支）
+  ℹ️ 集保日期未更新（20260911），使用快取
+  📡 保底補抓現價（2 支，快取未涵蓋）...
+  [batch] STOCK_DAY_ALL 20260918...
+  [batch] ✅ CSV 格式，1371 支
+  [batch] 保底命中 0/2 支
+  [otc] 抓取上櫃行情（20260918）...
+  [otc] ❌ 解析失敗：Unterminated string starting at: line 1 column 1054701 (char 1054700)
+  [otc] ⏳ 等待 3 秒後重試（1/2）...
+  [otc] 抓取上櫃行情（20260918）（重試）...
+  [otc] ✅ 6211 支
+  [otc] 保底命中 0/2 支
+  [skip] 2 支 batch/OTC/快取均未命中，跳過（量比 None）
+  ✅ 現價保底完成
+  📡 保底補抓融資融券（427 支，快取未涵蓋）...
+  融資融券日期：20260917（全市場 1297 支）
+  ✅ 融資融券保底完成（找到 424/427 支）
+  📡 抓取大盤指數...
+  加權指數（FMTQIK）：+1.93%
+  加權指數：+1.93%
+  📡 抓取5日均線（432 支）...
+  [ma5-batch] 收盤價歷史命中 3105/3456 天格，今日現價 431/432 支
+  [ma5-batch] 歷史+現價不足5天，補底 1 支...
+  [ma5-batch] 5日線計算完成（431/432 支有效）
+  ✅ 對照分析 更新完成（286 支，合計累計天數由低至高）
+  ✅ 每日快照 更新完成（最新快照插入最上方）
+  發現 1 支新股票不在族群表：['1722']
+  正在查詢官方產業別...
+  ✅ 官方產業別 載入 1256 支
+  ✅ 自動補入 SECTOR_MAP：{'1722': '傳產'}
+  補抓族群成員行情（5 支不在快取中）...
+  [batch] STOCK_DAY_ALL 20260918...
+  [batch] ✅ CSV 格式，1371 支
+  [batch] 族群補抓命中 0/5 支
+  [otc] 抓取上櫃行情（20260918）...
+  [otc] ✅ 6211 支
+  [otc] 族群補抓命中 0/5 支
+  [skip] 5 支 batch/OTC 均未命中，跳過
+  ✅ 族群聯動 更新完成（24 個族群觸發，累積至工作表頂部）
+  📡 抓取外資期貨未平倉...
+  外資大台指淨部位：🟡 +2,521 口　較前日 🟢🟢🟢 +4,795
+  ⚠️ 大盤警訊：🔴 高風險　外資期貨單日變動 4,795 口、融資異常放大 23 檔、出貨風險紅燈 3 檔
+  ⚙️ 情境降權啟動：籌碼集中度/連續天數矩陣分數 ×0.5（依據 red 警訊）
+  ✅ 橫幅列合併 6 列（僅最近 2 天）
+  ✅ 警訊 寫入完成（2026/09/18 → red）
+  ✅ 明日關注 更新完成（Top5：材料*-KY, 中華電, 豐泰, 興富發, 富采）
+  ⚠️ 觀察組：南茂, 矽格, 南亞科, 富世達, 京元電子
+  🆕 v2限定候選：日月光投控, 欣興
+  ✅ 推薦歷史 新增 10 筆（累計 635 筆，日期降序）
+  ✅ 推薦成效 更新完成（追蹤中：57 筆，本次封存：10 筆）
+  ✅ 融券歷史 寫入 435 筆（2026/09/18）
+  ✅ 族群熱度 更新完成（30 個族群有近期活動）
+  📢 重大訊息（2026/09/17）：命中 0 筆（利多/利空）
+  📢 重大訊息（2026/09/18）：命中 0 筆（利多/利空）
+  ✅ 重大訊息歷史 寫入 0 筆（2026/09/18）
+  ✅ 融資歷史 寫入 537 筆（2026/09/18）
+  🗑️  成交量歷史：清除 5136 筆超過1個月的舊資料
+  ✅ 成交量歷史 寫入 7579 筆（2026/09/18）
+  ✅ 收盤價歷史 寫入 7582 筆（2026/09/18）
+
+🎉 完成！
+  https://docs.google.com/spreadsheets/d/1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g
+
+  ▶ [v11.51] 18:04:57  耗時 232.1s  Step 4/5 寫入 Sheets 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
+按 Enter 關閉（15 秒後自動關閉）...
+✅ 已載入 config.py
+==================================================
+  台灣股市三大法人買超/賣超追蹤 v11.53
+  config.py 獨立設定 ｜ 族群聯動累積 ｜ 分模式執行
+==================================================
+  族群反查表：434 支股票已對應族群
+
+🔌 連接 Google Sheets...
+  ✅ 連接成功
+
+📡 Step 1/5 抓取三大法人資料...
+  執行時間：2026/09/21 15:57  [v11.53]
+  16:30 前自動使用前一交易日（三大法人資料 16:30 後才釋出）
+  嘗試 20260918...
+  T86 欄位數：19，資料筆數：1339
+
+  ✅ 資料日期：2026/09/18
+  外資  買超 50 筆 / 賣超 50 筆
+  投信  買超 50   筆 / 賣超 50 筆
+  自營商買超 50  筆 / 賣超 50 筆
+  外資買超第1：主動統一升級50 (102,801 張)
+  外資賣超第1：友達 (52,163 張)
+  投信買超第1：聯電 (13,630 張)
+  自營商買超第1：主動統一升級50 (155,587 張)
+
+  ▶ [v11.53] 15:57:07  耗時 3.7s  Step 1/5 三大法人 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
+  ⏩ 自動繼續。
+  ℹ️ 快取日期：20260918
+  📋 20260918 快取讀取完成
+  ✅ 快取命中（日期吻合），跳過 Step 2/3 API 抓取
+
+💹 Step 2/5 抓取全市場行情（快取命中，補抓全市場）...
+  [batch] STOCK_DAY_ALL 20260918...
+  [batch] ⚠️ CSV 回傳日期 1150921（西元20260921）≠ 目標 20260918，batch 不適用
+  [otc] 抓取上櫃行情（20260918）...
+  [otc] ✅ 6058 支
+
+  ▶ [v11.53] 15:57:19  耗時 5.2s  Step 2~3/5 行情補抓（快取） 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
+  ⏩ 自動繼續。
+
+📊 Step 4/5 寫入 Google Sheets...
+  ✅ 今日買超排行 更新完成
+  ✅ 今日賣超排行 更新完成
+  ✅ 歷史紀錄 新增 300 筆（合計 7200 筆，日期降序）
+  📊 集保 CSV 解析完成（日期：20260918，命中 545/546 支）
+  📡 集保有新資料（20260918），更新快取...
+  💾 集保快取 更新 545 筆（共 680 筆）
+  📡 保底補抓現價（115 支，快取未涵蓋）...
+  [batch] STOCK_DAY_ALL 20260918...
+  [batch] ⚠️ CSV 回傳日期 1150921（西元20260921）≠ 目標 20260918，batch 不適用
+  [otc] 抓取上櫃行情（20260918）...
+  [otc] ✅ 6058 支
+  [otc] 保底命中 0/115 支
+  [skip] 115 支 batch/OTC/快取均未命中，跳過（量比 None）
+  ✅ 現價保底完成
+  📡 保底補抓融資融券（427 支，快取未涵蓋）...
+  融資融券日期：20260917（全市場 1297 支）
+  ✅ 融資融券保底完成（找到 424/427 支）
+  📡 抓取大盤指數...
+  加權指數（FMTQIK）：+1.93%
+  加權指數：+1.93%
+  📡 抓取5日均線（432 支）...
+  [ma5-batch] 收盤價歷史命中 3105/3456 天格，今日現價 357/432 支
+  [ma5-batch] 歷史+現價不足5天，補底 1 支...
+  [ma5-batch] 5日線計算完成（431/432 支有效）
+  ✅ 對照分析 更新完成（286 支，合計累計天數由低至高）
+  ✅ 每日快照 更新完成（最新快照插入最上方）
+  所有買超股票均已在族群表中
+  補抓族群成員行情（5 支不在快取中）...
+  [batch] STOCK_DAY_ALL 20260918...
+  [batch] ⚠️ CSV 回傳日期 1150921（西元20260921）≠ 目標 20260918，batch 不適用
+  [otc] 抓取上櫃行情（20260918）...
+  [otc] ✅ 6058 支
+  [otc] 族群補抓命中 0/5 支
+  [skip] 5 支 batch/OTC 均未命中，跳過
+  ✅ 族群聯動 更新完成（24 個族群觸發，累積至工作表頂部）
+  📡 抓取外資期貨未平倉...
+  外資大台指淨部位：🟡 +2,521 口　較前日 🟢🟢🟢 +4,795
+  ⚠️ 大盤警訊：🔴 高風險　外資期貨單日變動 4,795 口、融資異常放大 23 檔、出貨風險紅燈 3 檔
+  ⚙️ 情境降權啟動：籌碼集中度/連續天數矩陣分數 ×0.5（依據 red 警訊）
+  🔍 v2限定候選 debug row1：長度=22（應為22） 內容=[1, '3711', '日月光投控', 88, 3, '25.8%', '🔵 高度集中', '🟢 低', '✅ 籌碼乾淨', 638.0, '+3.91%', '', '自營1天', '612.2(5日)~641.3(成本)', 612.2, 641.33, 1.7, '↘ 減51張', '↗ 連增2天', 0.096, 70, 'v2']
+  ✅ v2限定候選 除錯：代號=3711 寫入後核對正確
+  ✅ 橫幅列合併 6 列（僅最近 2 天）
+  ✅ 警訊 寫入完成（2026/09/18 → red）
+  ✅ 明日關注 更新完成（Top5：材料*-KY, 中華電, 力成, 鼎元, 興富發）
+  ⚠️ 觀察組：南茂, 矽格, 富世達, 南亞科, 保瑞
+  🆕 v2限定候選：日月光投控
+  ✅ 推薦成效 更新完成（追蹤中：61 筆，本次封存：0 筆）
+  ✅ 融券歷史 寫入 435 筆（2026/09/18）
+  ✅ 族群熱度 更新完成（30 個族群有近期活動）
+  📢 重大訊息（2026/09/17）：命中 0 筆（利多/利空）
+  📢 重大訊息（2026/09/18）：命中 0 筆（利多/利空）
+  ✅ 重大訊息歷史 寫入 0 筆（2026/09/18）
+  ✅ 融資歷史 寫入 537 筆（2026/09/18）
+  ✅ 成交量歷史 寫入 6563 筆（2026/09/18）
+  ✅ 收盤價歷史 寫入 6563 筆（2026/09/18）
+
+🎉 完成！
+  https://docs.google.com/spreadsheets/d/1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g
+  🗑️  log.txt 清理完成：移除 2 次舊執行紀錄，保留最近 14 次（1973 → 1667 行）
+
+  ▶ [v11.53] 16:00:29  耗時 185.2s  Step 4/5 寫入 Sheets 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
+  ⏩ 自動繼續。
+按 Enter 關閉（15 秒後自動關閉）...
+✅ 已載入 config.py
+==================================================
+  台灣股市三大法人買超/賣超追蹤 v11.53
+  config.py 獨立設定 ｜ 族群聯動累積 ｜ 分模式執行
+==================================================
+  族群反查表：434 支股票已對應族群
+
+🔌 連接 Google Sheets...
+  ✅ 連接成功
+
+📡 Step 1/5 抓取三大法人資料...
+  執行時間：2026/09/21 18:00  [v11.53]
+  嘗試 20260921...
+  T86 欄位數：19，資料筆數：1339
+
+  ✅ 資料日期：2026/09/21
+  外資  買超 50 筆 / 賣超 50 筆
+  投信  買超 50   筆 / 賣超 50 筆
+  自營商買超 50  筆 / 賣超 50 筆
+  外資買超第1：友達 (235,893 張)
+  外資賣超第1：力積電 (24,017 張)
+  投信買超第1：聯電 (5,632 張)
+  自營商買超第1：主動統一升級50 (150,972 張)
+
+  ▶ [v11.53] 18:00:13  耗時 5.2s  Step 1/5 三大法人 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
+  ℹ️ 快取日期：20260918
+  📋 20260918 快取讀取完成
+  ⚠️ 快取日期不符（20260918 ≠ 20260921），重新抓取
+
+💹 Step 2/5 抓取個股價格與成交量...
+  [batch] STOCK_DAY_ALL 20260921...
+  [batch] ✅ CSV 格式，1373 支
+  [otc] 抓取上櫃行情（20260921）...
+  [otc] ✅ 6058 支
+  [batch] 命中 121/121，剩餘 0 支...
+
+  ▶ [v11.53] 18:00:29  耗時 15.1s  Step 2/5 個股價格 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
+
+📋 Step 3/5 抓取融資融券資料...
+  融資融券日期：20260918（全市場 1297 支）
+  ✅ 融資融券 找到 121/121 支
+
+  ▶ [v11.53] 18:00:30  耗時 1.4s  Step 3/5 融資融券 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
+  💾 快取已寫入 Sheets（日期：20260921，共 17 列）
+
+📊 Step 4/5 寫入 Google Sheets...
+  ✅ 今日買超排行 更新完成
+  ✅ 今日賣超排行 更新完成
+  🗑️  歷史紀錄：清除 900 筆超過1個月的舊資料
+  ✅ 歷史紀錄 新增 300 筆（合計 6600 筆，日期降序）
+  📊 集保 CSV 解析完成（日期：20260918，命中 540/540 支）
+  ℹ️ 集保日期未更新（20260918），使用快取
+  📡 保底補抓現價（2 支，快取未涵蓋）...
+  [batch] STOCK_DAY_ALL 20260921...
+  [batch] ✅ CSV 格式，1373 支
+  [batch] 保底命中 0/2 支
+  [otc] 抓取上櫃行情（20260921）...
+  [otc] ❌ 解析失敗：Unterminated string starting at: line 1 column 840660 (char 840659)
+  [otc] ⏳ 等待 3 秒後重試（1/2）...
+  [otc] 抓取上櫃行情（20260921）（重試）...
+  [otc] ❌ 解析失敗：Expecting value: line 1 column 384128 (char 384127)
+  [otc] ⏳ 等待 3 秒後重試（2/2）...
+  [otc] 抓取上櫃行情（20260921）（重試）...
+  [otc] ❌ 解析失敗：Unterminated string starting at: line 1 column 277477 (char 277476)
+  [otc] ❌ 重試 3 次仍失敗，回傳空表
+  [skip] 2 支 batch/OTC/快取均未命中，跳過（量比 None）
+  ✅ 現價保底完成
+  📡 保底補抓融資融券（419 支，快取未涵蓋）...
+  融資融券日期：20260918（全市場 1297 支）
+  ✅ 融資融券保底完成（找到 417/419 支）
+  📡 抓取大盤指數...
+  加權指數（FMTQIK）：+1.14%
+  加權指數：+1.14%
+  📡 抓取5日均線（410 支）...
+  [ma5-batch] 收盤價歷史命中 2887/3280 天格，今日現價 410/410 支
+  [ma5-batch] 歷史+現價不足5天，補底 0 支...
+  [ma5-batch] 5日線計算完成（410/410 支有效）
+  ✅ 對照分析 更新完成（285 支，合計累計天數由低至高）
+  ✅ 每日快照 更新完成（最新快照插入最上方）
+  所有買超股票均已在族群表中
+  補抓族群成員行情（4 支不在快取中）...
+  [batch] STOCK_DAY_ALL 20260921...
+  [batch] ✅ CSV 格式，1373 支
+  [batch] 族群補抓命中 0/4 支
+  [otc] 抓取上櫃行情（20260921）...
+  [otc] ✅ 6058 支
+  [otc] 族群補抓命中 0/4 支
+  [skip] 4 支 batch/OTC 均未命中，跳過
+  ✅ 族群聯動 更新完成（20 個族群觸發，累積至工作表頂部）
+  📡 抓取外資期貨未平倉...
+  外資大台指淨部位：🟡 +2,034 口　較前日 🟡 -487
+  ⚠️ 大盤警訊：🔴 高風險　融資異常放大 23 檔、出貨風險紅燈 4 檔
+  ⚙️ 情境降權啟動：籌碼集中度/連續天數矩陣分數 ×0.5（依據 red 警訊）
+  🔍 v2限定候選 debug row1：長度=22（應為22） 內容=[1, '3711', '日月光投控', 76, 4, '33.1%', '🔵 高度集中', '🟢 低', '🟡 小幅跟進', 663.0, '+3.92%', '2.9%', '自營1天', '⚠️追高 622.4(5日)~644.8(成本)', 622.4, 644.77, 0.97, '↘ 減51張', '↗ 連增2天', 0.159, 59, 'v2']
+  ✅ v2限定候選 除錯：代號=3711 寫入後核對正確
+  ✅ 橫幅列合併 6 列（僅最近 2 天）
+  ✅ 警訊 寫入完成（2026/09/21 → red）
+  ✅ 明日關注 更新完成（Top5：宏碁, 統一實, 廣達, 彩晶, 中石化）
+  ⚠️ 觀察組：南茂, 富世達, 矽統, 漢唐, 欣興
+  🆕 v2限定候選：日月光投控
+  ✅ 推薦歷史 新增 10 筆（累計 645 筆，日期降序）
+  ✅ 推薦成效 更新完成（追蹤中：62 筆，本次封存：10 筆）
+  ✅ 融券歷史 寫入 432 筆（2026/09/21）
+  ✅ 族群熱度 更新完成（31 個族群有近期活動）
+  📢 重大訊息（2026/09/18）：命中 0 筆（利多/利空）
+  📢 重大訊息（2026/09/21）：命中 0 筆（利多/利空）
+  ✅ 重大訊息歷史 寫入 0 筆（2026/09/21）
+  ✅ 融資歷史 寫入 531 筆（2026/09/21）
+  🗑️  成交量歷史：清除 18418 筆超過1個月的舊資料
+  ✅ 成交量歷史 寫入 7428 筆（2026/09/21）
+  ✅ 收盤價歷史 寫入 7431 筆（2026/09/21）
+
+🎉 完成！
+  https://docs.google.com/spreadsheets/d/1DCceOxjew5O4ljeBVTdZ1F9URsvl90k42AAdynaYV9g
+
+  ▶ [v11.53] 18:04:34  耗時 242.3s  Step 4/5 寫入 Sheets 完成。按 [Enter] 繼續，輸入 q 後 Enter 中止（5 秒後自動繼續）...
 按 Enter 關閉（15 秒後自動關閉）...
