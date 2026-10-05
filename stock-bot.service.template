@@ -1,0 +1,17 @@
+# Telegram 指令 bot 的 systemd 服務（install.sh 會把 @USER@ @DIR@ @VENV@ 換成實際值再安裝）
+[Unit]
+Description=Stock Tracker Telegram Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@DIR@
+Environment=PYTHONUNBUFFERED=1
+ExecStart=@VENV@/bin/python -u tg_bot.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

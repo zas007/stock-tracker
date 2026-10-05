@@ -1,6 +1,6 @@
 """
 台灣股市三大法人買超推薦回測腳本 — backtest.py
-版本：v1.9
+版本：v1.10
 
 用途：
   對歷史推薦重建評分，比對 T+1/T+2/T+3 實際漲跌，
@@ -23,7 +23,8 @@
   A欄 = 代號（如 2330），B欄 = 備註（可空）
   第一列為標題列，從第二列開始填代號
 
-架子狀態（v1.9）：
+架子狀態（v1.10）：
+  ✅ ★ v1.10 新增「回測歷程」工作表：每次回測的勝率矩陣追加保存（新的在最上面，不覆蓋）
   ✅ 資料讀取（Sheets 歷史紀錄 + 推薦歷史）
   ✅ 評分特徵重建邏輯（連續天數、籌碼集中度、加速度）
   ✅ 輸出格式（明細 + 勝率矩陣）
@@ -93,6 +94,7 @@ except ImportError:
 MIN_SAMPLE             = 20        # 勝率統計最低樣本數（低於此數標注「樣本不足」）
 BACKTEST_SHEET_DETAIL  = "回測明細"
 BACKTEST_SHEET_SUMMARY = "回測勝率"
+BACKTEST_SHEET_HISTORY = "回測歷程"   # ★ v1.10 每次回測的勝率矩陣快照，只增不刪（新的在最上面）
 SINGLE_STOCK_SETTING   = "回測設定"   # ★ v1.1 單股回測設定工作表
 SINGLE_STOCK_RESULT    = "單股回測"   # ★ v1.1 單股回測結果工作表
 
@@ -1132,10 +1134,61 @@ def write_summary_sheet(ss, sections, dry_run=False):
     print(f"  ✅ 回測勝率 寫入完成（{len(sections)} 個切面）")
 
 
+HISTORY_HEADERS = [
+    "執行時間", "回測範圍", "推薦樣本數", "切面", "分類",
+    "樣本數", "獨立代號數", "勝出數", "勝率(%)", "平均漲跌幅(%)", "標準差(%)", "備註",
+]
+
+
+def _split_rate(rate_text):
+    """「55.2% ⚠️樣本不足(12)」→ (55.2, "樣本不足")；「N/A」→ ("", "")。"""
+    t = str(rate_text or "").strip()
+    note = "樣本不足" if "樣本不足" in t else ""
+    try:
+        return float(t.split("%")[0]), note
+    except ValueError:
+        return "", note
+
+
+def write_history_sheet(ss, sections, n_records, scope_label, dry_run=False):
+    """
+    ★ v1.10 把這次的勝率矩陣「追加」到「回測歷程」工作表，保留每一次回測的結果。
+    - 一列一筆（扁平格式）：執行時間 / 範圍 / 切面 / 分類 / 樣本數 / 勝率… 方便篩選、畫趨勢圖
+    - 新的在最上面（表頭正下方）：用 insert_rows 插入，全程不 clear()、不整張重寫，
+      所以即使 API 中途失敗（429），也只會是「這次沒存到」，不會像 v11.51 事故那樣弄丟舊紀錄
+    - 「回測勝率」「回測明細」維持覆蓋式（最新一次結果），歷史累積全部放在這張表
+    """
+    now = datetime.now().strftime("%Y/%m/%d %H:%M")
+    new_rows = []
+    for title, rows in sections:
+        for r in rows:
+            rate, note = _split_rate(r.get("rate"))
+            avg = r["avg"] if r.get("avg") is not None else ""
+            std = r.get("std") if r.get("std") is not None else ""
+            new_rows.append([now, scope_label, n_records, title, r["key"],
+                             r["n"], r.get("n_codes", ""), r["wins"], rate, avg, std, note])
+
+    if dry_run:
+        print(f"  [dry-run] 回測歷程 將追加 {len(new_rows)} 列（前3列預覽）：")
+        for row in new_rows[:3]:
+            print(f"    {row}")
+        return
+
+    ws = get_or_create(ss, BACKTEST_SHEET_HISTORY, len(HISTORY_HEADERS))
+    first = ws.row_values(1)
+    if not any(first):
+        ws.update(range_name="A1", values=[HISTORY_HEADERS])
+    elif first[:len(HISTORY_HEADERS)] != HISTORY_HEADERS:
+        # 第一列不是預期表頭（可能被人改過）→ 不動既有資料，在最上面補一列表頭
+        ws.insert_rows([HISTORY_HEADERS], row=1)
+    ws.insert_rows(new_rows, row=2, value_input_option="USER_ENTERED")
+    print(f"  ✅ 回測歷程 追加 {len(new_rows)} 列（{now}｜{scope_label}｜{n_records} 筆推薦），新的在最上面")
+
+
 # ── 主流程 ─────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="台灣股市推薦回測腳本 v1.9")
+    parser = argparse.ArgumentParser(description="台灣股市推薦回測腳本 v1.10")
     parser.add_argument("--days",    type=int, default=0,
                         help="只回測最近 N 天的推薦（0 = 全部）")
     parser.add_argument("--dry-run", action="store_true",
@@ -1145,7 +1198,7 @@ def main():
     args = parser.parse_args()
 
     print("=" * 50)
-    print("  台灣股市推薦回測腳本 v1.9")
+    print("  台灣股市推薦回測腳本 v1.10")
     print("=" * 50)
 
     # ── dry-run 快速驗證 ──
@@ -1249,6 +1302,9 @@ def main():
     print("\n💾 輸出結果...")
     write_detail_sheet(ss, detail_rows)
     write_summary_sheet(ss, sections)
+    # ★ v1.10 歷史快照：每次執行都追加一份（範圍標示全部或近N天，避免不同範圍的數字被混為一談）
+    _scope = f"近{args.days}天" if args.days > 0 else "全部"
+    write_history_sheet(ss, sections, len(detail_rows), _scope)
 
     print(f"\n🎉 完成！")
     print(f"  https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}")

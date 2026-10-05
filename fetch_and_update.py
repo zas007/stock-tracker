@@ -19,7 +19,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.54"  # ← 每次 commit 只改這裡
+VERSION = "v11.57"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -61,6 +61,14 @@ try:
     SHARES_PCT_HIGH = getattr(_cfg, "SHARES_PCT_HIGH", 3.0)
     SHARES_PCT_MID  = getattr(_cfg, "SHARES_PCT_MID", 1.5)
     SHARES_PCT_LOW  = getattr(_cfg, "SHARES_PCT_LOW", 0.5)
+    # ★ v11.56 目標價/停損價參數（盤中盯盤 intraday_monitor.py 直接讀「明日關注」算好的值）
+    TARGET_GAIN_MIN_PCT      = getattr(_cfg, "TARGET_GAIN_MIN_PCT", 2.0)
+    TARGET_GAIN_MAX_PCT      = getattr(_cfg, "TARGET_GAIN_MAX_PCT", 8.0)
+    TARGET_GAIN_DEFAULT_PCT  = getattr(_cfg, "TARGET_GAIN_DEFAULT_PCT", 3.0)
+    TARGET_MIN_SAMPLE        = getattr(_cfg, "TARGET_MIN_SAMPLE", 20)
+    TARGET_HIGH_LOOKBACK     = getattr(_cfg, "TARGET_HIGH_LOOKBACK", 20)
+    TARGET_HIGH_MIN_UPSIDE_PCT = getattr(_cfg, "TARGET_HIGH_MIN_UPSIDE_PCT", 2.0)
+    STOP_BELOW_PCT           = getattr(_cfg, "STOP_BELOW_PCT", 3.0)
     print("✅ 已載入 config.py")
 except ImportError:
     print("⚠️ 找不到 config.py，使用主程式內建預設值")
@@ -87,6 +95,13 @@ except ImportError:
     SHARES_PCT_HIGH = 3.0
     SHARES_PCT_MID  = 1.5
     SHARES_PCT_LOW  = 0.5
+    TARGET_GAIN_MIN_PCT      = 2.0
+    TARGET_GAIN_MAX_PCT      = 8.0
+    TARGET_GAIN_DEFAULT_PCT  = 3.0
+    TARGET_MIN_SAMPLE        = 20
+    TARGET_HIGH_LOOKBACK     = 20
+    TARGET_HIGH_MIN_UPSIDE_PCT = 2.0
+    STOP_BELOW_PCT           = 3.0
 
 # ═══════════════════════════════════════════════
 # ★ 固定系統設定
@@ -3067,6 +3082,11 @@ RECOMMEND_HEADERS = [
     # ★ v11.52 T42：新舊評分公式(v1/v2)並行比較，見 score_stock_v2() 上方說明
     "另一版本評分",     # 本列若由v1入選，這裡填v2分數；若由v2入選(見「評分公式版本」)，這裡填v1分數
     "評分公式版本",     # "v1"＝目前正式選股邏輯／"v2"＝本次改進方案，僅「🆕 v2評分限定候選」區塊會是v2
+    # ★ v11.56 目標價/停損價/風報比（算法見 _target_stop_info()）。刻意加在最後面，舊歷史列欄數較少時
+    #   _rec_cell() 會自動回傳空字串，不影響既有解析；盤中盯盤 intraday_monitor.py 直接讀這三欄。
+    "目標價",
+    "停損價",
+    "風報比",
 ]
 
 PERFORMANCE_HEADERS = [
@@ -3190,6 +3210,93 @@ def _buy_price_info(cost_wavg, ma5_value, close):
 
     label = f"⚠️追高 {range_str}" if (price is not None and price > high) else range_str
     return label, round(low, 2), round(high, 2)
+
+
+def _to_pos_float(v):
+    """★ v11.56 轉成正浮點數，失敗或 <=0 回傳 None。"""
+    try:
+        f = float(str(v).replace(",", ""))
+        return f if f > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _calc_target_gain_pct(ss):
+    """
+    ★ v11.56 目標價的統計基準：「推薦歷史」主榜（含 v11.21 前無組別的舊資料）
+    T+3收盤相對推薦收盤的漲跌幅「中位數」(%)。
+    - 有效樣本 < TARGET_MIN_SAMPLE → 退回 TARGET_GAIN_DEFAULT_PCT
+    - 結果夾在 [TARGET_GAIN_MIN_PCT, TARGET_GAIN_MAX_PCT]：中位數若貼近 0 甚至為負，
+      目標價就沒有意義，所以設下限；也避免少數極端行情把目標墊得太高
+    回傳 (使用的漲幅%, 有效樣本數, 來源說明)。這是統計參考值，不是預測。
+    """
+    try:
+        ws = ss.worksheet("推薦歷史")
+        rows = ws.get_all_values()
+    except Exception:
+        return TARGET_GAIN_DEFAULT_PCT, 0, "預設值（讀不到推薦歷史）"
+
+    gains = []
+    for row in rows[1:]:
+        grp = _perf_cell(row, "組別")
+        if grp not in ("", "主榜"):
+            continue
+        base = _to_pos_float(_perf_cell(row, "推薦收盤"))
+        t3   = _to_pos_float(_perf_cell(row, "T+3收盤"))
+        if base is None or t3 is None:
+            continue
+        gains.append((t3 - base) / base * 100)
+
+    if len(gains) < TARGET_MIN_SAMPLE:
+        return TARGET_GAIN_DEFAULT_PCT, len(gains), f"預設值（樣本 {len(gains)} < {TARGET_MIN_SAMPLE}）"
+
+    import statistics
+    med = statistics.median(gains)
+    used = max(TARGET_GAIN_MIN_PCT, min(TARGET_GAIN_MAX_PCT, med))
+    note = f"T+3中位 {med:+.2f}%（{len(gains)} 筆）"
+    if used != med:
+        note += f"，夾限後 {used:.2f}%"
+    return round(used, 2), len(gains), note
+
+
+def _calc_high_n_map(price_hist, codes, lookback=None):
+    """
+    ★ v11.56 近 N 個交易日「收盤價」最高點（取自「收盤價歷史」，只有收盤沒有盤中最高）。
+    不足 5 筆資料的股票不給值（回傳 None）。回傳 {code: high or None}
+    """
+    lookback = lookback or TARGET_HIGH_LOOKBACK
+    out = {}
+    for code in codes:
+        series = (price_hist or {}).get(code, [])
+        closes = [c for _, c in series][-lookback:]
+        out[code] = max(closes) if len(closes) >= 5 else None
+    return out
+
+
+def _target_stop_info(buy_low, close, high_n, gain_pct):
+    """
+    ★ v11.56 目標價／停損價／風報比（盤中盯盤用）。
+    - 基準價 entry：買進區間低點（沒有就用現價）。
+    - 統計目標 = entry × (1 + gain_pct%)（gain_pct 來自 _calc_target_gain_pct）。
+    - 若近 N 日收盤高點比 entry 高出 TARGET_HIGH_MIN_UPSIDE_PCT% 以上，目標價取
+      「統計目標」與「近 N 日高點」兩者較近（較低）的一個；否則（已逼近/突破前高）只用統計目標。
+    - 停損 = entry × (1 − STOP_BELOW_PCT%)（entry 已是法人成本價/5日線較低者，等於放在其下方）。
+    - 風報比 = (目標 − 現價) ÷ (現價 − 停損)；現價已高過目標或低於停損時留空。
+    回傳 (目標價, 停損價, 風報比)；基準價取不到時回傳 ("", "", "")。
+    """
+    entry = _to_pos_float(buy_low) or _to_pos_float(close)
+    if entry is None:
+        return "", "", ""
+    target = entry * (1 + gain_pct / 100)
+    hn = _to_pos_float(high_n)
+    if hn is not None and hn >= entry * (1 + TARGET_HIGH_MIN_UPSIDE_PCT / 100):
+        target = min(target, hn)
+    stop = entry * (1 - STOP_BELOW_PCT / 100)
+    px = _to_pos_float(close)
+    rr = ""
+    if px is not None and px > stop and target > px:
+        rr = round((target - px) / (px - stop), 2)
+    return round(target, 2), round(stop, 2), rr
 
 
 def _score_matrix(consec, chip_lbl, today_amount=0, dampen=1.0):
@@ -3893,6 +4000,18 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
     except Exception:
         _news_map = {}
 
+    # ★ v11.56 目標價前置：回測統計漲幅 + 近20日收盤高點（兩者各讀一次工作表，失敗不影響推薦）
+    try:
+        _gain_pct, _gain_n, _gain_note = _calc_target_gain_pct(ss)
+    except Exception as e:
+        _gain_pct, _gain_n, _gain_note = TARGET_GAIN_DEFAULT_PCT, 0, f"預設值（計算失敗：{e}）"
+    try:
+        _high_map = _calc_high_n_map(load_price_history(ss), _all_codes)
+    except Exception:
+        _high_map = {}
+    print(f"  🎯 目標價基準：漲幅 {_gain_pct}%（{_gain_note}）／停損 −{STOP_BELOW_PCT}%／"
+          f"近{TARGET_HIGH_LOOKBACK}日高點有值 {sum(1 for v in _high_map.values() if v)}/{len(_high_map)} 支")
+
     # 計算評分，過濾不合格
     scored = []
     watch_scored = []   # ★ v11.21 觀察組（放鬆限制）
@@ -3930,6 +4049,8 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
         short_trend   = _ana_cell(row, "融券趨勢")
         margin_trend  = _ana_cell(row, "融資趨勢")
         shares_pct    = _ana_cell(row, "佔股本比重%")   # ★ v11.47
+        # ★ v11.56 目標價/停損價/風報比
+        tgt_price, stop_price, rr_ratio = _target_stop_info(buy_low, close, _high_map.get(code), _gain_pct)
 
         s = score_stock(row, dampen=_score_dampen)
         if s is not None:
@@ -3946,6 +4067,7 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
                 "量比": vol_ratio, "融資趨勢": margin_trend, "融券趨勢": short_trend,
                 "佔股本比重%": shares_pct,   # ★ v11.47
                 "另一版本評分": s2 if s2 is not None else "", "評分公式版本": "v1",   # ★ v11.52 T42
+                "目標價": tgt_price, "停損價": stop_price, "風報比": rr_ratio,        # ★ v11.56
             })
             scored.append((s, r))
 
@@ -3967,6 +4089,7 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
                     "量比": vol_ratio, "融資趨勢": margin_trend, "融券趨勢": short_trend,
                     "佔股本比重%": shares_pct,   # ★ v11.47
                     "另一版本評分": sw2 if sw2 is not None else "", "評分公式版本": "v1",   # ★ v11.52 T42
+                    "目標價": tgt_price, "停損價": stop_price, "風報比": rr_ratio,        # ★ v11.56
                 })
                 watch_scored.append((sw, rw))
 
@@ -4045,7 +4168,7 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
         v2_only_rows.append(r2)
     if v2_only_rows:
         # ★ v11.53 T42 除錯：印出每一列的長度與完整內容，確認寫入 Sheets 前，
-        # 記憶體裡的資料是否真的是完整 22 欄（排除「組資料當下就已經漏欄」的可能性）
+        # 記憶體裡的資料是否真的是完整欄數（n_cols）（排除「組資料當下就已經漏欄」的可能性）
         for _rank, _r2 in enumerate(v2_only_rows, 1):
             print(f"  🔍 v2限定候選 debug row{_rank}：長度={len(_r2)}（應為{n_cols}）"
                   f" 內容={_r2}")

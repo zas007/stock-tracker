@@ -7,7 +7,7 @@ cd "$(dirname "$0")"
 export PYTHONWARNINGS="ignore::FutureWarning,ignore::Warning"
 
 echo "========================================="
-echo " 台灣股市三大法人買超追蹤 v11.51"
+echo " 台灣股市三大法人買超追蹤 v11.57"
 echo "========================================="
 echo ""
 echo "請選擇執行方式："
@@ -19,9 +19,17 @@ echo "  5) 回測：單股（讀「回測設定」工作表）"
 echo "  6) 回測：推薦歷史（全部）"
 echo "  7) 回測：推薦歷史（近 30 天）"
 echo "  8) 回測：dry-run（不寫 Sheets，只印結果）"
+echo "  --- 盤中盯盤（讀「明日關注」清單，Telegram 通知）---"
+echo "  9) 盤中盯盤：持續執行（等開盤→每分鐘查價→收盤摘要）"
+echo " 10) 盤中盯盤：只查一輪（dry-run，不發通知，測試用）"
+echo " 11) 盤中盯盤：列出今日盯盤清單與目標價"
+echo " 12) Telegram：設定通知"
+echo " 13) Telegram：發送測試通知"
+echo " 14) Telegram 指令 bot：本機前景執行（測試用，Ctrl+C 中止；正式請放家用主機）"
+echo " 15) Telegram 指令：在本機直接試一個指令（不經 Telegram，例如 /status）"
 echo "  0) 離開"
 echo ""
-read -p "請輸入選項 [0-8]: " choice
+read -p "請輸入選項 [0-15]: " choice
 echo ""
 
 case "$choice" in
@@ -65,12 +73,48 @@ case "$choice" in
         echo ""
         python3 -u backtest.py --dry-run | tee -a log.txt
         ;;
+    9)
+        echo "👀 盤中盯盤：持續執行（Ctrl+C 可中止）..."
+        echo ""
+        caffeinate -i python3 -u intraday_monitor.py | tee -a intraday_log.txt
+        ;;
+    10)
+        echo "🧪 盤中盯盤：只查一輪（dry-run，不發通知）..."
+        echo ""
+        python3 -u intraday_monitor.py --once --dry-run
+        ;;
+    11)
+        echo "📋 今日盯盤清單與目標價..."
+        echo ""
+        python3 -u intraday_monitor.py --list
+        ;;
+    12)
+        echo "🔔 Telegram 通知設定..."
+        echo ""
+        python3 -u intraday_monitor.py --setup-telegram
+        ;;
+    13)
+        echo "🔔 發送 Telegram 測試通知..."
+        echo ""
+        python3 -u intraday_monitor.py --test-notify
+        ;;
+    14)
+        echo "🤖 Telegram 指令 bot（前景執行，Ctrl+C 中止）..."
+        echo "⚠️ 同一個 bot 同時只能有一個程式在聽；家用主機已在跑 bot 時請勿在 Mac 執行"
+        echo ""
+        python3 -u tg_bot.py
+        ;;
+    15)
+        read -p "請輸入指令（例如 /list、/status、/add 2330）: " tgcmd
+        echo ""
+        python3 -u tg_bot.py --cmd "$tgcmd"
+        ;;
     0)
         echo "👋 離開"
         exit 0
         ;;
     *)
-        echo "❌ 無效選項，請輸入 0~8"
+        echo "❌ 無效選項，請輸入 0~15"
         echo ""
         read -p "按 Enter 關閉..."
         exit 1
