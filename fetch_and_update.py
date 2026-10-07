@@ -19,7 +19,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.57"  # ← 每次 commit 只改這裡
+VERSION = "v11.58"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -4277,34 +4277,178 @@ def _parse_rec_sheet(all_vals, disp_today):
     return result
 
 
-def fetch_holidays_from_twse(year: int) -> set:
+# ═══════════════════════════════════════════════
+# ★ v11.58 證交所假日行事曆：共用解析 + 與 config.py 比對（只提示、不覆蓋）
+# ═══════════════════════════════════════════════
+HOLIDAY_CHECK_FILE      = os.path.join(os.path.dirname(os.path.abspath(__file__)), "holiday_check.json")
+HOLIDAY_CHECK_OK_DAYS   = 30   # 上次比對一致 → 隔 30 天再比
+HOLIDAY_CHECK_DIFF_DAYS = 7    # 上次有差異   → 隔 7 天再提醒（直到你修正為止）
+
+
+def _parse_twse_date(raw):
     """
-    ★ v11.24：從 TWSE 假日月曆 API 查詢指定年度的非週末休市日，
-    回傳 set of "YYYYMMDD"。查詢失敗回傳空 set。
+    證交所日期欄位 → "YYYYMMDD"；格式不認得回傳 None。
+    支援：115/06/19、115年06月19日（民國）、2026-06-19、2026/06/19、2026年06月19日、20260619。
     """
+    import re as _re
+    from datetime import datetime as _dt
+    t = str(raw).strip()
+    y = mo = d = None
+    m = _re.match(r"^(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})日?$", t)
+    if m:
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    else:
+        m = _re.match(r"^(\d{2,3})[/年](\d{1,2})[/月](\d{1,2})日?$", t)
+        if m:
+            y, mo, d = int(m.group(1)) + 1911, int(m.group(2)), int(m.group(3))
+        else:
+            m = _re.match(r"^(\d{4})(\d{2})(\d{2})$", t)
+            if m:
+                y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    if y is None:
+        return None
+    try:
+        return _dt(y, mo, d).strftime("%Y%m%d")
+    except ValueError:
+        return None
+
+
+def _is_twse_closure_row(text: str) -> bool:
+    """
+    證交所行事曆表格除了休市日，還會列「國曆新年開始交易日」「農曆春節前最後交易日」
+    「農曆春節後開始交易日」這種說明列——這些日子是**交易日**，不能當成休市日。
+    判斷：含「開始交易日／最後交易日」且沒有休市/無交易/放假/補假/結算交割字樣 → 不是休市。
+    名稱、說明都空白的列（表格合併儲存格，連續假期的後續日期）視為休市。
+    """
+    informational = ("開始交易日" in text) or ("最後交易日" in text)
+    closed = any(k in text for k in ("休市", "無交易", "放假", "補假", "結算交割"))
+    return closed or not informational
+
+
+def parse_twse_holiday_rows(rows, year=None):
+    """回傳 (休市日 {YYYYMMDD: 名稱}, 略過的說明列 {YYYYMMDD: 名稱})。不依賴欄位順序（日期必須在第一欄）。"""
+    closures, skipped = {}, {}
+    for row in rows or []:
+        if not row:
+            continue
+        ds = _parse_twse_date(row[0])
+        if not ds or (year and not ds.startswith(str(year))):
+            continue
+        text = "".join(str(c) for c in row[1:])
+        name = next((str(c).strip() for c in row[1:] if len(str(c).strip()) > 1), "")
+        if _is_twse_closure_row(text):
+            closures[ds] = name
+        else:
+            skipped[ds] = name
+    return closures, skipped
+
+
+def fetch_twse_holiday_table(year: int):
+    """從 TWSE 假日行事曆 API 取得並解析。失敗或解析不出任何休市日回傳 None；成功回傳 dict。"""
     url = f"https://www.twse.com.tw/rwd/zh/holidaySchedule/holidaySchedule?response=json&queryYear={year}"
     try:
         text = curl_get(url)
         if not text:
-            return set()
+            return None
         data = json.loads(text)
-        holidays = set()
-        for row in data.get("data", []):
-            # row[0] = 日期（民國年 MM/DD 或 YYYY/MM/DD 視 API 版本）
-            # row[2] = 說明（如「休市」「補假」）
-            date_raw = row[0].strip()
-            # TWSE 回傳民國年，如 "115/06/19"
-            if "/" in date_raw:
-                parts = date_raw.split("/")
-                if len(parts) == 3:
-                    roc_year = int(parts[0])
-                    ad_year = roc_year + 1911
-                    date_str = f"{ad_year}{parts[1]}{parts[2]}"
-                    holidays.add(date_str)
-        return holidays
     except Exception as e:
         print(f"  ⚠️ 無法查詢 TWSE 假日月曆（{year}）：{e}")
+        return None
+    rows = data.get("data") or []
+    closures, skipped = parse_twse_holiday_rows(rows, year)
+    if not closures:
+        print(f"  ⚠️ TWSE 假日月曆（{year}）解析不出休市日（回傳 {len(rows)} 列），API 格式可能已變更。前 2 列原始內容：{rows[:2]}")
+        return None
+    return {"closures": closures, "skipped": skipped, "raw_n": len(rows)}
+
+
+def fetch_holidays_from_twse(year: int) -> set:
+    """
+    ★ v11.24：從 TWSE 假日月曆 API 查詢指定年度的休市日，回傳 set of "YYYYMMDD"。查詢失敗回傳空 set。
+    ★ v11.58：改用共用解析，排除「開始交易日／最後交易日」說明列（它們是交易日，舊版會被誤當成休市日）。
+    """
+    res = fetch_twse_holiday_table(year)
+    if not res:
         return set()
+    if res["skipped"]:
+        print(f"  ℹ️ 略過 {len(res['skipped'])} 筆「開始/最後交易日」說明列（這些是交易日，不是休市日）")
+    return set(res["closures"])
+
+
+def _load_holiday_check_state() -> dict:
+    try:
+        with open(HOLIDAY_CHECK_FILE, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_holiday_check_state(state: dict) -> None:
+    try:
+        tmp = HOLIDAY_CHECK_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False)
+        os.replace(tmp, HOLIDAY_CHECK_FILE)
+    except Exception as e:
+        print(f"  ⚠️ 假日比對記錄寫入失敗：{e}")
+
+
+def check_holidays_vs_twse(year: int, force: bool = False, verbose: bool = False) -> None:
+    """
+    ★ v11.58：把 config.py 的 HOLIDAYS（+TEMP_CLOSURES）與證交所該年度行事曆比對，有差異只在 log 提示，
+    **不會修改 config.py**（避免官方資料解析錯誤時把正確資料蓋掉）。
+    - 只比「平日」：週末程式本來就會跳過
+    - 頻率：上次一致 → 30 天後再比；上次有差異 → 7 天後再提醒；--check-holidays 可強制立即比對
+    - 該年度 HOLIDAYS 完全沒資料時略過（使用到該年度時 ensure_holidays_loaded 會自動載入）
+    - 任何錯誤都只印警告，不影響主流程
+    """
+    try:
+        from datetime import datetime as _dt, date as _date
+        ystr = str(year)
+        local_all = {d for d in HOLIDAYS if d.startswith(ystr)}
+        if not local_all:
+            if verbose:
+                print(f"  ℹ️ HOLIDAYS 沒有 {year} 年資料（使用到該年度時會自動從證交所載入）")
+            return
+        state = _load_holiday_check_state()
+        rec = state.get(ystr, {})
+        today = _date.today()
+        if not force and rec.get("checked"):
+            gap = (today - _date.fromisoformat(rec["checked"])).days
+            if gap < (HOLIDAY_CHECK_DIFF_DAYS if rec.get("diff") else HOLIDAY_CHECK_OK_DAYS):
+                return
+
+        print(f"  📅 比對 HOLIDAYS 與證交所 {year} 年行事曆...")
+        res = fetch_twse_holiday_table(year)
+        if not res:
+            print("  ⚠️ 取不到證交所行事曆，這次略過比對（下次執行會再試）")
+            return
+
+        is_wd = lambda ds: _dt.strptime(ds, "%Y%m%d").weekday() < 5
+        twse = {d: n for d, n in res["closures"].items() if is_wd(d)}
+        local = {d for d in local_all if is_wd(d)}
+        temp = {d for d in TEMP_CLOSURES if d.startswith(ystr)}      # 颱風假等臨時休市，證交所行事曆不會事先列出
+        extra   = sorted(local - set(twse) - temp)                    # config 有、證交所沒有
+        missing = sorted(set(twse) - local - temp)                    # 證交所有、config 沒有
+
+        if verbose:
+            print(f"     證交所回傳 {res['raw_n']} 列：休市 {len(res['closures'])} 筆（平日 {len(twse)}）、"
+                  f"略過說明列 {len(res['skipped'])} 筆；config 平日休市 {len(local)} 筆")
+        if not extra and not missing:
+            print(f"  ✅ HOLIDAYS 與證交所 {year} 年行事曆一致（平日休市 {len(twse)} 天）")
+        else:
+            print(f"  ⚠️ HOLIDAYS 與證交所 {year} 年行事曆有 {len(extra) + len(missing)} 處差異"
+                  f"（config.py 不會被自動修改，請確認後手動修正）：")
+            if extra:
+                print(f"     • config 有、證交所沒有（這些日子程式會當成休市，疑似多填）：{'、'.join(extra)}")
+            if missing:
+                items = [f"{d}（{twse[d]}）" if twse[d] else d for d in missing]
+                print(f"     • 證交所有、config 沒有（程式會把這些日子當成交易日，疑似漏填）：{'、'.join(items)}")
+        state[ystr] = {"checked": today.isoformat(), "diff": bool(extra or missing)}
+        _save_holiday_check_state(state)
+    except Exception as e:
+        print(f"  ⚠️ 假日比對失敗（不影響主流程）：{type(e).__name__}: {e}")
 
 
 def ensure_holidays_loaded(year: int) -> None:
@@ -4927,6 +5071,7 @@ def find_trading_day():
     d = now
     print(f"  執行時間：{now.strftime('%Y/%m/%d %H:%M')}  [{VERSION}]")
     ensure_holidays_loaded(now.year)
+    check_holidays_vs_twse(now.year)      # ★ v11.58 與證交所行事曆比對（有差異只提示，不改 config.py）
     if now.hour < 16 or (now.hour == 16 and now.minute < 30):
         print(f"  16:30 前自動使用前一交易日（三大法人資料 16:30 後才釋出）")
         d -= timedelta(days=1)
@@ -5148,6 +5293,8 @@ def main():
     parser.add_argument("--fetch-only",   action="store_true", help="只抓資料，存雲端快取，不寫 Sheets")
     parser.add_argument("--sheet-only",   action="store_true", help="讀雲端快取，不打 API，直接寫 Sheets")
     parser.add_argument("--debug-margin", action="store_true", help="印出融資融券 API 原始欄位")
+    parser.add_argument("--check-holidays", action="store_true",
+                        help="★ v11.58 立即比對 config.py 的 HOLIDAYS 與證交所行事曆（今年與明年），只提示不修改")
     args = parser.parse_args()
 
     # ★ v11.40 修正 bug：amp_map（振幅%資料）只有在實際打 API 抓行情時才會賦值
@@ -5166,9 +5313,18 @@ def main():
     print("=" * 50)
     print(f"  族群反查表：{len(CODE_TO_SECTOR)} 支股票已對應族群")
 
-    if not os.path.exists(CREDENTIALS_FILE) and not args.debug_margin:
+    if not os.path.exists(CREDENTIALS_FILE) and not args.debug_margin and not args.check_holidays:
         print(f"\n❌ 找不到 credentials.json")
         _wait_close(); sys.exit(1)
+
+    # ── check-holidays 模式（★ v11.58）──
+    if args.check_holidays:
+        warm_up_cookie()
+        _y = datetime.now().year
+        for _yy in (_y, _y + 1):
+            check_holidays_vs_twse(_yy, force=True, verbose=True)
+        _wait_close()
+        return
 
     # ── debug-margin 模式 ──
     if args.debug_margin:

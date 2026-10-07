@@ -7,7 +7,7 @@ cd "$(dirname "$0")"
 export PYTHONWARNINGS="ignore::FutureWarning,ignore::Warning"
 
 echo "========================================="
-echo " 台灣股市三大法人買超追蹤 v11.57"
+echo " 台灣股市三大法人買超追蹤 v11.58"
 echo "========================================="
 echo ""
 echo "請選擇執行方式："
@@ -27,9 +27,10 @@ echo " 12) Telegram：設定通知"
 echo " 13) Telegram：發送測試通知"
 echo " 14) Telegram 指令 bot：本機前景執行（測試用，Ctrl+C 中止；正式請放家用主機）"
 echo " 15) Telegram 指令：在本機直接試一個指令（不經 Telegram，例如 /status）"
+echo " 16) 檢查假日：比對 config.py 的 HOLIDAYS 與證交所行事曆（只提示，不修改）"
 echo "  0) 離開"
 echo ""
-read -p "請輸入選項 [0-15]: " choice
+read -p "請輸入選項 [0-16]: " choice
 echo ""
 
 case "$choice" in
@@ -109,12 +110,17 @@ case "$choice" in
         echo ""
         python3 -u tg_bot.py --cmd "$tgcmd"
         ;;
+    16)
+        echo "📅 比對 HOLIDAYS 與證交所行事曆（今年與明年）..."
+        echo ""
+        python3 -u fetch_and_update.py --check-holidays | tee -a log.txt
+        ;;
     0)
         echo "👋 離開"
         exit 0
         ;;
     *)
-        echo "❌ 無效選項，請輸入 0~15"
+        echo "❌ 無效選項，請輸入 0~16"
         echo ""
         read -p "按 Enter 關閉..."
         exit 1
