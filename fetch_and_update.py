@@ -19,7 +19,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.58"  # ← 每次 commit 只改這裡
+VERSION = "v11.59"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -3221,6 +3221,20 @@ def _to_pos_float(v):
         return None
 
 
+def _to_close_float(v):
+    """
+    ★ v11.59 解析「推薦歷史」T+N 收盤欄的值。這些欄位由 _fmt_close() 寫入，帶漲跌符號：
+    "▲72.5"（高於推薦收盤）／"▼71.3"（低於）／"－72.0"（持平）。與 backtest.py 的 _f() 同一套規則。
+    取不到或 <=0 回傳 None。
+    """
+    t = str(v).strip().replace("▲", "").replace("▼", "").replace("－", "").replace(",", "")
+    try:
+        f = float(t)
+        return f if f > 0 else None
+    except ValueError:
+        return None
+
+
 def _calc_target_gain_pct(ss):
     """
     ★ v11.56 目標價的統計基準：「推薦歷史」主榜（含 v11.21 前無組別的舊資料）
@@ -3241,8 +3255,8 @@ def _calc_target_gain_pct(ss):
         grp = _perf_cell(row, "組別")
         if grp not in ("", "主榜"):
             continue
-        base = _to_pos_float(_perf_cell(row, "推薦收盤"))
-        t3   = _to_pos_float(_perf_cell(row, "T+3收盤"))
+        base = _to_close_float(_perf_cell(row, "推薦收盤"))
+        t3   = _to_close_float(_perf_cell(row, "T+3收盤"))   # ★ v11.59 帶 ▲▼－ 符號，不能直接 float()
         if base is None or t3 is None:
             continue
         gains.append((t3 - base) / base * 100)
@@ -3273,26 +3287,33 @@ def _calc_high_n_map(price_hist, codes, lookback=None):
     return out
 
 
-def _target_stop_info(buy_low, close, high_n, gain_pct):
+def _target_stop_info(buy_low, close, high_n, gain_pct, buy_high=None):
     """
     ★ v11.56 目標價／停損價／風報比（盤中盯盤用）。
-    - 基準價 entry：買進區間低點（沒有就用現價）。
+    ★ v11.59 追高股票（現價 > 買進區間上緣）的目標價改以「現價」為基準（T53）：原本以區間低點為基準，
+      追高股票的目標價常常早就低於現價，風報比留空，盯盤也會一開盤就通知「達目標價」。
+    - 目標價基準 entry：一般 = 買進區間低點（沒有就用現價）；追高 = 現價。
     - 統計目標 = entry × (1 + gain_pct%)（gain_pct 來自 _calc_target_gain_pct）。
     - 若近 N 日收盤高點比 entry 高出 TARGET_HIGH_MIN_UPSIDE_PCT% 以上，目標價取
       「統計目標」與「近 N 日高點」兩者較近（較低）的一個；否則（已逼近/突破前高）只用統計目標。
-    - 停損 = entry × (1 − STOP_BELOW_PCT%)（entry 已是法人成本價/5日線較低者，等於放在其下方）。
+    - 停損 = 買進區間低點 × (1 − STOP_BELOW_PCT%)（區間低點是法人成本價/5日線較低者，等於放在其下方支撐之外）；
+      **追高時停損仍留在區間低點下方**，所以停損離現價較遠、風報比偏低，這是追高真實的風險，不是算錯。
     - 風報比 = (目標 − 現價) ÷ (現價 − 停損)；現價已高過目標或低於停損時留空。
     回傳 (目標價, 停損價, 風報比)；基準價取不到時回傳 ("", "", "")。
     """
-    entry = _to_pos_float(buy_low) or _to_pos_float(close)
-    if entry is None:
+    low = _to_pos_float(buy_low)
+    px = _to_pos_float(close)
+    high = _to_pos_float(buy_high) or low
+    stop_base = low or px
+    if stop_base is None:
         return "", "", ""
+    chase = px is not None and high is not None and px > high      # ⚠️追高
+    entry = px if chase else stop_base
     target = entry * (1 + gain_pct / 100)
     hn = _to_pos_float(high_n)
     if hn is not None and hn >= entry * (1 + TARGET_HIGH_MIN_UPSIDE_PCT / 100):
         target = min(target, hn)
-    stop = entry * (1 - STOP_BELOW_PCT / 100)
-    px = _to_pos_float(close)
+    stop = stop_base * (1 - STOP_BELOW_PCT / 100)
     rr = ""
     if px is not None and px > stop and target > px:
         rr = round((target - px) / (px - stop), 2)
@@ -4050,7 +4071,7 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
         margin_trend  = _ana_cell(row, "融資趨勢")
         shares_pct    = _ana_cell(row, "佔股本比重%")   # ★ v11.47
         # ★ v11.56 目標價/停損價/風報比
-        tgt_price, stop_price, rr_ratio = _target_stop_info(buy_low, close, _high_map.get(code), _gain_pct)
+        tgt_price, stop_price, rr_ratio = _target_stop_info(buy_low, close, _high_map.get(code), _gain_pct, buy_high)
 
         s = score_stock(row, dampen=_score_dampen)
         if s is not None:

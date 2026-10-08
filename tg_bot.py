@@ -2,12 +2,12 @@
 # -*- coding: utf-8 -*-
 """
 Telegram 指令 bot — tg_bot.py
-版本：v1.0（對應主程式 v11.57，搭配 intraday_monitor.py v1.1）
+版本：v1.1（對應主程式 v11.59，搭配 intraday_monitor.py v1.2）
 
 用途：
   在 Telegram 對你的 bot 下指令，查今日盯盤清單與目前狀態，或調整盯盤行為。
-  這支程式是常駐的（long polling），建議用 systemd 管理（見 deploy/部署說明.md）。
-  盯盤本身（intraday_monitor.py）仍由 cron 在 08:45 啟動，兩者獨立運作。
+  這支程式是常駐的（long polling）。Mac 單機請用 每日更新.sh 選單 17（與盯盤一起啟動）或選單 14（只跑 bot）。
+  盯盤本身（intraday_monitor.py）與 bot 獨立運作；日後若有常開主機，可改用 systemd（見 deploy/部署說明.md，備用）。
 
 指令：
   /list                    今日盯盤清單（買進區間、目標價、停損價、風報比）
@@ -38,7 +38,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import intraday_monitor as im
 
-VERSION = "v1.0"
+VERSION = "v1.1"
 OFFSET_FILE = os.path.join(HERE, "bot_offset.json")
 BOT_LOCK    = os.path.join(HERE, "tg_bot.lock")
 MAX_EXTRAS  = 10
@@ -240,10 +240,12 @@ def cmd_status():
         elif w["target"] and p >= w["target"]:
             mark = "🎯已達目標　"
         fired = fired_list(ev)
+        rr_live = im._live_rr(w, p)
+        low_rr = f"｜⚠️風報比偏低（{rr_live}）" if (rr_live is not None and rr_live < im.RR_LOW) else ""
         lines.append(
             f"{w['code']} {w['name']}{tag}　{im.fp(p)}（{im.fpct(im.pct(p, q['y']), 2)}）\n"
             f"　{mark}{_zone_text(w, p)}｜距目標 {im.fpct(im.pct(w['target'], p))}／"
-            f"距停損 {im.fpct(im.pct(w['stop'], p))}" + (f"\n　已觸發：{'、'.join(fired)}" if fired else ""))
+            f"距停損 {im.fpct(im.pct(w['stop'], p))}" + low_rr + (f"\n　已觸發：{'、'.join(fired)}" if fired else ""))
     return "\n".join(head) + "\n\n" + "\n".join(lines)
 
 

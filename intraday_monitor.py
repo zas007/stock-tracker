@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 台灣股市盤中盯盤 — intraday_monitor.py
-版本：v1.1（對應主程式 v11.57）
+版本：v1.2（對應主程式 v11.59）
 
 用途：
   拿前一晚「明日關注」的推薦清單（主榜 + 觀察組 + v2限定候選）當盯盤清單，
@@ -29,6 +29,11 @@
     TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID。telegram.json 含金鑰，請加進 .gitignore，不要推 git。
   - 參數（輪詢間隔、爆量倍數…）可在 config.py 用 INTRADAY_* 覆寫，沒設就用下面預設值。
 
+v1.2 新增：
+  - 風報比低於 INTRADAY_RR_LOW（預設 1.0）時，通知與清單加一行「⚠️ 風報比偏低」（仍照常通知）
+  - 「目標價已低於推薦日現價」（舊算法產生的追高股票）不再通知「達目標價」，並在盤前清單標示
+  - 沒有目標價欄時的估算，追高股票改以現價為基準（與主程式 v11.59 一致）
+
 v1.1 新增（搭配 tg_bot.py 的 Telegram 指令）：
   - 每輪查價前讀 bot_control.json：/mute 靜音（只擋盤中事件通知；盤前清單、收盤摘要、系統警告照發）、
     /add 臨時加入的股票（只有當天有效，沒有買進區間，所以只會通知達目標/觸停損/爆量/突破）
@@ -41,7 +46,7 @@ v1.1 新增（搭配 tg_bot.py 的 Telegram 指令）：
 import os, sys, json, time, argparse, subprocess, statistics
 from datetime import datetime, timedelta, timezone
 
-VERSION = "v1.1"
+VERSION = "v1.2"
 HERE = os.path.dirname(os.path.abspath(__file__))
 TW = timezone(timedelta(hours=8))
 
@@ -67,6 +72,7 @@ VOL_SURGE_RATIO   = _c("INTRADAY_VOL_RATIO", 1.5)       # 盤中累計量 ≥ �
 BREAKOUT_BUF_PCT  = _c("INTRADAY_BREAKOUT_BUFFER_PCT", 0.0)  # 突破需高過前高多少 %
 REARM_PCT         = _c("INTRADAY_REARM_PCT", 1.0)       # 買進區間通知後，股價回到區間上緣 +N% 以上才重新武裝
 MAX_BUY_ALERTS    = _c("INTRADAY_MAX_BUY_ALERTS", 2)    # 同一檔一天最多通知幾次「進入買進區間」
+RR_LOW            = _c("INTRADAY_RR_LOW", 1.0)          # ★ v1.2 風報比低於此值 → 通知/清單加註「⚠️ 風報比偏低」
 VOL_AVG_DAYS      = _c("INTRADAY_VOL_AVG_DAYS", 10)
 HIGH_LOOKBACK     = _c("TARGET_HIGH_LOOKBACK", 20)
 FALLBACK_GAIN_PCT = _c("TARGET_GAIN_DEFAULT_PCT", 3.0)  # 「明日關注」沒有目標價欄時的估算用
@@ -306,11 +312,13 @@ def load_watchlist(ss):
         buy_low, buy_high = _num(cell("買進區間低")), _num(cell("買進區間高"))
         target, stop, rr = _num(cell("目標價")), _num(cell("停損價")), _num(cell("風報比"))
         est = False
-        entry = buy_low or close
+        stop_base = buy_low or close
+        chase = bool(close and (buy_high or buy_low) and close > (buy_high or buy_low))   # ⚠️追高
+        entry = close if chase else stop_base          # 與主程式 _target_stop_info() 同規則
         if target is None and entry:
             target, est = entry * (1 + FALLBACK_GAIN_PCT / 100), True
-        if stop is None and entry:
-            stop, est = entry * (1 - FALLBACK_STOP_PCT / 100), True
+        if stop is None and stop_base:
+            stop, est = stop_base * (1 - FALLBACK_STOP_PCT / 100), True
         out.append({
             "code": code, "name": cell("股票名稱"), "group": group,
             "score": cell("評分"), "close": close,
@@ -441,6 +449,13 @@ def _live_rr(w, p):
     return None
 
 
+def rr_low_text(rr):
+    """★ v1.2 風報比偏低的提示文字；rr 為 None 或不低於門檻回傳空字串。"""
+    if rr is None or rr >= RR_LOW:
+        return ""
+    return f"⚠️ 風報比偏低（{rr} < {RR_LOW:g}）：預期獲利小於可能承擔的下檔風險"
+
+
 def fmt_alert(kind, w, q, extra=""):
     p = q["price"]
     chg = pct(p, q["y"])
@@ -455,6 +470,8 @@ def fmt_alert(kind, w, q, extra=""):
         lines.append(f"🎯 目標 {fp(w['target'])}（{fpct(pct(w['target'], p))}）　"
                      f"🛑 停損 {fp(w['stop'])}（{fpct(pct(w['stop'], p))}）　"
                      f"風報比 {('>10' if rr > 10 else rr) if rr is not None else '-'}")
+        if rr_low_text(rr):
+            lines.append(rr_low_text(rr))
     if extra:
         lines.append(extra)
     tail = w["group"] + (f"｜評分 {w['score']}" if w["score"] not in ("", "-") else "")
@@ -477,7 +494,9 @@ def check_events(w, q, ev, avg_vol, high_n):
         ev["stop"] = 1
         out.append(("stop", fmt_alert("stop", w, q)))
 
-    if w["target"] and p >= w["target"] and not ev.get("target"):
+    stale_target = (w["group"] != "手動加入" and w["target"] and w.get("close")
+                    and w["target"] <= w["close"])      # 目標價早已低於推薦日現價（舊算法的追高股票）→ 不通知達目標
+    if w["target"] and p >= w["target"] and not ev.get("target") and not stale_target:
         ev["target"] = 1
         out.append(("target", fmt_alert("target", w, q)))
 
@@ -525,6 +544,11 @@ def fmt_preopen(block_date, watch):
             score_txt = f"　評分 {w['score']}" if w["score"] not in ("", "-") else ""
             lines.append(f"{i}. {w['code']} {w['name']}{score_txt}")
             lines.append(f"   買進 {buy}｜🎯 {fp(w['target'])}｜🛑 {fp(w['stop'])}｜風報比 {w['rr'] or '-'}{est}")
+            rr_now = w["rr"] if w["rr"] is not None else (_live_rr(w, w["close"]) if w.get("close") else None)
+            if rr_low_text(rr_now):
+                lines.append("   " + rr_low_text(rr_now))
+            if (w["group"] != "手動加入" and w["target"] and w.get("close") and w["target"] <= w["close"]):
+                lines.append("   ⚠️ 目標價已低於推薦日現價（舊算法產生），不會通知「達目標價」")
     return "\n".join(lines)
 
 

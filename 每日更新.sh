@@ -7,7 +7,7 @@ cd "$(dirname "$0")"
 export PYTHONWARNINGS="ignore::FutureWarning,ignore::Warning"
 
 echo "========================================="
-echo " 台灣股市三大法人買超追蹤 v11.58"
+echo " 台灣股市三大法人買超追蹤 v11.59"
 echo "========================================="
 echo ""
 echo "請選擇執行方式："
@@ -28,9 +28,10 @@ echo " 13) Telegram：發送測試通知"
 echo " 14) Telegram 指令 bot：本機前景執行（測試用，Ctrl+C 中止；正式請放家用主機）"
 echo " 15) Telegram 指令：在本機直接試一個指令（不經 Telegram，例如 /status）"
 echo " 16) 檢查假日：比對 config.py 的 HOLIDAYS 與證交所行事曆（只提示，不修改）"
+echo " 17) ★盤中一次啟動：盯盤 + Telegram 指令 bot（同一個終端機，建議 08:45 前啟動）"
 echo "  0) 離開"
 echo ""
-read -p "請輸入選項 [0-16]: " choice
+read -p "請輸入選項 [0-17]: " choice
 echo ""
 
 case "$choice" in
@@ -103,7 +104,7 @@ case "$choice" in
         echo "🤖 Telegram 指令 bot（前景執行，Ctrl+C 中止）..."
         echo "⚠️ 同一個 bot 同時只能有一個程式在聽；家用主機已在跑 bot 時請勿在 Mac 執行"
         echo ""
-        python3 -u tg_bot.py
+        caffeinate -i python3 -u tg_bot.py
         ;;
     15)
         read -p "請輸入指令（例如 /list、/status、/add 2330）: " tgcmd
@@ -115,12 +116,39 @@ case "$choice" in
         echo ""
         python3 -u fetch_and_update.py --check-holidays | tee -a log.txt
         ;;
+    17)
+        echo "👀 盤中一次啟動：盯盤（前景）+ Telegram 指令 bot（背景）"
+        echo "   • 盯盤自己等到 09:00 開盤、13:30 收盤發摘要後結束；bot 的訊息記在 tg_bot_log.txt"
+        echo "   • Mac 保持清醒直到本視窗結束；關閉此視窗或 Ctrl+C 會一併停止盯盤與 bot"
+        echo ""
+        # 讓 Mac 在這個 script 執行期間不要閒置休眠（-w：等這個 script 結束就自動解除）
+        caffeinate -i -w $$ &
+        CAFF_PID=$!
+        # 指令 bot 放背景。若另一個終端機已經在跑 bot，它會自己偵測到並結束，不會重複
+        python3 -u tg_bot.py >> tg_bot_log.txt 2>&1 &
+        BOT_PID=$!
+        cleanup_17() {
+            kill "$BOT_PID" 2>/dev/null
+            kill "$CAFF_PID" 2>/dev/null
+        }
+        trap cleanup_17 EXIT
+        python3 -u intraday_monitor.py | tee -a intraday_log.txt
+        echo ""
+        if kill -0 "$BOT_PID" 2>/dev/null; then
+            echo "✅ 盯盤已結束。指令 bot 仍在運作，可繼續在 Telegram 用 /list、/status。"
+            read -p "按 Enter 關閉 bot 並離開..."
+        else
+            echo "ℹ️ 指令 bot 沒有在這個視窗運作（可能另一個終端機已在跑，或啟動失敗，詳見 tg_bot_log.txt）"
+            read -p "按 Enter 關閉..."
+        fi
+        exit 0
+        ;;
     0)
         echo "👋 離開"
         exit 0
         ;;
     *)
-        echo "❌ 無效選項，請輸入 0~16"
+        echo "❌ 無效選項，請輸入 0~17"
         echo ""
         read -p "按 Enter 關閉..."
         exit 1
