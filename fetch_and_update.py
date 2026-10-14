@@ -19,7 +19,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.59"  # ← 每次 commit 只改這裡
+VERSION = "v11.60"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -3292,7 +3292,9 @@ def _target_stop_info(buy_low, close, high_n, gain_pct, buy_high=None):
     ★ v11.56 目標價／停損價／風報比（盤中盯盤用）。
     ★ v11.59 追高股票（現價 > 買進區間上緣）的目標價改以「現價」為基準（T53）：原本以區間低點為基準，
       追高股票的目標價常常早就低於現價，風報比留空，盯盤也會一開盤就通知「達目標價」。
-    - 目標價基準 entry：一般 = 買進區間低點（沒有就用現價）；追高 = 現價。
+    ★ v11.60 12a：不再只限追高。現價在買進區間內但高過區間低點時，目標價同樣會低於現價（例：2542），
+      所以一律以「現價與區間低點兩者較高者」為基準。
+    - 目標價基準 entry：max(現價, 買進區間低點)（沒有區間低點就用現價）。
     - 統計目標 = entry × (1 + gain_pct%)（gain_pct 來自 _calc_target_gain_pct）。
     - 若近 N 日收盤高點比 entry 高出 TARGET_HIGH_MIN_UPSIDE_PCT% 以上，目標價取
       「統計目標」與「近 N 日高點」兩者較近（較低）的一個；否則（已逼近/突破前高）只用統計目標。
@@ -3307,8 +3309,9 @@ def _target_stop_info(buy_low, close, high_n, gain_pct, buy_high=None):
     stop_base = low or px
     if stop_base is None:
         return "", "", ""
-    chase = px is not None and high is not None and px > high      # ⚠️追高
-    entry = px if chase else stop_base
+    # ★ v11.60 12a：目標價基準 = 現價與區間低點兩者較高者。現價 ≤ 區間低點 → 用低點；
+    #   現價在區間內但已高過低點（原本目標價會低於現價）或追高 → 用現價，目標價必然高於現價。
+    entry = max(px, stop_base) if px is not None else stop_base
     target = entry * (1 + gain_pct / 100)
     hn = _to_pos_float(high_n)
     if hn is not None and hn >= entry * (1 + TARGET_HIGH_MIN_UPSIDE_PCT / 100):

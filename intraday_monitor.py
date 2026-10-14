@@ -313,8 +313,8 @@ def load_watchlist(ss):
         target, stop, rr = _num(cell("目標價")), _num(cell("停損價")), _num(cell("風報比"))
         est = False
         stop_base = buy_low or close
-        chase = bool(close and (buy_high or buy_low) and close > (buy_high or buy_low))   # ⚠️追高
-        entry = close if chase else stop_base          # 與主程式 _target_stop_info() 同規則
+        # ★ v11.60 12a：與主程式 _target_stop_info() 同規則——基準 = 現價與區間低點兩者較高者
+        entry = max(close, stop_base) if (close and stop_base) else (close or stop_base)
         if target is None and entry:
             target, est = entry * (1 + FALLBACK_GAIN_PCT / 100), True
         if stop is None and stop_base:
