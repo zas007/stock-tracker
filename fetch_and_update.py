@@ -3227,7 +3227,9 @@ def _to_close_float(v):
     "▲72.5"（高於推薦收盤）／"▼71.3"（低於）／"－72.0"（持平）。與 backtest.py 的 _f() 同一套規則。
     取不到或 <=0 回傳 None。
     """
-    t = str(v).strip().replace("▲", "").replace("▼", "").replace("－", "").replace(",", "")
+    # ★ v11.60：也去掉半形「-」。收盤價一定是正數；整份「推薦歷史」匯入 Sheets 時，持平的全形「－72.0」
+    #   會被轉成數字 -72，若不處理會被當成負數而略過
+    t = str(v).strip().replace("▲", "").replace("▼", "").replace("－", "").replace("-", "").replace(",", "")
     try:
         f = float(t)
         return f if f > 0 else None

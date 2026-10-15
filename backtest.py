@@ -227,15 +227,18 @@ def load_perf_history(ss):
         print("  ℹ️ 推薦歷史尚無資料（需先累積推薦成效後才有）")
         return []
 
-    def _f(v):
+    def _f(v, price=False):
         s = str(v).strip().replace("▲","").replace("▼","").replace("－","")
+        # ★ 收盤價欄（推薦收盤／T+N收盤）一定是正數：匯入 Sheets 時全形「－」可能被轉成半形「-」（數字 -72），
+        #   不去掉會被當成負收盤價、損益變 -200%。評分等欄位可能為負，所以只對「…收盤」欄處理
+        if price: s = s.replace("-","")
         try: return float(s)
         except: return None
 
     def _fk(row, key):
         """數值欄：依 PERF_IDX 取值後轉 float（取不到回傳 None）。"""
         idx = PERF_IDX[key]
-        return _f(row[idx]) if len(row) > idx else None
+        return _f(row[idx], price=key.endswith("收盤")) if len(row) > idx else None
 
     result = []
     date_pat = re.compile(r"^\d{4}/\d{2}/\d{2}$")
