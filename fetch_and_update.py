@@ -19,7 +19,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.60"  # ← 每次 commit 只改這裡
+VERSION = "v11.61"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -2241,6 +2241,32 @@ def prepend_block(ws, new_block, disp, date_marker_prefix, sep_cols):
     safe_rewrite(ws, full_data, label=ws.title)
 
 
+def _unmerge_all_before_write(ws, n_cols, max_retries=3):
+    """
+    ★ v11.61 寫入「明日關注」之前，先解除整張表的所有合併儲存格。
+    根因：prepend_block() 是先 safe_rewrite 寫入新資料、之後 _apply_banner_merges() 才解除舊合併。
+    此表每天 prepend、列位置會位移，上一次合併的橫幅列（A:Y 整列）會留在「舊的列號」上；
+    新資料寫入時若剛好落在那些列，Sheets 會把合併範圍內非左上角的值丟掉，之後才解除合併也回不來
+    （症狀：排名 2~4 整列只剩 A 欄的排名數字，見 2026/10/13 v2 候選與 10/14 主榜）。
+    解除失敗（例如 429）會重試；仍失敗只印警示、不中斷執行（維持舊行為）。
+    回傳 True＝已解除；False＝未解除。
+    """
+    col_letter_end = chr(ord("A") + n_cols - 1)
+    last_err = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            ws.unmerge_cells(f"A1:{col_letter_end}{ws.row_count}")
+            return True
+        except Exception as e:
+            last_err = e
+            if attempt < max_retries:
+                print(f"  ⚠️ 寫入前解除合併失敗（{attempt}/{max_retries}），5 秒後重試：{e}")
+                time.sleep(5)
+    print(f"  ❌ 寫入前解除合併失敗（已重試 {max_retries} 次）：{last_err}")
+    print("     ⚠️ 舊合併可能吃掉這次新寫入的列（排名 2~4 空白），請檢查「明日關注」，必要時手動取消合併後重跑選單 3")
+    return False
+
+
 def _apply_banner_merges(ws, n_cols, max_merge_days=2):
     """
     ★ v11.39 手機版寬度有限，「資料日期」「外資大台指淨部位」「⚠️ 大盤警訊：」
@@ -4158,6 +4184,7 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
 
     n_cols = len(RECOMMEND_HEADERS)
     ws = get_or_create(ss, "明日關注", n_cols)
+    _unmerge_all_before_write(ws, n_cols)   # ★ v11.61 先解除舊合併，再寫入（避免新資料落在殘留合併範圍而被吃掉）
     from datetime import datetime, timedelta
     _cutoff = (datetime.strptime(date_str, "%Y%m%d") - timedelta(days=31)).strftime("%Y/%m/%d")
     purge_old_rows(ws, _cutoff)
