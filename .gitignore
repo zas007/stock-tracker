@@ -17,3 +17,12 @@ intraday_log.txt
 intraday_monitor.lock
 tg_bot.lock
 .venv/
+tg_bot_log.txt
+holiday_check.json
+telegram.json
+bot_control.json
+bot_offset.json
+intraday_state.json
+intraday_log.txt
+intraday_monitor.lock
+tg_bot.lock
