@@ -19,7 +19,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.61"  # ← 每次 commit 只改這裡
+VERSION = "v11.62"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -3203,6 +3203,10 @@ def _buy_price_info(cost_wavg, ma5_value, close):
     - 兩者都沒有資料時（例如籌碼已全數出清、股票太新5日線不足）回傳 ("-", "", "")
     - 現價已經超過區間上緣時，顯示文字前面加「⚠️追高」提示；低/高點數字欄仍照實填入，
       不因為現價追高就清空，回測時才能算出「當初若照建議價位買、現在漲跌%」
+    - ★ v11.62 現價低於區間下緣時（跌破 5日線/法人成本），顯示文字前面加「⚠️跌破」提示（與「追高」對稱）。
+      原因：現價低於區間低點＝已跌破支撐，不是「比建議價便宜」，之前沒有任何標示容易誤讀
+      （例：6505 現價 98.6、區間 104.7~118.3）。只改顯示文字，數字欄、評分、目標/停損都不變；
+      下游（backtest.py／intraday_monitor.py／tg_bot.py）只原樣搬運這個文字，不解析前綴
     """
     def _to_float(v):
         try:
@@ -3234,7 +3238,12 @@ def _buy_price_info(cost_wavg, ma5_value, close):
         range_str = f"{v1:.1f}({l1})~{v2:.1f}({l2})"
         low, high = v1, v2
 
-    label = f"⚠️追高 {range_str}" if (price is not None and price > high) else range_str
+    if price is not None and price > high:
+        label = f"⚠️追高 {range_str}"
+    elif price is not None and price < low:     # ★ v11.62 現價跌破區間下緣
+        label = f"⚠️跌破 {range_str}"
+    else:
+        label = range_str
     return label, round(low, 2), round(high, 2)
 
 
