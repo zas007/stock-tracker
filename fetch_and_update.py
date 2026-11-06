@@ -19,7 +19,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.62"  # ← 每次 commit 只改這裡
+VERSION = "v11.63"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -41,6 +41,8 @@ try:
     HOLIDAYS    = getattr(_cfg, "HOLIDAYS", set())
     TEMP_CLOSURES = getattr(_cfg, "TEMP_CLOSURES", set())  # ★ v11.33 颱風假等臨時休市（人工維護，不受 _HOLIDAYS_ATTEMPTED 限制）
     NEWS_KEYWORDS = getattr(_cfg, "NEWS_KEYWORDS", {"利多": [], "利空": []})
+    MARKET_EVENTS = getattr(_cfg, "MARKET_EVENTS", {})   # ★ v11.63 大盤事件日曆（人工維護）
+    NEWS_IGNORE   = getattr(_cfg, "NEWS_IGNORE", [])      # ★ v11.63 例行性公告排除字串
     _HOLIDAYS_ATTEMPTED = set()  # ★ v11.25 已嘗試查詢的年度（不重試）
     # ★ v11.34 大盤警訊門檻
     ALERT_FUTURES_DELTA_YELLOW   = getattr(_cfg, "ALERT_FUTURES_DELTA_YELLOW", 3000)
@@ -78,6 +80,8 @@ except ImportError:
     HOLIDAYS        = set()
     TEMP_CLOSURES   = set()
     NEWS_KEYWORDS   = {"利多": [], "利空": []}
+    MARKET_EVENTS   = {}
+    NEWS_IGNORE     = []
     _HOLIDAYS_ATTEMPTED = set()
     ALERT_FUTURES_DELTA_YELLOW   = 3000
     ALERT_FUTURES_DELTA_RED      = 5000
@@ -1246,12 +1250,192 @@ def enrich_with_margin(groups, date_str):
 
 
 # ─────────────────────────────────────────────
-# ★ v11.26 重大訊息公告（#27）
+# ★ v11.63 重大訊息改走 OpenAPI（JSON），MOPS HTML 退為備援
+#   緣起：v11.26 的 MOPS ajax_t51sb10（HTML 解析）在 10/14～11/04 連續 14 次執行都「命中 0 筆」，
+#   log 又沒印抓到幾列，無法分辨是端點失效、解析失敗還是關鍵字太窄。
+#   新版：①優先用證交所/櫃買 OpenAPI 的「每日重大訊息」JSON（欄位固定、不用解析 HTML）
+#         ②每次都印「取得總筆數／目標日筆數／命中數／中性略過數」，下次 0 筆時能立刻看出原因
+#         ③OpenAPI 兩邊都沒資料才退回 MOPS HTML
 # ─────────────────────────────────────────────
+NEWS_OPENAPI_URLS = [
+    ("上市", "https://openapi.twse.com.tw/v1/opendata/t187ap04_L"),
+    ("上櫃", "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap04_O"),
+]
+
+
+def _kw_hit(kw, text):
+    """關鍵字比對；「A+B」表示 A 與 B 都要出現（例：減資+彌補虧損）。text 已去除空白。"""
+    parts = [x for x in str(kw).split("+") if x]
+    return bool(parts) and all(x in text for x in parts)
+
+
+def _classify_news_kw(subject):
+    """回傳 (標籤, 命中詞)。比對前先去掉所有空白／換行（主旨常在詞中間斷行，如「限制員工\n權利新股」）。
+    順序：先排除例行公告(NEWS_IGNORE)→利多→利空（利多/利空順序沿用 v11.26）。"""
+    text = re.sub(r"\s+", "", str(subject))
+    for x in NEWS_IGNORE:
+        if x in text:
+            return "中性", ""
+    for tag in ("利多", "利空"):
+        for kw in NEWS_KEYWORDS.get(tag, []):
+            if _kw_hit(kw, text):
+                return tag, kw
+    return "中性", ""
+
+
+def _classify_news(subject):
+    """主旨關鍵字比對，回傳 利多／利空／中性。"""
+    return _classify_news_kw(subject)[0]
+
+
+def _curl_json(url, timeout=30):
+    """用 curl 取 JSON，失敗或非 JSON 回傳 None 並印出原因。"""
+    try:
+        r = subprocess.run([
+            "curl", "-s", "--max-time", str(timeout),
+            "-H", "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+            "-H", "Accept: application/json, text/plain, */*",
+            url,
+        ], capture_output=True)
+        raw = r.stdout.decode("utf-8", errors="replace").strip()
+    except Exception as e:
+        print(f"  ⚠️ 取得失敗（{url}）：{e}")
+        return None
+    if not raw:
+        print(f"  ⚠️ 無回應（{url}）")
+        return None
+    try:
+        return json.loads(raw)
+    except Exception as e:
+        print(f"  ⚠️ JSON 解析失敗（{url}）：{e}；開頭：{raw[:60]!r}")
+        return None
+
+
+def _rec_get(rec, name):
+    """OpenAPI 欄位名稱偶爾帶空白，用 strip 後比對。"""
+    for k, v in rec.items():
+        if str(k).strip() == name:
+            return v
+    return ""
+
+
+def _to_ymd(s):
+    """民國 7 碼（1141104）或西元 8 碼（20261104）→ 'YYYYMMDD'，失敗回傳空字串。"""
+    s = re.sub(r"\D", "", str(s))
+    try:
+        if len(s) == 7:
+            return f"{int(s[:3]) + 1911}{s[3:]}"
+        if len(s) == 6:   # 民國兩位數年（極少見）
+            return f"{int(s[:2]) + 1911}{s[2:]}"
+        if len(s) == 8:
+            return s
+    except ValueError:
+        pass
+    return ""
+
+
+def _find_field(rec, cn_names, en_hints, exclude=()):
+    """先用中文欄位名（strip 後完全相符），找不到再用英文關鍵字（不分大小寫、包含即可）比對。"""
+    for k, v in rec.items():
+        if str(k).strip() in cn_names:
+            return v
+    for h in en_hints:                      # 提示詞依序優先（先找 speak/announce，最後才退到 date）
+        for k, v in rec.items():
+            kl = str(k).strip().lower()
+            if h in kl and not any(x in kl for x in exclude):
+                return v
+    return ""
+
+
+def _news_rows_from_openapi(data, label=""):
+    """OpenAPI 回傳 list[dict] → [{code,name,date(YYYYMMDD),subject}]，去重。
+    ★ v11.63 實測：上市（t187ap04_L）正常；上櫃資料集欄位名稱可能不同，所以加英文別名，
+      並在「有資料卻解析不出任何列」時印出型別與第一筆欄位名，方便對照修正。"""
+    out, seen = [], set()
+    if data is None:          # _curl_json 已印出失敗原因
+        return out
+    if not isinstance(data, list):
+        print(f"  ⚠️ [news-openapi] {label} 回傳不是 list（型別 {type(data).__name__}）；開頭：{str(data)[:80]!r}")
+        return out
+    if not data:
+        print(f"  ℹ️ [news-openapi] {label} 回傳空陣列")
+        return out
+    for rec in data:
+        if not isinstance(rec, dict):
+            continue
+        code = str(_find_field(rec, ("公司代號", "證券代號"), ("companycode", "securitiescompanycode", "stockcode", "code"))).strip()
+        if not code:
+            continue
+        subject = " ".join(str(_find_field(rec, ("主旨",), ("subject",))).split())   # 主旨常含換行，壓成單行
+        ymd = _to_ymd(_find_field(rec, ("發言日期",), ("announce", "speak", "date"), exclude=("report", "出表", "fact")))
+        key = (code, ymd, subject)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"code": code, "name": str(_find_field(rec, ("公司名稱",), ("companyname", "name"))).strip(),
+                    "date": ymd, "subject": subject})
+    if not out:
+        first = next((r for r in data if isinstance(r, dict)), {})
+        print(f"  ⚠️ [news-openapi] {label} 有 {len(data)} 筆但解析不出公告；第一筆欄位：{list(first.keys())}")
+    return out
+
 
 def fetch_news_announcements(date_str):
     """
-    從 MOPS ajax_t51sb10 一次撈全市場重大訊息公告。
+    重大訊息（利多/利空標記）。回傳 [{code, name, date, subject, tag}, ...]，date 為 YYYY/MM/DD。
+    同時涵蓋目標日與前一交易日（與 v11.26 相同）。
+    """
+    dt      = datetime.strptime(date_str, "%Y%m%d")
+    prev_dt = dt - timedelta(days=1)
+    for _ in range(7):
+        if _is_trading_day(prev_dt):
+            break
+        prev_dt -= timedelta(days=1)
+    targets = {prev_dt.strftime("%Y%m%d"), dt.strftime("%Y%m%d")}
+
+    all_rows, got_any = [], False
+    for label, url in NEWS_OPENAPI_URLS:
+        rows = _news_rows_from_openapi(_curl_json(url), label)
+        print(f"  [news-openapi] {label} 取得 {len(rows)} 則")
+        if rows:
+            got_any = True
+            all_rows.extend(rows)
+
+    if not got_any:
+        print("  ⚠️ OpenAPI 兩邊都沒有資料，改用 MOPS HTML 備援")
+        return _fetch_news_announcements_mops(date_str)
+
+    seen_dates = sorted({r["date"] for r in all_rows if r["date"]})
+    in_target  = [r for r in all_rows if r["date"] in targets]
+    results, neutral = [], 0
+    for r in in_target:
+        tag, kw = _classify_news_kw(r["subject"])
+        if tag == "中性":
+            neutral += 1
+            continue
+        results.append({"code": r["code"], "name": r["name"], "date": fmt_date(r["date"]),
+                        "subject": r["subject"], "tag": tag, "kw": kw})
+    n_up = sum(1 for x in results if x["tag"] == "利多")
+    n_dn = len(results) - n_up
+    print(f"  📢 重大訊息（OpenAPI）：目標日（{'、'.join(sorted(targets))}）共 {len(in_target)} 則，"
+          f"命中 {len(results)} 筆（利多 {n_up}／利空 {n_dn}），中性略過 {neutral}")
+    for x in results[:20]:
+        print(f"     {'🟢' if x['tag'] == '利多' else '🔴'} {x['code']} {x['name']}｜[{x['kw']}] {x['subject'][:40]}")
+    if len(results) > 20:
+        print(f"     …另有 {len(results) - 20} 筆")
+    if not in_target:
+        shown = "、".join(seen_dates[-3:]) if seen_dates else "（日期欄解析不出來）"
+        print(f"  ⚠️ OpenAPI 有資料但沒有目標日的公告；API 內日期（最近3個）：{shown}")
+    return results
+
+
+# ─────────────────────────────────────────────
+# ★ v11.26 重大訊息公告（#27）
+# ─────────────────────────────────────────────
+
+def _fetch_news_announcements_mops(date_str):
+    """
+    【備援】從 MOPS ajax_t51sb10 一次撈全市場重大訊息公告（v11.63 起只在 OpenAPI 無資料時使用）。
     同時抓今日與前一交易日，避免 16:30 前今日資料尚未釋出時漏抓。
     回傳 list of dict：[{code, name, date, subject, tag}, ...]
     tag = "利多" / "利空" / "中性"
@@ -1331,24 +1515,18 @@ def fetch_news_announcements(date_str):
         parser.feed(raw)
 
         day_count = 0
+        valid_rows = 0
         for row in parser.rows:
             if len(row) < 5:
                 continue
             if row[0] in ("序號", "編號", "") or not row[1].strip().isdigit():
                 continue
+            valid_rows += 1
             code    = row[1].strip()
             name    = row[2].strip()
-            subject = row[4].strip() if len(row) > 4 else ""
+            subject = " ".join(row[4].split()) if len(row) > 4 else ""
 
-            tag = "中性"
-            for kw in NEWS_KEYWORDS.get("利多", []):
-                if kw in subject:
-                    tag = "利多"; break
-            if tag == "中性":
-                for kw in NEWS_KEYWORDS.get("利空", []):
-                    if kw in subject:
-                        tag = "利空"; break
-
+            tag = _classify_news(subject)
             if tag == "中性":
                 continue
 
@@ -1358,7 +1536,7 @@ def fetch_news_announcements(date_str):
             })
             day_count += 1
 
-        print(f"  📢 重大訊息（{disp}）：命中 {day_count} 筆（利多/利空）")
+        print(f"  📢 重大訊息（{disp}，MOPS備援）：解析表格 {len(parser.rows)} 列、有效公告 {valid_rows} 則，命中 {day_count} 筆（利多/利空）")
 
     return results
 
@@ -1391,6 +1569,11 @@ def update_news_history(ss, date_str, news_items):
         [item["date"], item["code"], item["name"], item["tag"], item["subject"]]
         for item in news_items
     ]
+    # ★ v11.63 每次執行會同時抓「前一交易日」，前一天已寫入過的公告會再抓到一次；
+    #   以（日期,代號,主旨）去重，新抓到的覆蓋舊列（舊版 0 筆命中所以一直沒顯現）
+    _new_keys = {(r[0], r[1], r[4]) for r in new_rows}
+    kept = [r for i, r in enumerate(kept)
+            if i == 0 or len(r) < 5 or (r[0], r[1], r[4]) not in _new_keys]
 
     full = kept + new_rows
     if safe_rewrite(ws, full, label="重大訊息歷史"):
@@ -1420,6 +1603,177 @@ def load_news_for_codes(ss, codes, date_str, days=3):
         if code in codes:
             result.setdefault(code, []).append(tag)
     return result
+
+
+# ─────────────────────────────────────────────
+# ★ v11.63 大盤法人買賣超（「大盤法人」工作表）
+#   來源：證交所 BFI82U「三大法人買賣金額統計表」（單位：元，這裡換算成億）。
+#   用途：補上個股買超追蹤缺少的「大盤層」背景——外資現貨買賣超金額、投信買賣超、
+#   連續買/賣天數（「土洋對作」一眼看出）、以及人工維護的事件日曆（MARKET_EVENTS）。
+#   只記錄與顯示，不進評分、不改明日關注版面（T42 觀察期不動選股邏輯）。
+# ─────────────────────────────────────────────
+MARKET_FLOW_HEADERS = ["日期", "外資買賣超(億)", "投信買賣超(億)", "自營商買賣超(億)",
+                       "三大法人合計(億)", "外資連續", "投信連續", "事件"]
+
+
+def fetch_market_institutional(date_str):
+    """
+    抓指定交易日的三大法人買賣差額，回傳 dict（單位：億，四捨五入到小數 2 位）：
+    {"外資": x, "投信": x, "自營商": x, "合計": x}；無資料或失敗回傳 None。
+    「外資」＝外資及陸資（不含外資自營商），與新聞常說的「外資賣超」同口徑；自營商＝自行買賣＋避險。
+    """
+    url = f"https://www.twse.com.tw/rwd/zh/fund/BFI82U?type=day&dayDate={date_str}&response=json"
+    raw = curl_get(url)
+    if not raw:
+        print(f"  ⚠️ BFI82U 無回應（{date_str}）")
+        return None
+    try:
+        data = json.loads(raw)
+    except Exception as e:
+        print(f"  ⚠️ BFI82U JSON 解析失敗（{date_str}）：{e}；開頭：{raw[:60]!r}")
+        return None
+    if str(data.get("stat", "")).upper() != "OK":
+        print(f"  ⚠️ BFI82U 狀態非 OK（{date_str}）：{str(data.get('stat', ''))[:40]}")
+        return None
+
+    f_net = f_all = t_net = tot = None
+    d_sum, d_found = 0, False
+    for r in data.get("data") or []:
+        if not isinstance(r, (list, tuple)) or len(r) < 4:
+            continue
+        name = str(r[0]).strip()
+        diff = to_int(r[3])           # 買賣差額（元）
+        if name.startswith("外資及陸資"):
+            if "不含" in name:
+                f_net = diff
+            else:
+                f_all = diff          # 若 API 只給合併口徑，退而使用
+        elif name.startswith("外資自營商"):
+            continue                  # 已含在「外資及陸資」合併口徑，不單獨計
+        elif name.startswith("投信"):
+            t_net = diff
+        elif name.startswith("自營商"):
+            d_sum += diff; d_found = True
+        elif name.startswith("合計"):
+            tot = diff
+    if f_net is None:
+        f_net = f_all
+    if f_net is None and t_net is None and not d_found:
+        print(f"  ⚠️ BFI82U 找不到外資/投信/自營商列（{date_str}），欄位名稱可能改版")
+        return None
+
+    def _yi(v):
+        return None if v is None else round(v / 1e8, 2)
+    return {"外資": _yi(f_net), "投信": _yi(t_net),
+            "自營商": _yi(d_sum) if d_found else None, "合計": _yi(tot)}
+
+
+def _flow_streak_label(values):
+    """values 為「由舊到新」的買賣超數值（None 視為中斷）；回傳最後一天的連買/連賣文字，如「連賣5」。"""
+    if not values or values[-1] is None or values[-1] == 0:
+        return ""
+    sign = 1 if values[-1] > 0 else -1
+    n = 0
+    for v in reversed(values):
+        if v is None or v == 0 or (v > 0) != (sign > 0):
+            break
+        n += 1
+    # n 等於可用歷史全長 → 真實連續天數可能更長（歷史還在累積），加「+」提示
+    return f"{'連買' if sign > 0 else '連賣'}{n}{'+' if n == len(values) else ''}"
+
+
+def _flow_num(x):
+    try:
+        return float(str(x).replace(",", "").strip())
+    except (ValueError, TypeError):
+        return None
+
+
+def update_market_flow(ss, date_str):
+    """
+    寫入「大盤法人」工作表（最新在最上面、保留 31 天、重跑當日自動覆蓋）。
+    連續天數由工作表內的歷史重算；歷史不足 21 個交易日時，每次執行自動往前補抓最多 10 個交易日（每次間隔 2 秒）。
+    """
+    disp = fmt_date(date_str)
+    ws   = get_or_create(ss, "大盤法人", len(MARKET_FLOW_HEADERS))
+
+    today = fetch_market_institutional(date_str)
+    if today is None:
+        print("  ⚠️ 大盤法人：今日資料取不到，本次不更新工作表（不影響其他工作表）")
+        return
+
+    _cutoff = (datetime.strptime(date_str, "%Y%m%d") - timedelta(days=31)).strftime("%Y/%m/%d")
+    purge_old_rows(ws, _cutoff)
+
+    hist = {}   # disp → (外資, 投信, 自營商, 合計)
+    for r in ws.get_all_values()[1:]:
+        if not r or not r[0] or r[0] == disp:
+            continue
+        try:
+            datetime.strptime(r[0], "%Y/%m/%d")
+        except ValueError:
+            continue
+        r = list(r) + [""] * (5 - len(r))
+        hist[r[0]] = tuple(_flow_num(x) for x in r[1:5])
+    hist[disp] = (today["外資"], today["投信"], today["自營商"], today["合計"])
+
+    # 首次累積：往前補抓
+    if len(hist) < 21:
+        d = datetime.strptime(date_str, "%Y%m%d")
+        filled, tried = 0, 0
+        while filled < 10 and tried < 30:
+            d -= timedelta(days=1)
+            tried += 1
+            if not _is_trading_day(d):
+                continue
+            k = fmt_date(d.strftime("%Y%m%d"))
+            if k in hist:
+                continue
+            time.sleep(2)
+            got = fetch_market_institutional(d.strftime("%Y%m%d"))
+            if got:
+                hist[k] = (got["外資"], got["投信"], got["自營商"], got["合計"])
+                filled += 1
+        print(f"  ℹ️ 大盤法人：歷史不足 21 個交易日，本次補抓 {filled} 個（每次最多 10 個，補到 21 日為止）")
+
+    dates_asc = sorted(hist)
+    f_series  = [hist[k][0] for k in dates_asc]
+    t_series  = [hist[k][1] for k in dates_asc]
+
+    def _cell(v):
+        return "" if v is None else v
+
+    rows = []
+    for i, k in enumerate(dates_asc):
+        ymd = k.replace("/", "")
+        rows.append([k, _cell(hist[k][0]), _cell(hist[k][1]), _cell(hist[k][2]), _cell(hist[k][3]),
+                     _flow_streak_label(f_series[:i + 1]), _flow_streak_label(t_series[:i + 1]),
+                     MARKET_EVENTS.get(ymd, "")])
+    rows.sort(key=lambda r: r[0], reverse=True)
+
+    if not safe_rewrite(ws, [MARKET_FLOW_HEADERS] + rows, label="大盤法人"):
+        return
+
+    cur = rows[0]
+    def _fmt(v):
+        return "n/a" if v == "" else f"{v:+,.1f}億"
+    print(f"  ✅ 大盤法人 {disp}：外資 {_fmt(cur[1])}（{cur[5] or '—'}）｜投信 {_fmt(cur[2])}（{cur[6] or '—'}）"
+          f"｜自營商 {_fmt(cur[3])}｜合計 {_fmt(cur[4])}（共 {len(rows)} 日）")
+    if cur[5].startswith("連賣") and cur[6].startswith("連買"):
+        print("  🔁 土洋對作：外資連賣、投信連買（內資承接外資賣壓）")
+
+    # 近期事件提示（今天起 7 個日曆天內）
+    base = datetime.strptime(date_str, "%Y%m%d")
+    upcoming = []
+    for ymd, label in sorted(MARKET_EVENTS.items()):
+        try:
+            ed = datetime.strptime(str(ymd), "%Y%m%d")
+        except ValueError:
+            continue
+        if 0 <= (ed - base).days <= 7:
+            upcoming.append(f"{fmt_date(str(ymd))} {label}")
+    if upcoming:
+        print("  📅 近期事件：" + "；".join(upcoming))
 
 
 def update_short_history(ss, date_str, current_margin):
@@ -5659,6 +6013,7 @@ def main():
         ("A", "融資歷史",       lambda: update_margin_history(ss, date_str, current_margin)),  # ★ v11.29
         ("B", "成交量歷史",     lambda: update_volume_history(ss, date_str, current_prices)),  # ★ v11.31
         ("C", "收盤價歷史",     lambda: update_price_history(ss, date_str, current_prices)),  # ★ v11.39
+        ("D", "大盤法人",       lambda: update_market_flow(ss, date_str)),  # ★ v11.63
     ]
 
     if args.sheet_only:
