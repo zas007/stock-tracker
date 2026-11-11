@@ -19,7 +19,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.63"  # ← 每次 commit 只改這裡
+VERSION = "v11.64"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -47,6 +47,8 @@ try:
     # ★ v11.34 大盤警訊門檻
     ALERT_FUTURES_DELTA_YELLOW   = getattr(_cfg, "ALERT_FUTURES_DELTA_YELLOW", 3000)
     ALERT_FUTURES_DELTA_RED      = getattr(_cfg, "ALERT_FUTURES_DELTA_RED", 5000)
+    FUTURES_LEVEL_PER_DOT        = getattr(_cfg, "FUTURES_LEVEL_PER_DOT", 20000)  # ★ v11.64 未平倉淨口數每幾口一顆燈
+    FUTURES_DELTA_PER_DOT        = getattr(_cfg, "FUTURES_DELTA_PER_DOT", 3000)   # ★ v11.64 較前日變化每幾口一顆燈
     ALERT_MARGIN_HEALTH_ABS      = getattr(_cfg, "ALERT_MARGIN_HEALTH_ABS", 1500)
     ALERT_MARGIN_COUNT_YELLOW    = getattr(_cfg, "ALERT_MARGIN_COUNT_YELLOW", 2)
     ALERT_MARGIN_COUNT_RED       = getattr(_cfg, "ALERT_MARGIN_COUNT_RED", 4)
@@ -85,6 +87,8 @@ except ImportError:
     _HOLIDAYS_ATTEMPTED = set()
     ALERT_FUTURES_DELTA_YELLOW   = 3000
     ALERT_FUTURES_DELTA_RED      = 5000
+    FUTURES_LEVEL_PER_DOT        = 20000
+    FUTURES_DELTA_PER_DOT        = 3000
     ALERT_MARGIN_HEALTH_ABS      = 1500
     ALERT_MARGIN_COUNT_YELLOW    = 2
     ALERT_MARGIN_COUNT_RED       = 4
@@ -528,7 +532,8 @@ def _futures_dots(value, per_dot, max_dots=5):
     """
     依絕對值換算燈號顆數（最多 max_dots 顆，無條件捨去）。
     正值 → 🟢，負值 → 🔴，未滿一顆 → 🟡
-    口數：每 3,000 口一顆；變化量：每 1,500 口一顆
+    ★ v11.64：口數（未平倉淨口數）預設每 20,000 口一顆；變化量預設每 3,000 口一顆
+      （見 config.py 的 FUTURES_LEVEL_PER_DOT / FUTURES_DELTA_PER_DOT）
     """
     dots = min(int(abs(value) // per_dot), max_dots)
     if dots == 0:
@@ -542,13 +547,13 @@ def fetch_futures_signal(date_str):
     從期交所抓外資大台指未平倉淨口數，回傳 (口數, 燈號) 或 None（失敗時）。
     API: https://www.taifex.com.tw/cht/3/futContractsDateDown（CSV 格式，Big5 編碼）
 
-    燈號邏輯（每 3,000 口一顆，最多 5 顆）：
-      🟢🟢🟢🟢🟢 > +15,000 口
-      🟢🟢🟢🟢   +12,001 ~ +15,000
-      ...
-      🟡          -3,000 ~ +3,000（未達一顆）
-      ...
-      🔴🔴🔴🔴🔴 < -15,000 口
+    ★ v11.64 修正：原本誤取 cols[7]（多空「交易」口數淨額＝當日買賣差），
+      現改取「多空未平倉口數淨額」（累計部位；2026/11/06 實測 −99,930，與新聞「空單破 10 萬口」吻合）。
+      以表頭名稱定位欄位，找不到才退回 cols[13]（期交所 CSV 共 15 欄）。
+    燈號邏輯（每 FUTURES_LEVEL_PER_DOT 口一顆，最多 5 顆；預設 20,000）：
+      🟢🟢🟢🟢🟢 ≥ +100,000 口
+      🟡          -20,000 ~ +20,000（未達一顆）
+      🔴🔴🔴🔴🔴 ≤ -100,000 口
     """
     d = f"{date_str[:4]}/{date_str[4:6]}/{date_str[6:]}"
     url = (f"https://www.taifex.com.tw/cht/3/futContractsDateDown"
@@ -579,12 +584,22 @@ def fetch_futures_signal(date_str):
     try:
         # CSV 格式：日期,商品名稱,身份別,多方口數,多方契約金額,空方口數,空方契約金額,多空淨額口數,...
         lines = [l for l in text.strip().splitlines() if l.strip()]
+        # ★ v11.64 以表頭名稱定位「多空未平倉口數淨額」，避免期交所調整欄位順序又取錯
+        oi_idx = 13   # 備援：2026/11 實測表頭共 15 欄，第 14 欄（index 13）為多空未平倉口數淨額
+        for line in lines:
+            cols = line.split(",")
+            if len(cols) >= 8 and "身份別" in cols:
+                for i, name in enumerate(cols):
+                    if "多空未平倉口數淨額" in name:
+                        oi_idx = i
+                        break
+                break
         for line in lines:
             cols = line.split(",")
             # 找外資那列（身份別欄含「外資」）
-            if len(cols) >= 8 and "外資" in cols[2]:
-                net    = to_int(cols[7])   # 多空淨額口數
-                signal = _futures_dots(net, per_dot=3000)
+            if len(cols) > oi_idx and "外資" in cols[2]:
+                net    = to_int(cols[oi_idx])   # 多空未平倉口數淨額
+                signal = _futures_dots(net, per_dot=FUTURES_LEVEL_PER_DOT)
                 return net, signal
         print("  ⚠️ 期交所資料找不到外資欄位")
         return None
@@ -597,7 +612,7 @@ def fetch_futures_two_days(date_str):
     """
     抓今日和前一交易日的期貨資料，計算增減。
     回傳 (net: int, signal: str, delta_str: str) 或 None。
-    delta 燈號：每 1,500 口一顆，最多 5 顆。
+    delta 燈號：每 FUTURES_DELTA_PER_DOT 口（預設 3,000）一顆，最多 5 顆。
     """
     today_result = fetch_futures_signal(date_str)
     if today_result is None:
@@ -610,7 +625,7 @@ def fetch_futures_two_days(date_str):
     if prev_result is not None:
         prev_net, _ = prev_result
         delta = net - prev_net
-        delta_signal = _futures_dots(delta, per_dot=1500)
+        delta_signal = _futures_dots(delta, per_dot=FUTURES_DELTA_PER_DOT)
         sign = "+" if delta >= 0 else ""
         delta_str = f"較前日 {delta_signal} {sign}{delta:,}"
     else:

@@ -7,7 +7,7 @@ cd "$(dirname "$0")"
 export PYTHONWARNINGS="ignore::FutureWarning,ignore::Warning"
 
 echo "========================================="
-echo " 台灣股市三大法人買超追蹤 v11.63"
+echo " 台灣股市三大法人買超追蹤 v11.64"
 echo "========================================="
 echo ""
 echo "請選擇執行方式："
