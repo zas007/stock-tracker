@@ -94,6 +94,12 @@ ALERT_FUTURES_DELTA_RED    = 5000
 FUTURES_LEVEL_PER_DOT = 20000   # 部位每幾口一顆燈（最多 5 顆）
 FUTURES_DELTA_PER_DOT = 3000    # 較前日變化每幾口一顆燈（最多 5 顆）
 
+# ★ v11.65 大盤法人保留天數（原 31 天不足 21 個交易日，連買/連賣被截斷，T64）
+MARKET_FLOW_KEEP_DAYS = 50    # ★ v11.66 由 45 改 50，容納 31 個交易日（含假日約 45~47 個日曆天）
+MARKET_FLOW_MIN_DAYS  = 31    # ★ v11.66 歷史補抓目標（交易日），原 21；連買連賣「+」截斷改為 31 日才發生
+# ★ v11.65 加權指數均線：往前抓幾個月 FMTQIK（季線 60 日 + 大盤法人 45 天的歷史列，6 個月夠用）
+INDEX_MA_MONTHS = 6
+
 # 2. 融資健康度異常放大：單股「融資健康度」數值絕對值 ≥ 此門檻，視為異常放大
 ALERT_MARGIN_HEALTH_ABS     = 1500
 ALERT_MARGIN_COUNT_YELLOW   = 2   # 異常放大檔數達此數 → 🟡

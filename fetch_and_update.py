@@ -19,7 +19,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.64"  # ← 每次 commit 只改這裡
+VERSION = "v11.66"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -49,6 +49,9 @@ try:
     ALERT_FUTURES_DELTA_RED      = getattr(_cfg, "ALERT_FUTURES_DELTA_RED", 5000)
     FUTURES_LEVEL_PER_DOT        = getattr(_cfg, "FUTURES_LEVEL_PER_DOT", 20000)  # ★ v11.64 未平倉淨口數每幾口一顆燈
     FUTURES_DELTA_PER_DOT        = getattr(_cfg, "FUTURES_DELTA_PER_DOT", 3000)   # ★ v11.64 較前日變化每幾口一顆燈
+    MARKET_FLOW_KEEP_DAYS        = getattr(_cfg, "MARKET_FLOW_KEEP_DAYS", 50)     # ★ v11.65 大盤法人保留天數（v11.66：45→50，容納 31 個交易日）
+    MARKET_FLOW_MIN_DAYS         = getattr(_cfg, "MARKET_FLOW_MIN_DAYS", 31)      # ★ v11.66 大盤法人歷史補抓目標（交易日，原 21）
+    INDEX_MA_MONTHS              = getattr(_cfg, "INDEX_MA_MONTHS", 6)            # ★ v11.65 加權指數均線往前抓幾個月 FMTQIK
     ALERT_MARGIN_HEALTH_ABS      = getattr(_cfg, "ALERT_MARGIN_HEALTH_ABS", 1500)
     ALERT_MARGIN_COUNT_YELLOW    = getattr(_cfg, "ALERT_MARGIN_COUNT_YELLOW", 2)
     ALERT_MARGIN_COUNT_RED       = getattr(_cfg, "ALERT_MARGIN_COUNT_RED", 4)
@@ -89,6 +92,9 @@ except ImportError:
     ALERT_FUTURES_DELTA_RED      = 5000
     FUTURES_LEVEL_PER_DOT        = 20000
     FUTURES_DELTA_PER_DOT        = 3000
+    MARKET_FLOW_KEEP_DAYS        = 50
+    MARKET_FLOW_MIN_DAYS         = 31
+    INDEX_MA_MONTHS              = 6
     ALERT_MARGIN_HEALTH_ABS      = 1500
     ALERT_MARGIN_COUNT_YELLOW    = 2
     ALERT_MARGIN_COUNT_RED       = 4
@@ -908,6 +914,255 @@ def _fetch_stock_day_rows(code, date_str):
     return [], None
 
 
+# ═══════════════════════════════════════════════
+# ★ v11.65 均線位置：加權指數（FMTQIK）與個股月線（STOCK_DAY）
+#   位置標籤（大盤、個股共用）：
+#     收盤 ≥ 月線(20日)                         → ✅ 站上月線
+#     收盤 < 月線，但 ≥ 5日線（已反彈到5日線上）→ 🟡 反彈未達月線
+#     收盤 < 月線，且 < 5日線                    → 🔴 跌破月線
+# ═══════════════════════════════════════════════
+
+def _sma(vals, n):
+    """最後 n 筆的簡單平均（四捨五入 2 位）；不足 n 筆回傳 None。"""
+    return round(sum(vals[-n:]) / n, 2) if len(vals) >= n else None
+
+
+def ma_position_label(close, ma5, ma20, short=False):
+    """依收盤、5日線、月線回傳位置標籤；缺月線回傳空字串。"""
+    if not close or not ma20:
+        return ""
+    if close >= ma20:
+        return "站上月線" if short else "✅ 站上月線"
+    if ma5 and close >= ma5:
+        return "反彈未達月線" if short else "🟡 反彈未達月線（已站上5日線）"
+    return "跌破月線" if short else "🔴 跌破月線（5日線下）"
+
+
+def _fmtqik_month_closes(ymd):
+    """抓 ymd 所在月份的 FMTQIK，回傳 {YYYY/MM/DD: 加權指數收盤}；失敗回傳 {}。"""
+    url = f"https://www.twse.com.tw/rwd/zh/afterTrading/FMTQIK?date={ymd}&response=json"
+    text = curl_get(url)
+    out = {}
+    if not text or text.startswith("<"):
+        return out
+    try:
+        data = json.loads(text)
+    except Exception:
+        return out
+    if data.get("stat") != "OK":
+        return out
+    for row in data.get("data") or data.get("aaData") or []:
+        try:
+            y, m, d = str(row[0]).strip().split("/")
+            out[f"{int(y) + 1911:04d}/{int(m):02d}/{int(d):02d}"] = float(str(row[4]).replace(",", ""))
+        except Exception:
+            continue
+    return out
+
+
+def fetch_index_closes(date_str, months=None):
+    """往前抓 months 個月的 FMTQIK，回傳 {YYYY/MM/DD: 收盤}（每月之間停 1.5 秒）。"""
+    months = months or INDEX_MA_MONTHS
+    d = datetime.strptime(date_str, "%Y%m%d").replace(day=1)
+    closes = {}
+    for i in range(months):
+        closes.update(_fmtqik_month_closes(d.strftime("%Y%m%d")))
+        d = (d - timedelta(days=1)).replace(day=1)
+        if i < months - 1:
+            time.sleep(1.5)
+    return closes
+
+
+def build_index_ma_map(date_str, dates_disp):
+    """
+    為「大盤法人」每個日期算加權指數均線。
+    回傳 {disp: (加權收盤, 5日線, 月線(20日), 季線(60日), 距月線%, 距季線%, 均線狀態)}；
+    該日沒有指數資料或歷史不足的欄位留空字串。完全抓不到時回傳 {}。
+    """
+    closes = fetch_index_closes(date_str)
+    if not closes:
+        print("  ⚠️ 加權指數均線：FMTQIK 取不到，本次均線欄留空")
+        return {}
+    ks = sorted(closes)
+    out = {}
+    for k in dates_disp:
+        if k not in closes:
+            continue
+        vals = [closes[x] for x in ks if x <= k]
+        c = vals[-1]
+        ma5, ma20, ma60 = _sma(vals, 5), _sma(vals, 20), _sma(vals, 60)
+        pct20 = round((c / ma20 - 1) * 100, 2) if ma20 else ""
+        pct60 = round((c / ma60 - 1) * 100, 2) if ma60 else ""
+        out[k] = (c, ma5 if ma5 else "", ma20 if ma20 else "", ma60 if ma60 else "",
+                  pct20, pct60, ma_position_label(c, ma5, ma20))
+    return out
+
+
+def fetch_stock_closes(code, date_str):
+    """近兩個月個股收盤（舊→新）的 [(YYYY/MM/DD, close), ...]，只含 date_str（含）以前；失敗回傳 []。"""
+    d0 = datetime.strptime(date_str, "%Y%m%d")
+    target = d0.strftime("%Y/%m/%d")
+    closes = {}
+    for dd in (d0, d0.replace(day=1) - timedelta(days=1)):
+        rows, src = _fetch_stock_day_rows(code, dd.strftime("%Y%m%d"))
+        if not rows:
+            continue
+        ci = 2 if src == "tpex" else 6
+        for row in rows:
+            try:
+                y, m, d = str(row[0]).strip().split("/")
+                closes[f"{int(y) + 1911:04d}/{int(m):02d}/{int(d):02d}"] = float(str(row[ci]).replace(",", ""))
+            except Exception:
+                continue
+    return [(k, closes[k]) for k in sorted(closes) if k <= target]
+
+
+def stock_ma20_suffix(code, date_str, price):
+    """
+    個股月線說明文字，例：「｜月線 52.3（-4.1%）反彈未達月線」；資料不足 20 日或失敗回傳空字串。
+    現價（price）當作今日收盤；若 STOCK_DAY 尚未含今日，補在最後。
+    """
+    series = fetch_stock_closes(code, date_str)
+    vals = [c for _, c in series]
+    target = datetime.strptime(date_str, "%Y%m%d").strftime("%Y/%m/%d")
+    if price and (not series or series[-1][0] != target):
+        vals.append(price)
+    elif price and series and series[-1][0] == target:
+        vals[-1] = price
+    ma20, ma5 = _sma(vals, 20), _sma(vals, 5)
+    if not ma20 or not price:
+        return ""
+    pct = (price / ma20 - 1) * 100
+    return f"｜月線 {ma20:.1f}（{pct:+.1f}%）{ma_position_label(price, ma5, ma20, short=True)}"
+
+
+def attach_ma20_suffix(rec_rows, date_str):
+    """替推薦列（主榜、觀察組、v2限定候選）的「推薦買進價位」文字尾端加月線說明；只改顯示文字，數字欄不動。"""
+    ok = 0
+    for r in rec_rows:
+        try:
+            label = r[REC_IDX["推薦買進價位"]]
+            if label in ("", "-", None):
+                continue
+            price = _to_pos_float(r[REC_IDX["現價"]])
+            suf = stock_ma20_suffix(str(r[REC_IDX["代號"]]), date_str, price)
+            if suf:
+                r[REC_IDX["推薦買進價位"]] = f"{label} {suf}"
+                ok += 1
+        except Exception as e:
+            print(f"  ⚠️ 月線計算失敗（{r[REC_IDX['代號']]}）：{e}")
+    print(f"  📏 個股月線：{ok}/{len(rec_rows)} 檔已附加月線位置")
+
+
+# ═══════════════════════════════════════════════
+# ★ v11.66 台指期夜盤（期交所「期貨每日交易行情」，近月 TX）
+#   期交所「盤後」列的交易日期＝夜盤結束後的那個營業日（例：11/6 的盤後列是 11/5 15:00～11/6 05:00），
+#   所以 18:00 的紀錄取到的是「昨夜夜盤」，不是今晚；用來事後累積「夜盤能否預告日盤」的統計。
+#   三個數值皆以「前一營業日日盤收盤」為基準（不是期交所的漲跌價，那是對結算價）：
+#     夜盤漲跌 ＝ 夜盤收盤 − 前日日盤收盤
+#     日盤開盤缺口 ＝ 日盤開盤 − 前日日盤收盤
+#     日盤漲跌 ＝ 日盤收盤 − 前日日盤收盤
+# ═══════════════════════════════════════════════
+
+def _fetch_txf_csv(start_disp, end_disp):
+    """下載期交所期貨每日交易行情（TX）一段區間，回傳 UTF-8 文字；失敗回傳 None。"""
+    url = (f"https://www.taifex.com.tw/cht/3/futDataDown?down_type=1&commodity_id=TX"
+           f"&queryStartDate={start_disp}&queryEndDate={end_disp}")
+    result = subprocess.run([
+        "curl", "-s", "--max-time", "30",
+        "-H", "User-Agent: Mozilla/5.0",
+        "-H", "Referer: https://www.taifex.com.tw/",
+        url
+    ], capture_output=True)
+    if not result.stdout:
+        return None
+    try:
+        text = result.stdout.decode("big5", errors="replace")
+    except Exception:
+        return None
+    if text.startswith("<"):
+        return None
+    return text
+
+
+def build_txf_night_map(date_str, dates_disp):
+    """
+    為「大盤法人」每個日期算夜盤對照。
+    回傳 {disp: (夜盤漲跌, 日盤開盤缺口, 日盤漲跌, 近月)}；缺資料的值為空字串；完全取不到回傳 {}。
+    期交所單次查詢區間保守切成 28 天（每段間隔 1.5 秒）。
+    """
+    import csv as _csv, io as _io, re as _re
+    if not dates_disp:
+        return {}
+    start = datetime.strptime(min(dates_disp), "%Y/%m/%d") - timedelta(days=10)   # 多取前幾天，才有前日收盤
+    end = datetime.strptime(date_str, "%Y%m%d")
+    tables = {}   # (disp, 時段, 月份) → {open, close}
+    cur = start
+    first = True
+    while cur <= end:
+        seg_end = min(cur + timedelta(days=27), end)
+        if not first:
+            time.sleep(1.5)
+        first = False
+        text = _fetch_txf_csv(cur.strftime("%Y/%m/%d"), seg_end.strftime("%Y/%m/%d"))
+        cur = seg_end + timedelta(days=1)
+        if not text:
+            continue
+        rows = list(_csv.reader(_io.StringIO(text)))
+        hdr_i = next((i for i, r in enumerate(rows) if "交易日期" in r and any("交易時段" in c for c in r)), None)
+        if hdr_i is None:
+            continue
+        hdr = [c.strip() for c in rows[hdr_i]]
+        def _ix(key):
+            return next((i for i, c in enumerate(hdr) if key in c), None)
+        i_d, i_c, i_m = _ix("交易日期"), _ix("契約"), _ix("到期月份")
+        i_o, i_cl, i_s = _ix("開盤價"), _ix("收盤價"), _ix("交易時段")
+        if None in (i_d, i_c, i_m, i_o, i_cl, i_s):
+            continue
+        for r in rows[hdr_i + 1:]:
+            if len(r) <= max(i_d, i_c, i_m, i_o, i_cl, i_s):
+                continue
+            if r[i_c].strip() != "TX" or not _re.fullmatch(r"\d{6}", r[i_m].strip()):
+                continue    # 只取單一月份的 TX（排除價差、週選等）
+            def _num(x):
+                try:
+                    return float(str(x).replace(",", ""))
+                except ValueError:
+                    return None
+            tables[(r[i_d].strip(), r[i_s].strip(), r[i_m].strip())] = {"open": _num(r[i_o]), "close": _num(r[i_cl])}
+    if not tables:
+        print("  ⚠️ 台指期夜盤：期交所取不到資料，本次夜盤欄留空")
+        return {}
+    day_dates = sorted({d for (d, s_, m) in tables if s_ == "一般"})
+    out = {}
+    for k in dates_disp:
+        if k not in day_dates:
+            continue
+        months = sorted(m for (d, s_, m) in tables if d == k and s_ == "一般")
+        if not months:
+            continue
+        m = months[0]                                   # 近月＝當日日盤有交易的最小月份
+        prev_days = [d for d in day_dates if d < k]
+        if not prev_days:
+            continue
+        prev = tables.get((prev_days[-1], "一般", m))
+        if not prev or prev["close"] is None:
+            continue
+        pc = prev["close"]
+        night = tables.get((k, "盤後", m))
+        day = tables.get((k, "一般", m))
+        def _d(v):
+            if v is None:
+                return ""
+            v = v - pc
+            return int(v) if float(v).is_integer() else round(v, 1)
+        out[k] = (_d(night["close"]) if night else "",
+                  _d(day["open"]) if day else "",
+                  _d(day["close"]) if day else "",
+                  m)
+    return out
+
+
 def fetch_ma5_batch(codes, date_str, price_hist=None, current_prices=None, ss=None):
     """
     ★ v11.39 批次計算5日均線。
@@ -1628,7 +1883,11 @@ def load_news_for_codes(ss, codes, date_str, days=3):
 #   只記錄與顯示，不進評分、不改明日關注版面（T42 觀察期不動選股邏輯）。
 # ─────────────────────────────────────────────
 MARKET_FLOW_HEADERS = ["日期", "外資買賣超(億)", "投信買賣超(億)", "自營商買賣超(億)",
-                       "三大法人合計(億)", "外資連續", "投信連續", "事件"]
+                       "三大法人合計(億)", "外資連續", "投信連續", "事件",
+                       # ★ v11.65 加權指數均線（右側新增欄，不影響前 8 欄的既有讀取）
+                       "加權收盤", "5日線", "月線(20日)", "季線(60日)", "距月線%", "距季線%", "均線狀態",
+                       # ★ v11.66 台指期夜盤（近月；皆相對前一營業日日盤收盤；夜盤＝該日之前那一晚）
+                       "夜盤漲跌(點)", "日盤開盤缺口(點)", "日盤漲跌(點)"]
 
 
 def fetch_market_institutional(date_str):
@@ -1706,8 +1965,8 @@ def _flow_num(x):
 
 def update_market_flow(ss, date_str):
     """
-    寫入「大盤法人」工作表（最新在最上面、保留 31 天、重跑當日自動覆蓋）。
-    連續天數由工作表內的歷史重算；歷史不足 21 個交易日時，每次執行自動往前補抓最多 10 個交易日（每次間隔 2 秒）。
+    寫入「大盤法人」工作表（最新在最上面、保留 MARKET_FLOW_KEEP_DAYS 天（預設 45）、重跑當日自動覆蓋）。
+    連續天數由工作表內的歷史重算；歷史不足 MARKET_FLOW_MIN_DAYS（預設 31）個交易日時，每次執行自動往前補抓最多 10 個交易日（每次間隔 2 秒）。
     """
     disp = fmt_date(date_str)
     ws   = get_or_create(ss, "大盤法人", len(MARKET_FLOW_HEADERS))
@@ -1717,7 +1976,9 @@ def update_market_flow(ss, date_str):
         print("  ⚠️ 大盤法人：今日資料取不到，本次不更新工作表（不影響其他工作表）")
         return
 
-    _cutoff = (datetime.strptime(date_str, "%Y%m%d") - timedelta(days=31)).strftime("%Y/%m/%d")
+    # ★ v11.65 T64：保留期 31→45 天。原 31 天在含假日的月份不到 21 個交易日，
+    #   且補抓只往前找 30 個日曆天，兩者互相抵消（補抓 0 個），連買/連賣天數被截斷
+    _cutoff = (datetime.strptime(date_str, "%Y%m%d") - timedelta(days=MARKET_FLOW_KEEP_DAYS)).strftime("%Y/%m/%d")
     purge_old_rows(ws, _cutoff)
 
     hist = {}   # disp → (外資, 投信, 自營商, 合計)
@@ -1733,10 +1994,10 @@ def update_market_flow(ss, date_str):
     hist[disp] = (today["外資"], today["投信"], today["自營商"], today["合計"])
 
     # 首次累積：往前補抓
-    if len(hist) < 21:
+    if len(hist) < MARKET_FLOW_MIN_DAYS:   # ★ v11.66 27a：補抓目標 21→31 個交易日
         d = datetime.strptime(date_str, "%Y%m%d")
         filled, tried = 0, 0
-        while filled < 10 and tried < 30:
+        while filled < 10 and tried < MARKET_FLOW_KEEP_DAYS:   # ★ v11.65 T64 與保留期一致
             d -= timedelta(days=1)
             tried += 1
             if not _is_trading_day(d):
@@ -1749,7 +2010,7 @@ def update_market_flow(ss, date_str):
             if got:
                 hist[k] = (got["外資"], got["投信"], got["自營商"], got["合計"])
                 filled += 1
-        print(f"  ℹ️ 大盤法人：歷史不足 21 個交易日，本次補抓 {filled} 個（每次最多 10 個，補到 21 日為止）")
+        print(f"  ℹ️ 大盤法人：歷史不足 {MARKET_FLOW_MIN_DAYS} 個交易日，本次補抓 {filled} 個（每次最多 10 個，補到 {MARKET_FLOW_MIN_DAYS} 日為止）")
 
     dates_asc = sorted(hist)
     f_series  = [hist[k][0] for k in dates_asc]
@@ -1758,16 +2019,45 @@ def update_market_flow(ss, date_str):
     def _cell(v):
         return "" if v is None else v
 
+    # ★ v11.65 加權指數均線（失敗不影響法人資料，均線欄留空）
+    try:
+        idx_map = build_index_ma_map(date_str, dates_asc)
+    except Exception as e:
+        print(f"  ⚠️ 加權指數均線計算失敗（不影響其他欄位）：{e}")
+        idx_map = {}
+    _blank_idx = ("",) * 7
+
+    # ★ v11.66 台指期夜盤（失敗不影響其他欄位，夜盤欄留空）
+    try:
+        night_map = build_txf_night_map(date_str, dates_asc)
+    except Exception as e:
+        print(f"  ⚠️ 台指期夜盤計算失敗（不影響其他欄位）：{e}")
+        night_map = {}
+
     rows = []
     for i, k in enumerate(dates_asc):
         ymd = k.replace("/", "")
         rows.append([k, _cell(hist[k][0]), _cell(hist[k][1]), _cell(hist[k][2]), _cell(hist[k][3]),
                      _flow_streak_label(f_series[:i + 1]), _flow_streak_label(t_series[:i + 1]),
-                     MARKET_EVENTS.get(ymd, "")])
+                     MARKET_EVENTS.get(ymd, "")] + list(idx_map.get(k, _blank_idx))
+                    + list(night_map.get(k, ("", "", "", ""))[:3]))
     rows.sort(key=lambda r: r[0], reverse=True)
 
     if not safe_rewrite(ws, [MARKET_FLOW_HEADERS] + rows, label="大盤法人"):
         return
+
+    _ix = idx_map.get(disp)
+    if _ix:
+        _c, _m5, _m20, _m60, _p20, _p60, _st = _ix
+        print(f"  📏 加權指數均線 {disp}：收盤 {_c:,.2f}｜5日線 {_m5 or 'n/a'}｜"
+              f"月線 {_m20 or 'n/a'}（距 {_p20 if _p20 != '' else 'n/a'}%）｜"
+              f"季線 {_m60 or 'n/a'}（距 {_p60 if _p60 != '' else 'n/a'}%）｜{_st or 'n/a'}")
+
+    _nt = night_map.get(disp)
+    if _nt:
+        def _pt(v):
+            return "n/a" if v == "" else f"{v:+,}"
+        print(f"  📏 台指期夜盤 {disp}（指前一晚，近月 {_nt[3]}）：夜盤 {_pt(_nt[0])}｜日盤開盤缺口 {_pt(_nt[1])}｜日盤漲跌 {_pt(_nt[2])}（點，皆相對前日日盤收盤）")
 
     cur = rows[0]
     def _fmt(v):
@@ -2424,7 +2714,7 @@ def calc_market_alert(all_rows, futures_line):
 
     回傳 (level, alert_line, margin_codes, ship_codes)
       level: "red" / "yellow" / "green"
-      margin_codes: [(代號, 名稱, 融資增減張數), ...] 融資異常放大的股票
+      margin_codes: [(代號, 名稱, 融資增減張數), ...] 融資異常增減的股票（先增加後減少，含正負號；v11.65 起只有增加者計分）
       ship_codes:   [(代號, 名稱), ...] 出貨風險🔴高 的股票
     """
     level = "green"
@@ -2443,22 +2733,30 @@ def calc_market_alert(all_rows, futures_line):
             reasons.append(f"外資期貨單日變動 {abs_delta:,} 口")
 
     # 2. 融資增減(張) 異常放大
-    margin_codes = []
+    # ★ v11.65 T65：增、減分開計。只有「增加」（槓桿累積）計入警戒等級；
+    #   「大減」（斷頭/減肥＝去槓桿）只在警訊文字註記、不計分。
+    #   緣起：11/6 資料重算，「異常放大」36 檔中 33 檔是減少，過去等同判為風險並不合理
+    margin_up, margin_down = [], []
     for row in all_rows:
         _mc_raw = _ana_cell(row, "融資增減(張)")
         try:
             health = int(_mc_raw) if str(_mc_raw).strip().lstrip("-").isdigit() else 0
         except (ValueError, TypeError):
             health = 0
-        if abs(health) >= ALERT_MARGIN_HEALTH_ABS:
-            margin_codes.append((_ana_cell(row, "代號"), _ana_cell(row, "股票名稱"), health))
-    n_margin = len(margin_codes)
+        if health >= ALERT_MARGIN_HEALTH_ABS:
+            margin_up.append((_ana_cell(row, "代號"), _ana_cell(row, "股票名稱"), health))
+        elif health <= -ALERT_MARGIN_HEALTH_ABS:
+            margin_down.append((_ana_cell(row, "代號"), _ana_cell(row, "股票名稱"), health))
+    margin_codes = margin_up + margin_down      # 給「警訊」工作表：含正負號，可看出增減
+    n_margin = len(margin_up)
     if n_margin >= ALERT_MARGIN_COUNT_RED:
         level = "red"
-        reasons.append(f"融資異常放大 {n_margin} 檔")
+        reasons.append(f"融資異常放大 {n_margin} 檔（增加）")
     elif n_margin >= ALERT_MARGIN_COUNT_YELLOW:
         level = "yellow" if level != "red" else level
-        reasons.append(f"融資異常放大 {n_margin} 檔")
+        reasons.append(f"融資異常放大 {n_margin} 檔（增加）")
+    if len(margin_down) >= ALERT_MARGIN_COUNT_YELLOW:
+        reasons.append(f"融資大減 {len(margin_down)} 檔（去槓桿，不計分）")
 
     # 3. 出貨風險🔴高 檔數
     ship_codes = [(_ana_cell(row, "代號"), _ana_cell(row, "股票名稱")) for row in all_rows
@@ -2525,6 +2823,10 @@ def safe_rewrite(ws, values, label=None, max_retries=5, base_wait=20):
             ws.clear()
             if ws.row_count < len(values) + 10:
                 ws.add_rows(len(values) + 10 - ws.row_count)
+            # ★ v11.65 欄數也要夠：「大盤法人」由 8 欄擴為 15 欄，舊工作表欄數不足會被 Sheets 拒絕（exceeds grid limits）
+            _need_cols = max((len(r) for r in values), default=0)
+            if _need_cols and ws.col_count < _need_cols:
+                ws.add_cols(_need_cols - ws.col_count)
             ws.update(range_name="A1", values=values)
             return True
         except Exception as e:
@@ -4559,6 +4861,12 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
             r2[REC_IDX["評分公式版本"]] = "v2"
             v2_only.append((v2_score, r2))
             _seen_v2_only.add(code_)
+
+    # ★ v11.65 個股月線：只替最終入選的列（主榜、觀察組、v2限定候選，約 15 檔）附加月線位置文字
+    try:
+        attach_ma20_suffix([r for _, r in top5] + [r for _, r in watch5] + [r2 for _, r2 in v2_only], date_str)
+    except Exception as e:
+        print(f"  ⚠️ 個股月線附加失敗（不影響推薦）：{e}")
 
     n_cols = len(RECOMMEND_HEADERS)
     ws = get_or_create(ss, "明日關注", n_cols)
