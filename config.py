@@ -98,12 +98,18 @@ FUTURES_DELTA_PER_DOT = 3000    # 較前日變化每幾口一顆燈（最多 5 �
 MARKET_FLOW_KEEP_DAYS = 50    # ★ v11.66 由 45 改 50，容納 31 個交易日（含假日約 45~47 個日曆天）
 MARKET_FLOW_MIN_DAYS  = 31    # ★ v11.66 歷史補抓目標（交易日），原 21；連買連賣「+」截斷改為 31 日才發生
 # ★ v11.65 加權指數均線：往前抓幾個月 FMTQIK（季線 60 日 + 大盤法人 45 天的歷史列，6 個月夠用）
-INDEX_MA_MONTHS = 6
+# ★ v11.69 T54：上櫃行情（約 5～6 MB）下載時限（秒），原 20 秒會被切斷造成 JSON 不完整
+OTC_FETCH_MAX_TIME = 60
+INDEX_MA_MONTHS = 14   # ★ v11.68 由 6 改 14：年線 240 日 + 大盤法人約 31 個交易日的歷史列 ≈ 270 個交易日 ≈ 13 個月，14 個月夠用（每月一次呼叫、間隔 1.5 秒，約 21 秒）
 
 # 2. 融資健康度異常放大：單股「融資健康度」數值絕對值 ≥ 此門檻，視為異常放大
 ALERT_MARGIN_HEALTH_ABS     = 1500
-ALERT_MARGIN_COUNT_YELLOW   = 2   # 異常放大檔數達此數 → 🟡
-ALERT_MARGIN_COUNT_RED      = 4   # 達此數 → 🔴
+# ★ v11.67（T43）：融資「增加」檔數門檻 2/4 → 5/8，並排除 ETF。
+#   依據：融資歷史標籤日 10/15～11/11 共 16 個全樣本日，不含 ETF 的增加≥1500 檔數 中位 4.5、P75 7、P90 8、最大 9
+#   （≥5 約 50% 的日子、≥8 約 12.5%）；含 ETF 則幾乎天天超過 4。累積約 2 週新口徑樣本後再校準。
+ALERT_MARGIN_COUNT_YELLOW   = 5   # 融資增加檔數達此數 → 🟡
+ALERT_MARGIN_COUNT_RED      = 8   # 達此數 → 🔴
+ALERT_MARGIN_EXCLUDE_ETF    = True  # 融資計數排除 ETF
 
 # 3. 出貨風險🔴高 檔數（本次執行的 all_rows 中）
 ALERT_SHIP_RISK_COUNT_YELLOW = 2

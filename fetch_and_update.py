@@ -19,7 +19,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.66"  # ← 每次 commit 只改這裡
+VERSION = "v11.71"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -51,10 +51,12 @@ try:
     FUTURES_DELTA_PER_DOT        = getattr(_cfg, "FUTURES_DELTA_PER_DOT", 3000)   # ★ v11.64 較前日變化每幾口一顆燈
     MARKET_FLOW_KEEP_DAYS        = getattr(_cfg, "MARKET_FLOW_KEEP_DAYS", 50)     # ★ v11.65 大盤法人保留天數（v11.66：45→50，容納 31 個交易日）
     MARKET_FLOW_MIN_DAYS         = getattr(_cfg, "MARKET_FLOW_MIN_DAYS", 31)      # ★ v11.66 大盤法人歷史補抓目標（交易日，原 21）
-    INDEX_MA_MONTHS              = getattr(_cfg, "INDEX_MA_MONTHS", 6)            # ★ v11.65 加權指數均線往前抓幾個月 FMTQIK
+    OTC_FETCH_MAX_TIME           = getattr(_cfg, "OTC_FETCH_MAX_TIME", 60)        # ★ v11.69 T54 上櫃行情下載時限（秒，原 20）
+    INDEX_MA_MONTHS              = getattr(_cfg, "INDEX_MA_MONTHS", 14)           # ★ v11.65 加權指數均線往前抓幾個月 FMTQIK（v11.68：6→14，年線需 240 日）
     ALERT_MARGIN_HEALTH_ABS      = getattr(_cfg, "ALERT_MARGIN_HEALTH_ABS", 1500)
-    ALERT_MARGIN_COUNT_YELLOW    = getattr(_cfg, "ALERT_MARGIN_COUNT_YELLOW", 2)
-    ALERT_MARGIN_COUNT_RED       = getattr(_cfg, "ALERT_MARGIN_COUNT_RED", 4)
+    ALERT_MARGIN_COUNT_YELLOW    = getattr(_cfg, "ALERT_MARGIN_COUNT_YELLOW", 5)   # ★ v11.67 原 2（排除 ETF 後依 16 日分布重估）
+    ALERT_MARGIN_COUNT_RED       = getattr(_cfg, "ALERT_MARGIN_COUNT_RED", 8)      # ★ v11.67 原 4
+    ALERT_MARGIN_EXCLUDE_ETF     = getattr(_cfg, "ALERT_MARGIN_EXCLUDE_ETF", True) # ★ v11.67 融資計數排除 ETF
     ALERT_SHIP_RISK_COUNT_YELLOW = getattr(_cfg, "ALERT_SHIP_RISK_COUNT_YELLOW", 2)
     ALERT_SHIP_RISK_COUNT_RED    = getattr(_cfg, "ALERT_SHIP_RISK_COUNT_RED", 4)
     ALERT_COLOR = getattr(_cfg, "ALERT_COLOR", {
@@ -94,10 +96,12 @@ except ImportError:
     FUTURES_DELTA_PER_DOT        = 3000
     MARKET_FLOW_KEEP_DAYS        = 50
     MARKET_FLOW_MIN_DAYS         = 31
-    INDEX_MA_MONTHS              = 6
+    INDEX_MA_MONTHS              = 14
+    OTC_FETCH_MAX_TIME           = 60
     ALERT_MARGIN_HEALTH_ABS      = 1500
-    ALERT_MARGIN_COUNT_YELLOW    = 2
-    ALERT_MARGIN_COUNT_RED       = 4
+    ALERT_MARGIN_COUNT_YELLOW    = 5
+    ALERT_MARGIN_COUNT_RED       = 8
+    ALERT_MARGIN_EXCLUDE_ETF     = True
     ALERT_SHIP_RISK_COUNT_YELLOW = 2
     ALERT_SHIP_RISK_COUNT_RED    = 4
     ALERT_COLOR = {
@@ -136,16 +140,22 @@ CODE_TO_SECTOR = {}   # 在 main() 初始化後重建
 # curl 工具
 # ═══════════════════════════════════════════════
 
-def curl_get(url):
+def curl_get(url, max_time=20):
+    """
+    ★ v11.69 T54：①加 --compressed，降低大型回應（上櫃行情約 5～6 MB）被時限切斷的機率
+                  ②改以位元組取回再寬鬆解碼：回應斷在多位元組字元中間時不再丟 UnicodeDecodeError
+                    （2026/11/13 該例外衝出 Step 2 的 try，使當天所有股票價格空白）
+                  ③時限可由呼叫端調高（上櫃用 OTC_FETCH_MAX_TIME）
+    """
     result = subprocess.run([
-        "curl", "-s", "--max-time", "20",
+        "curl", "-s", "--compressed", "--max-time", str(max_time),
         "-c", COOKIE_FILE, "-b", COOKIE_FILE,
         "-H", "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "-H", "Referer: https://www.twse.com.tw/zh/trading/foreign/t86.html",
         "-H", "Accept: application/json, text/plain, */*",
         url
-    ], capture_output=True, text=True)
-    return result.stdout.strip()
+    ], capture_output=True)
+    return result.stdout.decode("utf-8", errors="replace").strip()
 
 def warm_up_cookie():
     subprocess.run([
@@ -493,7 +503,11 @@ def fetch_price_map_otc(date_str):
             time.sleep(3)
 
         print(f"  [otc] 抓取上櫃行情（{date_str}）{'（重試）' if attempt > 1 else ''}...")
-        text = curl_get(url)
+        try:
+            text = curl_get(url, max_time=OTC_FETCH_MAX_TIME)   # ★ v11.69 T54：納入 try、時限 60 秒
+        except Exception as e:
+            print(f"  [otc] ❌ 下載失敗：{e}")
+            continue
         if not text or text.startswith("<") or text.startswith("Host"):
             print("  [otc] ❌ 無回應")
             continue
@@ -976,13 +990,15 @@ def fetch_index_closes(date_str, months=None):
 def build_index_ma_map(date_str, dates_disp):
     """
     為「大盤法人」每個日期算加權指數均線。
-    回傳 {disp: (加權收盤, 5日線, 月線(20日), 季線(60日), 距月線%, 距季線%, 均線狀態)}；
+    回傳 {disp: (加權收盤, 5日線, 月線(20日), 季線(60日), 距月線%, 距季線%, 均線狀態, 年線(240日), 距年線%)}；
+    （★ v11.68 新增最後兩項：年線與距年線%；前 7 項順序不變）
     該日沒有指數資料或歷史不足的欄位留空字串。完全抓不到時回傳 {}。
     """
     closes = fetch_index_closes(date_str)
     if not closes:
         print("  ⚠️ 加權指數均線：FMTQIK 取不到，本次均線欄留空")
         return {}
+    _INDEX_CLOSES[date_str] = closes      # ★ v11.69 技術面共用
     ks = sorted(closes)
     out = {}
     for k in dates_disp:
@@ -990,38 +1006,50 @@ def build_index_ma_map(date_str, dates_disp):
             continue
         vals = [closes[x] for x in ks if x <= k]
         c = vals[-1]
-        ma5, ma20, ma60 = _sma(vals, 5), _sma(vals, 20), _sma(vals, 60)
+        ma5, ma20, ma60, ma240 = _sma(vals, 5), _sma(vals, 20), _sma(vals, 60), _sma(vals, 240)
         pct20 = round((c / ma20 - 1) * 100, 2) if ma20 else ""
         pct60 = round((c / ma60 - 1) * 100, 2) if ma60 else ""
+        pct240 = round((c / ma240 - 1) * 100, 2) if ma240 else ""
         out[k] = (c, ma5 if ma5 else "", ma20 if ma20 else "", ma60 if ma60 else "",
-                  pct20, pct60, ma_position_label(c, ma5, ma20))
+                  pct20, pct60, ma_position_label(c, ma5, ma20),
+                  ma240 if ma240 else "", pct240)
     return out
 
 
-def fetch_stock_closes(code, date_str):
-    """近兩個月個股收盤（舊→新）的 [(YYYY/MM/DD, close), ...]，只含 date_str（含）以前；失敗回傳 []。"""
+_STOCK_CLOSE_CACHE = {}   # (code, date_str, months) → [(date, close), ...]；同一次執行內月線與 MACD 共用，免重複打 API
+_TECH_QUEUE = []          # 本次入選推薦股的技術面資料（attach_ma20_suffix 填，update_technical_sheet 讀）
+_INDEX_CLOSES = {}        # date_str → {YYYY/MM/DD: 加權收盤}（build_index_ma_map 填，技術面共用）
+STOCK_CLOSE_MONTHS = 4    # ★ v11.71 個股收盤抓 4 個月（約 70 個交易日；v11.69 抓 3 個月實際只有約 49 個交易日，個股季線與 60 日均線排列為空）
+
+
+def fetch_stock_closes(code, date_str, months=STOCK_CLOSE_MONTHS):
+    """近 months 個月個股收盤（舊→新）的 [(YYYY/MM/DD, close), ...]，只含 date_str（含）以前；失敗回傳 []。"""
+    key = (code, date_str, months)
+    if key in _STOCK_CLOSE_CACHE:
+        return _STOCK_CLOSE_CACHE[key]
     d0 = datetime.strptime(date_str, "%Y%m%d")
     target = d0.strftime("%Y/%m/%d")
     closes = {}
-    for dd in (d0, d0.replace(day=1) - timedelta(days=1)):
+    dd = d0
+    for _ in range(months):
         rows, src = _fetch_stock_day_rows(code, dd.strftime("%Y%m%d"))
-        if not rows:
-            continue
-        ci = 2 if src == "tpex" else 6
-        for row in rows:
-            try:
-                y, m, d = str(row[0]).strip().split("/")
-                closes[f"{int(y) + 1911:04d}/{int(m):02d}/{int(d):02d}"] = float(str(row[ci]).replace(",", ""))
-            except Exception:
-                continue
-    return [(k, closes[k]) for k in sorted(closes) if k <= target]
+        if rows:
+            ci = 2 if src == "tpex" else 6
+            for row in rows:
+                try:
+                    y, m, d = str(row[0]).strip().split("/")
+                    closes[f"{int(y) + 1911:04d}/{int(m):02d}/{int(d):02d}"] = float(str(row[ci]).replace(",", ""))
+                except Exception:
+                    continue
+        dd = dd.replace(day=1) - timedelta(days=1)     # 上一個月（取該月最後一天，API 以月份為單位）
+    out = [(k, closes[k]) for k in sorted(closes) if k <= target]
+    if out:
+        _STOCK_CLOSE_CACHE[key] = out
+    return out
 
 
-def stock_ma20_suffix(code, date_str, price):
-    """
-    個股月線說明文字，例：「｜月線 52.3（-4.1%）反彈未達月線」；資料不足 20 日或失敗回傳空字串。
-    現價（price）當作今日收盤；若 STOCK_DAY 尚未含今日，補在最後。
-    """
+def _stock_vals(code, date_str, price):
+    """個股近 3 個月收盤序列（舊→新）；現價 price 當作今日收盤，STOCK_DAY 尚未含今日時補在最後。"""
     series = fetch_stock_closes(code, date_str)
     vals = [c for _, c in series]
     target = datetime.strptime(date_str, "%Y%m%d").strftime("%Y/%m/%d")
@@ -1029,6 +1057,15 @@ def stock_ma20_suffix(code, date_str, price):
         vals.append(price)
     elif price and series and series[-1][0] == target:
         vals[-1] = price
+    return vals
+
+
+def stock_ma20_suffix(code, date_str, price):
+    """
+    個股月線說明文字，例：「｜月線 52.3（-4.1%）反彈未達月線」；資料不足 20 日或失敗回傳空字串。
+    現價（price）當作今日收盤；若 STOCK_DAY 尚未含今日，補在最後。
+    """
+    vals = _stock_vals(code, date_str, price)
     ma20, ma5 = _sma(vals, 20), _sma(vals, 5)
     if not ma20 or not price:
         return ""
@@ -1036,22 +1073,261 @@ def stock_ma20_suffix(code, date_str, price):
     return f"｜月線 {ma20:.1f}（{pct:+.1f}%）{ma_position_label(price, ma5, ma20, short=True)}"
 
 
-def attach_ma20_suffix(rec_rows, date_str):
-    """替推薦列（主榜、觀察組、v2限定候選）的「推薦買進價位」文字尾端加月線說明；只改顯示文字，數字欄不動。"""
+def attach_ma20_suffix(rec_rows, date_str, labels=None):
+    """
+    替推薦列（主榜、觀察組、v2限定候選）的「推薦買進價位」文字尾端加月線說明；只改顯示文字，數字欄不動。
+    ★ v11.69：同時把每檔的近 3 個月收盤放進 _TECH_QUEUE，供「技術面」工作表（MACD）使用；
+      labels 為各列對應的組別名稱（與 rec_rows 等長）。
+    """
+    _TECH_QUEUE.clear()
     ok = 0
-    for r in rec_rows:
+    for n, r in enumerate(rec_rows):
         try:
+            code = str(r[REC_IDX["代號"]])
+            price = _to_pos_float(r[REC_IDX["現價"]])
+            vals = _stock_vals(code, date_str, price)
+            if vals:
+                _TECH_QUEUE.append({"date": date_str, "group": labels[n] if labels else "",
+                                    "code": code, "name": r[REC_IDX["股票名稱"]], "vals": vals})
             label = r[REC_IDX["推薦買進價位"]]
             if label in ("", "-", None):
                 continue
-            price = _to_pos_float(r[REC_IDX["現價"]])
-            suf = stock_ma20_suffix(str(r[REC_IDX["代號"]]), date_str, price)
+            suf = stock_ma20_suffix(code, date_str, price)
             if suf:
                 r[REC_IDX["推薦買進價位"]] = f"{label} {suf}"
                 ok += 1
         except Exception as e:
             print(f"  ⚠️ 月線計算失敗（{r[REC_IDX['代號']]}）：{e}")
     print(f"  📏 個股月線：{ok}/{len(rec_rows)} 檔已附加月線位置")
+
+
+# ═══════════════════════════════════════════════
+# ★ v11.69 技術面（獨立工作表「技術面」）：MACD(12,26,9)
+#   EMA 以第一筆為種子、遞迴 ema = x·k + ema·(1−k)，k = 2/(n+1)（與 pandas ewm(span=n, adjust=False) 相同）
+#   DIF = EMA12 − EMA26；訊號線 MACD = DIF 的 9 日 EMA；柱狀體 = DIF − MACD
+#   至少 35 筆收盤（26 + 9）才計算，不足留空
+# ═══════════════════════════════════════════════
+
+def _ema(xs, n):
+    k = 2.0 / (n + 1)
+    e = xs[0]
+    out = [e]
+    for x in xs[1:]:
+        e = x * k + e * (1 - k)
+        out.append(e)
+    return out
+
+
+def calc_macd(vals, fast=12, slow=26, sig=9):
+    """回傳 (dif, macd, osc) 三個等長序列；筆數不足 slow+sig 回傳 None。"""
+    if len(vals) < slow + sig:
+        return None
+    e_f, e_s = _ema(vals, fast), _ema(vals, slow)
+    dif = [a - b for a, b in zip(e_f, e_s)]
+    macd = _ema(dif, sig)
+    osc = [d - m for d, m in zip(dif, macd)]
+    return dif, macd, osc
+
+
+def macd_signals(dif, macd, osc):
+    """回傳 (零軸, 交叉訊號, 柱狀體趨勢) 三個說明文字。"""
+    zero = "零軸上" if dif[-1] > 0 else "零軸下"
+    cross = "無"
+    n = len(osc)
+    for j in range(n - 1, max(n - 4, 0), -1):          # 最近 3 根內是否發生過交叉
+        if osc[j - 1] <= 0 < osc[j]:
+            cross = "黃金交叉（今日）" if j == n - 1 else f"黃金交叉（{n - 1 - j}日前）"
+            break
+        if osc[j - 1] >= 0 > osc[j]:
+            cross = "死亡交叉（今日）" if j == n - 1 else f"死亡交叉（{n - 1 - j}日前）"
+            break
+    cur, prev = osc[-1], osc[-2]
+    if cur > 0:
+        trend = "紅柱放大" if cur > prev else "紅柱縮短"
+    else:
+        trend = "綠柱縮短" if cur > prev else "綠柱放大"
+    return zero, cross, trend
+
+
+# ── ★ v11.70 布林通道、均線排列、RSI（只用收盤，零額外 API）──────────────────
+#   布林通道(20,2)：中軌＝20 日均線（月線）、標準差用母體（除以 N），%b＝(收盤−下軌)/(上軌−下軌)；
+#     通道位置：%b>1 突破上軌｜≥0.8 靠近上軌｜<0 跌破下軌｜≤0.2 靠近下軌｜其餘通道中段；
+#     通道趨勢：通道寬度%（(上−下)/中×100）與 5 個交易日前相比，>+10% 擴張、<−10% 收斂、其餘持平
+#   均線排列：以 5/10/20/60 日均線（收盤不足 60 日時只用 5/10/20）；
+#     最高與最低均線差距 ≤ 收盤 3% → 均線糾結；5>10>20(>60) → 多頭排列；5<10<20(<60) → 空頭排列；其餘均線交錯
+#   RSI(14)：Wilder 平滑（前 14 根變動取簡單平均當種子，之後 (前值×13+今值)/14）；
+#     ≥70 超買｜≤30 超賣｜50~70 偏多｜30~50 偏弱
+
+def calc_bollinger(vals, n=20, k=2):
+    """回傳 (中軌, 上軌, 下軌, %b, 通道寬度%, 5日前通道寬度%)；收盤不足 n 筆回傳 None。"""
+    if len(vals) < n:
+        return None
+
+    def _at(end):
+        w = vals[end - n:end]
+        mid = sum(w) / n
+        sd = (sum((x - mid) ** 2 for x in w) / n) ** 0.5
+        return mid, mid + k * sd, mid - k * sd
+
+    mid, up, lo = _at(len(vals))
+    price = vals[-1]
+    pb = (price - lo) / (up - lo) if up > lo else None
+    bw = (up - lo) / mid * 100 if mid else None
+    bw_prev = None
+    if len(vals) >= n + 5:
+        m2, u2, l2 = _at(len(vals) - 5)
+        bw_prev = (u2 - l2) / m2 * 100 if m2 else None
+    return mid, up, lo, pb, bw, bw_prev
+
+
+def bollinger_labels(pb, bw, bw_prev):
+    """回傳 (通道位置, 通道趨勢) 說明文字。"""
+    if pb is None:
+        pos = ""
+    elif pb > 1:
+        pos = "突破上軌"
+    elif pb >= 0.8:
+        pos = "靠近上軌"
+    elif pb < 0:
+        pos = "跌破下軌"
+    elif pb <= 0.2:
+        pos = "靠近下軌"
+    else:
+        pos = "通道中段"
+    trend = ""
+    if bw and bw_prev:
+        ratio = bw / bw_prev
+        trend = "擴張" if ratio > 1.1 else ("收斂" if ratio < 0.9 else "持平")
+    return pos, trend
+
+
+def ma_alignment(vals):
+    """回傳 (均線排列說明, 10日線, 60日線)；收盤不足 20 筆時說明為空字串。"""
+    ma5, ma10, ma20, ma60 = _sma(vals, 5), _sma(vals, 10), _sma(vals, 20), _sma(vals, 60)
+    if not (ma5 and ma10 and ma20):
+        return "", ma10, ma60
+    mas = [ma5, ma10, ma20] + ([ma60] if ma60 else [])
+    tag = "5/10/20/60" if ma60 else "5/10/20"
+    spread = (max(mas) - min(mas)) / vals[-1] * 100
+    if spread <= 3:
+        label = "均線糾結"
+    elif all(a > b for a, b in zip(mas, mas[1:])):
+        label = "多頭排列"
+    elif all(a < b for a, b in zip(mas, mas[1:])):
+        label = "空頭排列"
+    else:
+        label = "均線交錯"
+    return f"{label}（{tag}）", ma10, ma60
+
+
+def calc_rsi(vals, n=14):
+    """RSI(n)，Wilder 平滑；收盤不足 n+1 筆回傳 None。"""
+    if len(vals) < n + 1:
+        return None
+    ch = [vals[i] - vals[i - 1] for i in range(1, len(vals))]
+    gains = [max(c, 0.0) for c in ch]
+    losses = [max(-c, 0.0) for c in ch]
+    ag, al = sum(gains[:n]) / n, sum(losses[:n]) / n
+    for g, l in zip(gains[n:], losses[n:]):
+        ag = (ag * (n - 1) + g) / n
+        al = (al * (n - 1) + l) / n
+    if al == 0:
+        return 100.0
+    return 100.0 - 100.0 / (1.0 + ag / al)
+
+
+def rsi_label(r):
+    if r is None:
+        return ""
+    if r >= 70:
+        return "超買"
+    if r <= 30:
+        return "超賣"
+    return "偏多" if r >= 50 else "偏弱"
+
+
+TECH_HEADERS = ["日期", "組別", "代號", "名稱", "現價", "5日線", "月線(20日)", "距月線%", "均線位置",
+                "DIF", "MACD(訊號)", "柱狀體", "零軸", "交叉訊號", "柱狀體趨勢", "資料天數",
+                # ★ v11.70 新增（放最右側，不動既有欄位順序）
+                "10日線", "季線(60日)", "均線排列", "布林上軌", "布林下軌", "%b", "通道寬度%", "通道位置", "通道趨勢",
+                "RSI(14)", "RSI狀態"]
+
+
+def _tech_row(date_disp, group, code, name, vals):
+    price = vals[-1]
+    ma5, ma20 = _sma(vals, 5), _sma(vals, 20)
+    pct = round((price / ma20 - 1) * 100, 2) if ma20 else ""
+    md = calc_macd(vals)
+    if md:
+        dif, macd, osc = md
+        zero, cross, trend = macd_signals(dif, macd, osc)
+        tail = [round(dif[-1], 3), round(macd[-1], 3), round(osc[-1], 3), zero, cross, trend]
+    else:
+        tail = ["", "", "", "", "資料不足(<35日)", ""]
+    align, ma10, ma60 = ma_alignment(vals)
+    bb = calc_bollinger(vals)
+    if bb:
+        _, up, lo, pb, bw, bw_prev = bb
+        pos, btrend = bollinger_labels(pb, bw, bw_prev)
+        bb_cells = [round(up, 2), round(lo, 2), round(pb, 2) if pb is not None else "",
+                    round(bw, 2) if bw is not None else "", pos, btrend]
+    else:
+        bb_cells = ["", "", "", "", "", ""]
+    rsi = calc_rsi(vals)
+    return ([date_disp, group, code, name, price, ma5 or "", ma20 or "", pct,
+             ma_position_label(price, ma5, ma20)] + tail + [len(vals)]
+            + [ma10 or "", ma60 or "", align] + bb_cells
+            + [round(rsi, 1) if rsi is not None else "", rsi_label(rsi)])
+
+
+def update_technical_sheet(ss, date_str):
+    """
+    寫入「技術面」工作表：大盤（加權指數）＋本次入選的推薦股（主榜、觀察組、v2限定候選）。
+    每個日期保留一份（重跑當日覆蓋），保留 MARKET_FLOW_KEEP_DAYS 天，最新在最上面。
+    需先跑過「明日關注推薦」（填 _TECH_QUEUE）與「大盤法人」（填 _INDEX_CLOSES）；缺哪一邊就略過那一邊。
+    """
+    import re as _re
+    date_disp = fmt_date(date_str)
+    rows = []
+
+    closes = _INDEX_CLOSES.get(date_str)
+    if not closes:
+        try:
+            closes = fetch_index_closes(date_str, months=5)
+        except Exception as e:
+            print(f"  ⚠️ 技術面：加權指數取不到（{e}），略過大盤列")
+            closes = {}
+    if closes and date_disp in closes:
+        vals = [closes[k] for k in sorted(closes) if k <= date_disp]
+        rows.append(_tech_row(date_disp, "大盤", "TAIEX", "加權指數", vals))
+
+    stock_rows = [_tech_row(date_disp, q["group"], q["code"], q["name"], q["vals"])
+                  for q in _TECH_QUEUE if q["date"] == date_str]
+    rows += stock_rows
+    if not rows:
+        print("  ⚠️ 技術面：沒有可寫入的資料（今天尚未產生推薦、也取不到大盤），略過")
+        return
+
+    ws = get_or_create(ss, "技術面", len(TECH_HEADERS))
+    _cutoff = (datetime.strptime(date_str, "%Y%m%d") - timedelta(days=MARKET_FLOW_KEEP_DAYS)).strftime("%Y/%m/%d")
+    purge_old_rows(ws, _cutoff)
+    old = [r for r in ws.get_all_values() if r and _re.match(r"\d{4}/\d{2}/\d{2}$", str(r[0]).strip())]
+    keep = [list(r) + [""] * (len(TECH_HEADERS) - len(r)) for r in old if r[0].strip() != date_disp]   # ★ v11.70 舊 16 欄列補空欄
+    if not safe_rewrite(ws, [TECH_HEADERS] + rows + keep, label="技術面"):
+        return
+    gold = [r[3] for r in stock_rows if str(r[13]).startswith("黃金交叉")]
+    dead = [r[3] for r in stock_rows if str(r[13]).startswith("死亡交叉")]
+    _i_pos, _i_rsi = TECH_HEADERS.index("通道位置"), TECH_HEADERS.index("RSI狀態")
+    up_names = [r[3] for r in stock_rows if r[_i_pos] in ("突破上軌", "靠近上軌")]
+    dn_names = [r[3] for r in stock_rows if r[_i_pos] in ("跌破下軌", "靠近下軌")]
+    ob_names = [r[3] for r in stock_rows if r[_i_rsi] == "超買"]
+    os_names = [r[3] for r in stock_rows if r[_i_rsi] == "超賣"]
+    mk = rows[0] if rows[0][1] == "大盤" else None
+    mk_txt = f"大盤 {mk[12]}、{mk[13]}、{mk[14]}" if mk and mk[9] != "" else "大盤 資料不足"
+    print(f"  ✅ 技術面 {date_disp}：{mk_txt}｜推薦股 {len(stock_rows)} 檔"
+          f"｜黃金交叉：{('、'.join(gold)) or '無'}｜死亡交叉：{('、'.join(dead)) or '無'}")
+    print(f"     布林上軌附近：{('、'.join(up_names)) or '無'}｜下軌附近：{('、'.join(dn_names)) or '無'}"
+          f"｜RSI 超買：{('、'.join(ob_names)) or '無'}｜超賣：{('、'.join(os_names)) or '無'}")
 
 
 # ═══════════════════════════════════════════════
@@ -1887,7 +2163,9 @@ MARKET_FLOW_HEADERS = ["日期", "外資買賣超(億)", "投信買賣超(億)",
                        # ★ v11.65 加權指數均線（右側新增欄，不影響前 8 欄的既有讀取）
                        "加權收盤", "5日線", "月線(20日)", "季線(60日)", "距月線%", "距季線%", "均線狀態",
                        # ★ v11.66 台指期夜盤（近月；皆相對前一營業日日盤收盤；夜盤＝該日之前那一晚）
-                       "夜盤漲跌(點)", "日盤開盤缺口(點)", "日盤漲跌(點)"]
+                       "夜盤漲跌(點)", "日盤開盤缺口(點)", "日盤漲跌(點)",
+                       # ★ v11.68 年線（240 日；放最右側，不動前面既有欄位順序）
+                       "年線(240日)", "距年線%"]
 
 
 def fetch_market_institutional(date_str):
@@ -1993,6 +2271,26 @@ def update_market_flow(ss, date_str):
         hist[r[0]] = tuple(_flow_num(x) for x in r[1:5])
     hist[disp] = (today["外資"], today["投信"], today["自營商"], today["合計"])
 
+    # ★ v11.71 T71（45a）：重抓前一個交易日，修正證交所事後更正的數字
+    #   （例：11/13 投信 18:00 為 +82.4 億，之後 BFI82U 更正為 +95.4 億，合計 439.7→452.7 億）
+    _prev = max((k for k in hist if k < disp), default=None)
+    if _prev:
+        time.sleep(1.5)
+        _got = fetch_market_institutional(_prev.replace("/", ""))
+        if _got:
+            _new = (_got["外資"], _got["投信"], _got["自營商"], _got["合計"])
+            _old = hist[_prev]
+            _chg = [(n, o, v) for n, o, v in zip(("外資", "投信", "自營商", "合計"), _old, _new)
+                    if v is not None and (o is None or abs(o - v) >= 0.005)]
+            if _chg:
+                hist[_prev] = tuple(v if v is not None else o for o, v in zip(_old, _new))
+                print(f"  ↻ 大盤法人：前一交易日 {_prev} 已被證交所更正，已改寫："
+                      + "、".join(f"{n} {o if o is not None else 'n/a'}→{v}億" for n, o, v in _chg))
+            else:
+                print(f"  ✓ 大盤法人：前一交易日 {_prev} 重抓核對，數字未變")
+        else:
+            print(f"  ⚠️ 大盤法人：前一交易日 {_prev} 重抓失敗，沿用原值")
+
     # 首次累積：往前補抓
     if len(hist) < MARKET_FLOW_MIN_DAYS:   # ★ v11.66 27a：補抓目標 21→31 個交易日
         d = datetime.strptime(date_str, "%Y%m%d")
@@ -2025,7 +2323,7 @@ def update_market_flow(ss, date_str):
     except Exception as e:
         print(f"  ⚠️ 加權指數均線計算失敗（不影響其他欄位）：{e}")
         idx_map = {}
-    _blank_idx = ("",) * 7
+    _blank_idx = ("",) * 9
 
     # ★ v11.66 台指期夜盤（失敗不影響其他欄位，夜盤欄留空）
     try:
@@ -2039,8 +2337,9 @@ def update_market_flow(ss, date_str):
         ymd = k.replace("/", "")
         rows.append([k, _cell(hist[k][0]), _cell(hist[k][1]), _cell(hist[k][2]), _cell(hist[k][3]),
                      _flow_streak_label(f_series[:i + 1]), _flow_streak_label(t_series[:i + 1]),
-                     MARKET_EVENTS.get(ymd, "")] + list(idx_map.get(k, _blank_idx))
-                    + list(night_map.get(k, ("", "", "", ""))[:3]))
+                     MARKET_EVENTS.get(ymd, "")] + list(idx_map.get(k, _blank_idx)[:7])
+                    + list(night_map.get(k, ("", "", "", ""))[:3])
+                    + list(idx_map.get(k, _blank_idx)[7:9]))
     rows.sort(key=lambda r: r[0], reverse=True)
 
     if not safe_rewrite(ws, [MARKET_FLOW_HEADERS] + rows, label="大盤法人"):
@@ -2048,10 +2347,11 @@ def update_market_flow(ss, date_str):
 
     _ix = idx_map.get(disp)
     if _ix:
-        _c, _m5, _m20, _m60, _p20, _p60, _st = _ix
+        _c, _m5, _m20, _m60, _p20, _p60, _st, _m240, _p240 = _ix
         print(f"  📏 加權指數均線 {disp}：收盤 {_c:,.2f}｜5日線 {_m5 or 'n/a'}｜"
               f"月線 {_m20 or 'n/a'}（距 {_p20 if _p20 != '' else 'n/a'}%）｜"
-              f"季線 {_m60 or 'n/a'}（距 {_p60 if _p60 != '' else 'n/a'}%）｜{_st or 'n/a'}")
+              f"季線 {_m60 or 'n/a'}（距 {_p60 if _p60 != '' else 'n/a'}%）｜"
+              f"年線 {_m240 or 'n/a'}（距 {_p240 if _p240 != '' else 'n/a'}%）｜{_st or 'n/a'}")
 
     _nt = night_map.get(disp)
     if _nt:
@@ -2737,7 +3037,11 @@ def calc_market_alert(all_rows, futures_line):
     #   「大減」（斷頭/減肥＝去槓桿）只在警訊文字註記、不計分。
     #   緣起：11/6 資料重算，「異常放大」36 檔中 33 檔是減少，過去等同判為風險並不合理
     margin_up, margin_down = [], []
+    # ★ v11.67 T43（30a）：槓桿／反向 ETF 的融資增減不代表個股槓桿（如 00685L +32,643、00632R −48,662），
+    #   預設排除 ETF（is_etf_code）；門檻依「融資歷史」16 個全樣本日重估（不含 ETF：增加檔數中位 4.5、P90 8）
     for row in all_rows:
+        if ALERT_MARGIN_EXCLUDE_ETF and is_etf_code(_ana_cell(row, "代號")):
+            continue
         _mc_raw = _ana_cell(row, "融資增減(張)")
         try:
             health = int(_mc_raw) if str(_mc_raw).strip().lstrip("-").isdigit() else 0
@@ -4864,7 +5168,9 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
 
     # ★ v11.65 個股月線：只替最終入選的列（主榜、觀察組、v2限定候選，約 15 檔）附加月線位置文字
     try:
-        attach_ma20_suffix([r for _, r in top5] + [r for _, r in watch5] + [r2 for _, r2 in v2_only], date_str)
+        _ma_pairs = ([("主榜", r) for _, r in top5] + [("觀察組", r) for _, r in watch5]
+                     + [("v2限定候選", r2) for _, r2 in v2_only])
+        attach_ma20_suffix([r for _, r in _ma_pairs], date_str, labels=[g for g, _ in _ma_pairs])
     except Exception as e:
         print(f"  ⚠️ 個股月線附加失敗（不影響推薦）：{e}")
 
@@ -6176,9 +6482,18 @@ def main():
             try:
                 # 先抓全市場 batch，賣超和買超共用，不重打 API
                 sell_price_map = {}
-                _step2_batch, amp_map = fetch_price_map_batch(date_str)  # ★ v11.21
+                # ★ v11.69 T54：上市、上櫃各自 try，任一失敗不中止後面的 enrich_with_prices()
+                #   （上櫃缺的由 Step 4 保底補抓；2026/11/13 曾因上櫃例外使所有股票價格空白）
+                try:
+                    _step2_batch, amp_map = fetch_price_map_batch(date_str)  # ★ v11.21
+                except Exception as e:
+                    print(f"  ⚠️ 上市行情抓取失敗，已略過：{e}")
+                    _step2_batch, amp_map = {}, {}
                 sell_price_map.update(_step2_batch)
-                sell_price_map.update(fetch_price_map_otc(date_str))
+                try:
+                    sell_price_map.update(fetch_price_map_otc(date_str))
+                except Exception as e:
+                    print(f"  ⚠️ 上櫃行情抓取失敗，已略過（上櫃股票由 Step 4 保底補抓；上市股票不受影響）：{e}")
                 # 買超：完整三段式（含量比），直接傳入已抓好的 batch，不重打
                 enrich_with_prices([foreign, trust, dealer], date_str, prefetched_map=sell_price_map)
                 # 賣超：只需收盤價，從 batch 直接填，量比 None
@@ -6337,6 +6652,7 @@ def main():
         ("B", "成交量歷史",     lambda: update_volume_history(ss, date_str, current_prices)),  # ★ v11.31
         ("C", "收盤價歷史",     lambda: update_price_history(ss, date_str, current_prices)),  # ★ v11.39
         ("D", "大盤法人",       lambda: update_market_flow(ss, date_str)),  # ★ v11.63
+        ("E", "技術面(MACD)",   lambda: update_technical_sheet(ss, date_str)),  # ★ v11.69（需在 6、D 之後）
     ]
 
     if args.sheet_only:
