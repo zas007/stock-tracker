@@ -19,7 +19,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.71"  # ← 每次 commit 只改這裡
+VERSION = "v11.74"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -59,6 +59,11 @@ try:
     ALERT_MARGIN_EXCLUDE_ETF     = getattr(_cfg, "ALERT_MARGIN_EXCLUDE_ETF", True) # ★ v11.67 融資計數排除 ETF
     ALERT_SHIP_RISK_COUNT_YELLOW = getattr(_cfg, "ALERT_SHIP_RISK_COUNT_YELLOW", 2)
     ALERT_SHIP_RISK_COUNT_RED    = getattr(_cfg, "ALERT_SHIP_RISK_COUNT_RED", 4)
+    # ★ v11.72 T73：大盤單日跌幅（%）與三大法人合計買賣超（億）納入警訊
+    ALERT_INDEX_DROP_YELLOW      = getattr(_cfg, "ALERT_INDEX_DROP_YELLOW", -3.0)
+    ALERT_INDEX_DROP_RED         = getattr(_cfg, "ALERT_INDEX_DROP_RED", -5.0)
+    ALERT_INST_SELL_YELLOW       = getattr(_cfg, "ALERT_INST_SELL_YELLOW", -1000.0)
+    ALERT_INST_SELL_RED          = getattr(_cfg, "ALERT_INST_SELL_RED", None)   # None＝法人合計不單獨升 🔴
     ALERT_COLOR = getattr(_cfg, "ALERT_COLOR", {
         "red":    {"red": 0.96, "green": 0.80, "blue": 0.80},
         "yellow": {"red": 1.00, "green": 0.95, "blue": 0.70},
@@ -104,6 +109,10 @@ except ImportError:
     ALERT_MARGIN_EXCLUDE_ETF     = True
     ALERT_SHIP_RISK_COUNT_YELLOW = 2
     ALERT_SHIP_RISK_COUNT_RED    = 4
+    ALERT_INDEX_DROP_YELLOW      = -3.0
+    ALERT_INDEX_DROP_RED         = -5.0
+    ALERT_INST_SELL_YELLOW       = -1000.0
+    ALERT_INST_SELL_RED          = None
     ALERT_COLOR = {
         "red":    {"red": 0.96, "green": 0.80, "blue": 0.80},
         "yellow": {"red": 1.00, "green": 0.95, "blue": 0.70},
@@ -482,6 +491,12 @@ def fetch_price_map_batch(date_str):
 
 
 
+# ★ v11.73 T54（61a）：同一次執行內，上櫃行情（約 1 MB 以上）原本在 Step 2、保底補抓、族群補抓、
+#   賣超補價等處各下載一次（每次執行約 3～4 次），18:00 時段每次下載都可能被截斷。
+#   改為同一次執行、同一日期只要成功抓過一次，之後共用；失敗（空表）不快取，後面的步驟仍會再試。
+_OTC_MAP_CACHE = {}
+
+
 def fetch_price_map_otc(date_str):
     """
     ★ v10.8 上櫃股行情（OTC/櫃買中心）
@@ -492,6 +507,10 @@ def fetch_price_map_otc(date_str):
     ★ v11.39 比照 fetch_price_map_batch，失敗時最多 retry 2 次（間隔 3 秒），
       解決 OTC API 偶發無回應/逾時導致命中率隨網路狀況浮動的問題（#30）。
     """
+    if _OTC_MAP_CACHE.get(date_str):
+        print(f"  [otc] ♻️ 共用本次執行已抓的上櫃行情（{len(_OTC_MAP_CACHE[date_str])} 支）")
+        return dict(_OTC_MAP_CACHE[date_str])   # 回傳複本，避免呼叫端修改到快取
+
     year = int(date_str[:4]) - 1911
     d    = f"{year}/{date_str[4:6]}/{date_str[6:]}"
     url  = (f"https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes"
@@ -537,7 +556,8 @@ def fetch_price_map_otc(date_str):
 
         if otc_map:
             print(f"  [otc] ✅ {len(otc_map)} 支")
-            return otc_map
+            _OTC_MAP_CACHE[date_str] = otc_map
+            return dict(otc_map)
         print("  [otc] ❌ 解析結果為空")
 
     print("  [otc] ❌ 重試 3 次仍失敗，回傳空表")
@@ -580,14 +600,28 @@ def fetch_futures_signal(date_str):
            f"?queryStartDate={d}&queryEndDate={d}&commodityId=TXF")
 
     # ★ 期交所回傳 Big5 編碼，需用 bytes 模式讀取再 decode
-    result = subprocess.run([
-        "curl", "-s", "--max-time", "20",
-        "-H", "User-Agent: Mozilla/5.0",
-        "-H", "Referer: https://www.taifex.com.tw/",
-        url
-    ], capture_output=True)   # 不帶 text=True，取 bytes
+    # ★ v11.73（60a）：無回應（空內容）時最多重試 2 次、間隔 3 秒（11/18 18:00 曾偶發無回應）；
+    #   回傳 HTML（無當日資料）屬正常情況，不重試
+    result = None
+    for attempt in range(1, 4):
+        if attempt > 1:
+            print(f"  ⏳ 期交所 API 無回應，3 秒後重試（{attempt - 1}/2）...")
+            time.sleep(3)
+        try:
+            result = subprocess.run([
+                "curl", "-s", "--max-time", "20",
+                "-H", "User-Agent: Mozilla/5.0",
+                "-H", "Referer: https://www.taifex.com.tw/",
+                url
+            ], capture_output=True)   # 不帶 text=True，取 bytes
+        except Exception as e:
+            print(f"  ⚠️ 期交所下載失敗：{e}")
+            result = None
+            continue
+        if result.stdout:
+            break
 
-    if not result.stdout:
+    if result is None or not result.stdout:
         print("  ⚠️ 期交所 API 無回應")
         return None
 
@@ -3000,7 +3034,7 @@ def _extract_futures_delta(futures_line):
         return None
 
 
-def calc_market_alert(all_rows, futures_line):
+def calc_market_alert(all_rows, futures_line, index_pct=None, inst_total=None):
     """
     彙總三項訊號，判斷當日大盤警戒等級。
     all_rows: build_row 產出的原始列（尚未經過 update_recommendation 的評分過濾）
@@ -3011,6 +3045,8 @@ def calc_market_alert(all_rows, futures_line):
       原本寫死的 row[28]（正好對到「融資增減(張)」）換成 ANALYSIS_IDX["融資增減(張)"]，
       避免以後改 ANALYSIS_HEADERS 順序時又對錯欄位。
     futures_line: 外資期貨燈號文字（含「較前日 ±N」）
+    index_pct: ★ v11.72 T73 加權指數當日漲跌幅（%，float）；None＝取不到，略過此項
+    inst_total: ★ v11.72 T73 三大法人合計買賣超（億，float）；None＝取不到，略過此項
 
     回傳 (level, alert_line, margin_codes, ship_codes)
       level: "red" / "yellow" / "green"
@@ -3019,6 +3055,26 @@ def calc_market_alert(all_rows, futures_line):
     """
     level = "green"
     reasons = []
+
+    # 0. ★ v11.72 T73：大盤單日跌幅（只看下跌；漲幅不計）。依據：11/16 加權 −6.03%（史上第二大跌點）、
+    #    三大法人合計 −1,140.5 億，警訊卻只有 🟡。近 9 個交易日分布：≤−3% 共 3 天、≤−5% 僅 11/16。
+    if index_pct is not None:
+        if index_pct <= ALERT_INDEX_DROP_RED:
+            level = "red"
+            reasons.append(f"大盤單日 {index_pct:+.2f}%")
+        elif index_pct <= ALERT_INDEX_DROP_YELLOW:
+            level = "yellow" if level != "red" else level
+            reasons.append(f"大盤單日 {index_pct:+.2f}%")
+
+    # 0b. ★ v11.72 T73：三大法人合計賣超。門檻 −1,000 億只升 🟡（近 9 個交易日 4 天觸發，
+    #     −800 億會 5/9 天觸發，過敏）；預設不單獨升 🔴（ALERT_INST_SELL_RED=None）
+    if inst_total is not None:
+        if ALERT_INST_SELL_RED is not None and inst_total <= ALERT_INST_SELL_RED:
+            level = "red"
+            reasons.append(f"三大法人合計 {inst_total:+,.1f} 億")
+        elif inst_total <= ALERT_INST_SELL_YELLOW:
+            level = "yellow" if level != "red" else level
+            reasons.append(f"三大法人合計 {inst_total:+,.1f} 億")
 
     # 1. 外資期貨單日變化
     delta = _extract_futures_delta(futures_line)
@@ -5012,7 +5068,20 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
         print(f"  {futures_line}")
 
     # ★ v11.34 大盤警訊彙總（外資期貨變化 / 融資異常放大 / 出貨風險紅燈）
-    alert_level, alert_line, alert_margin_codes, alert_ship_codes = calc_market_alert(all_rows, futures_line)
+    # ★ v11.72 T73：大盤單日跌幅與三大法人合計納入警訊；各抓一次，取不到就傳 None（略過，行為與 v11.71 相同）
+    _alert_index_pct, _alert_inst_total = None, None
+    try:
+        _alert_index_pct = fetch_market_index(date_str)
+    except Exception as _e:
+        print(f"  ⚠️ 警訊：加權指數漲跌幅取得失敗（{_e}），略過大盤跌幅項")
+    try:
+        _inst = fetch_market_institutional(date_str)
+        if _inst and _inst.get("合計") is not None:
+            _alert_inst_total = float(_inst["合計"])
+    except Exception as _e:
+        print(f"  ⚠️ 警訊：三大法人合計取得失敗（{_e}），略過法人賣超項")
+    alert_level, alert_line, alert_margin_codes, alert_ship_codes = calc_market_alert(
+        all_rows, futures_line, index_pct=_alert_index_pct, inst_total=_alert_inst_total)
     print(f"  {alert_line}")
 
     # ★ v11.35 依警訊等級決定評分降權係數（只影響籌碼集中度×連續天數矩陣分數）
@@ -5908,29 +5977,58 @@ def fetch_industry_map():
         return {}
 
 
+# ★ v11.74 T75（64a）：自動補入的新股票改存獨立檔 sector_auto.json，不再改寫 config.py。
+#   舊問題：自動補入直接寫進本機 config.py，之後用整份 config.py 覆蓋本機檔時，補入的內容就被清掉，
+#   同一批新股票（如 1416、6112、3701）每隔幾天又重新「發現」。config.py 現在只由人工維護。
+SECTOR_AUTO_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sector_auto.json")
+
+
+def _read_sector_auto():
+    """讀 sector_auto.json → {代號: {"sector": 族群, "name": 名稱}}；檔案不存在回 {}；壞檔回 {} 並提示。"""
+    if not os.path.exists(SECTOR_AUTO_FILE):
+        return {}
+    try:
+        with open(SECTOR_AUTO_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        print(f"  ⚠️ 讀取 sector_auto.json 失敗：{e}（本次略過自動補入的族群；檔案不會被改動）")
+        return {}
+
+
+def load_sector_auto():
+    """啟動時把 sector_auto.json 的股票併入 SECTOR_MAP（已在 config.py 任一族群的代號略過）。回傳併入檔數。"""
+    data = _read_sector_auto()
+    if not data:
+        return 0
+    existing = {c for members in SECTOR_MAP.values() for c in members}
+    n = 0
+    for code, info in sorted(data.items()):
+        sector = info.get("sector", "其他") if isinstance(info, dict) else str(info)
+        if code in existing:
+            continue
+        SECTOR_MAP.setdefault(sector, []).append(code)
+        existing.add(code)
+        n += 1
+    print(f"  ✅ 已載入 sector_auto.json：{len(data)} 支（併入 {n} 支，其餘已在 config.py）")
+    return n
+
+
 def auto_update_sector_map(new_codes, all_buy_names, industry_map):
     """
-    把買超榜上不在 SECTOR_MAP 的股票，依官方產業別自動補入 config.py。
+    把買超榜上不在 SECTOR_MAP 的股票，依官方產業別自動補入（★ v11.74：存到 sector_auto.json，不改 config.py）。
     回傳補入的 {代號: 族群名} dict。
     """
     if not new_codes:
         return {}
 
-    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.py")
-    if not os.path.exists(config_path):
-        print("  ⚠️ 找不到 config.py，無法自動補入族群")
-        return {}
-
-    with open(config_path, "r", encoding="utf-8") as f:
-        config_text = f.read()
-
     added = {}
+    _existing = {c for members in SECTOR_MAP.values() for c in members}   # 已在任一族群的代號不重複補入
     for code in sorted(new_codes):
         # ★ v11.7 過濾：ETF/槓桿反向/受益憑證略過不補入族群
         # is_etf_code 涵蓋：含字母、00 開頭（如 0052、00919）、長度 > 4
-        if not code.isdigit() or len(code) > 4 or is_etf_code(code):
+        if not code.isdigit() or len(code) > 4 or is_etf_code(code) or code in _existing:
             continue
-        name   = all_buy_names.get(code, code)
         sector = industry_map.get(code, "其他")
         SECTOR_MAP.setdefault(sector, [])
         if code not in SECTOR_MAP[sector]:
@@ -5940,29 +6038,17 @@ def auto_update_sector_map(new_codes, all_buy_names, industry_map):
     if not added:
         return {}
 
+    data = _read_sector_auto()
     for code, sector in added.items():
-        name = all_buy_names.get(code, code)
-        # 若族群已存在，插入到該列表末尾
-        def replacer_existing(m):
-            inner = m.group(2).rstrip()
-            sep   = ",\n        " if inner.strip() else "\n        "
-            return m.group(1) + inner + sep + '"' + code + '",  # ' + name + "\n    " + m.group(3)
-        pattern_existing = r'("' + re.escape(sector) + r'"\s*:\s*\[)([^\]]*?)(\])'
-        new_text, n = re.subn(pattern_existing, replacer_existing, config_text, flags=re.DOTALL)
-        if n:
-            config_text = new_text
-        else:
-            # 族群不存在，在 SECTOR_MAP 最後一個 } 前插入
-            new_entry = '\n    "' + sector + '": [\n        "' + code + '",  # ' + name + '\n    ],'
-            pattern_map = r"(SECTOR_MAP\s*=\s*\{)(.*?)(\n\})"
-            def replacer_map(m):
-                return m.group(1) + m.group(2) + new_entry + m.group(3)
-            config_text = re.sub(pattern_map, replacer_map, config_text, flags=re.DOTALL)
-
-    with open(config_path, "w", encoding="utf-8") as f:
-        f.write(config_text)
-
-    print(f"  ✅ 自動補入 SECTOR_MAP：{added}")
+        data[code] = {"sector": sector, "name": all_buy_names.get(code, code)}
+    try:
+        tmp = SECTOR_AUTO_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(dict(sorted(data.items())), f, ensure_ascii=False, indent=1)
+        os.replace(tmp, SECTOR_AUTO_FILE)
+        print(f"  ✅ 自動補入 SECTOR_MAP：{added}（已存入 sector_auto.json，共 {len(data)} 支）")
+    except Exception as e:
+        print(f"  ⚠️ 寫入 sector_auto.json 失敗：{e}（本次仍生效，下次會再補入）")
     return added
 
 def _build_sector_triggered(all_buy_codes):
@@ -6332,6 +6418,7 @@ def debug_margin(date_str):
 def main():
     import argparse
     global CODE_TO_SECTOR
+    load_sector_auto()   # ★ v11.74 T75：先把 sector_auto.json 併入 SECTOR_MAP，再建反查表
     CODE_TO_SECTOR = _build_code_to_sector()
 
     parser = argparse.ArgumentParser(description="台灣股市三大法人買超/賣超追蹤")

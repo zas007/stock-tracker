@@ -115,6 +115,13 @@ ALERT_MARGIN_EXCLUDE_ETF    = True  # 融資計數排除 ETF
 ALERT_SHIP_RISK_COUNT_YELLOW = 2
 ALERT_SHIP_RISK_COUNT_RED    = 4
 
+# ★ v11.72 T73：大盤單日跌幅（%）與三大法人合計買賣超（億）納入警訊
+#   依據（log 內 9 個交易日）：大盤 ≤−3% 共 3 天、≤−5% 僅 11/16（−6.03%）；法人合計 ≤−1,000 億 4 天、≤−800 億 5 天（過敏）
+ALERT_INDEX_DROP_YELLOW = -3.0     # 加權單日跌幅 ≤ 此值 → 🟡
+ALERT_INDEX_DROP_RED    = -5.0     # ≤ 此值 → 🔴
+ALERT_INST_SELL_YELLOW  = -1000.0  # 三大法人合計 ≤ 此值（億）→ 🟡
+ALERT_INST_SELL_RED     = None     # None＝法人合計不單獨升 🔴；要啟用請填數字（如 -2000.0）
+
 # 警訊等級對應顏色（RGB 0~1，供 Google Sheets 底色使用）
 ALERT_COLOR = {
     "red":    {"red": 0.96, "green": 0.80, "blue": 0.80},   # 淡紅
@@ -361,7 +368,12 @@ SECTOR_MAP = {
         "4927",  # 泰鼎-KY,
         "6165",  # 浪凡,
         "2468",  # 華經,
-        "6152",  # 百一
+        "6152",  # 百一,
+        "3029",  # 零壹,
+        "3030",  # 德律,
+        "6112",  # 邁達特,
+        "1416",  # 廣豐,
+        "8016",  # 矽創
     ],
     "電信": [
         "2412",  # 中華電
