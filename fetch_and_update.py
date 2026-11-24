@@ -19,7 +19,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.74"  # ← 每次 commit 只改這裡
+VERSION = "v11.75"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -83,6 +83,13 @@ try:
     TARGET_HIGH_LOOKBACK     = getattr(_cfg, "TARGET_HIGH_LOOKBACK", 20)
     TARGET_HIGH_MIN_UPSIDE_PCT = getattr(_cfg, "TARGET_HIGH_MIN_UPSIDE_PCT", 2.0)
     STOP_BELOW_PCT           = getattr(_cfg, "STOP_BELOW_PCT", 3.0)
+    # ★ v11.75 推薦股風險提示（只顯示、不計分）／大盤趨勢橫幅／個股 β 與壓力測試
+    RISK_TAG_MA_PCT          = getattr(_cfg, "RISK_TAG_MA_PCT", -15.0)    # 距月線 ≤ 此值 → 🔻弱勢
+    RISK_TAG_AMP_PCT         = getattr(_cfg, "RISK_TAG_AMP_PCT", 10.0)    # 當日振幅 ≥ 此值 → 🌪高波動
+    TREND_BANNER_ENABLED     = getattr(_cfg, "TREND_BANNER_ENABLED", True)  # 警訊列尾端附加大盤均線趨勢文字
+    BETA_WINDOW              = getattr(_cfg, "BETA_WINDOW", 60)           # 個股 β／最大單日跌幅取最近幾筆日報酬
+    BETA_MIN_PAIRS           = getattr(_cfg, "BETA_MIN_PAIRS", 30)        # 對齊後日報酬少於此數則不算 β
+    BETA_STRESS_PCT          = getattr(_cfg, "BETA_STRESS_PCT", -3.0)     # 壓力測試：假設大盤單日漲跌幅（%）
     print("✅ 已載入 config.py")
 except ImportError:
     print("⚠️ 找不到 config.py，使用主程式內建預設值")
@@ -129,6 +136,12 @@ except ImportError:
     TARGET_HIGH_LOOKBACK     = 20
     TARGET_HIGH_MIN_UPSIDE_PCT = 2.0
     STOP_BELOW_PCT           = 3.0
+    RISK_TAG_MA_PCT          = -15.0
+    RISK_TAG_AMP_PCT         = 10.0
+    TREND_BANNER_ENABLED     = True
+    BETA_WINDOW              = 60
+    BETA_MIN_PAIRS           = 30
+    BETA_STRESS_PCT          = -3.0
 
 # ═══════════════════════════════════════════════
 # ★ 固定系統設定
@@ -1008,9 +1021,16 @@ def _fmtqik_month_closes(ymd):
     return out
 
 
+_INDEX_FETCH_CACHE = {}   # ★ v11.75 date_str → (已抓月數, closes)；同一次執行內「明日關注」大盤趨勢、大盤法人、技術面共用，不重複打 FMTQIK
+
+
 def fetch_index_closes(date_str, months=None):
-    """往前抓 months 個月的 FMTQIK，回傳 {YYYY/MM/DD: 收盤}（每月之間停 1.5 秒）。"""
+    """往前抓 months 個月的 FMTQIK，回傳 {YYYY/MM/DD: 收盤}（每月之間停 1.5 秒）。
+    ★ v11.75 同一次執行內已抓過且月數足夠就直接用快取（多出的舊資料不影響均線計算）。"""
     months = months or INDEX_MA_MONTHS
+    hit = _INDEX_FETCH_CACHE.get(date_str)
+    if hit and hit[0] >= months and hit[1]:
+        return dict(hit[1])
     d = datetime.strptime(date_str, "%Y%m%d").replace(day=1)
     closes = {}
     for i in range(months):
@@ -1018,6 +1038,8 @@ def fetch_index_closes(date_str, months=None):
         d = (d - timedelta(days=1)).replace(day=1)
         if i < months - 1:
             time.sleep(1.5)
+    if closes:
+        _INDEX_FETCH_CACHE[date_str] = (months, dict(closes))
     return closes
 
 
@@ -1094,6 +1116,107 @@ def _stock_vals(code, date_str, price):
     return vals
 
 
+def _stock_series(code, date_str, price):
+    """★ v11.75 同 _stock_vals，但回傳 [(YYYY/MM/DD, close), ...]（今日現價補在最後），供 β 對齊大盤日期用。"""
+    series = list(fetch_stock_closes(code, date_str))
+    target = datetime.strptime(date_str, "%Y%m%d").strftime("%Y/%m/%d")
+    if price and (not series or series[-1][0] != target):
+        series.append((target, price))
+    elif price and series and series[-1][0] == target:
+        series[-1] = (target, price)
+    return series
+
+
+def risk_tag_text(price, vals, amp):
+    """
+    ★ v11.75 推薦股風險提示（只顯示、不計分）。
+      🔻弱勢：現價距月線(20日) ≤ RISK_TAG_MA_PCT（預設 -15%）
+      🌪高波動：當日振幅 ≥ RISK_TAG_AMP_PCT（預設 10%）
+    兩個都符合就都顯示；都沒符合或資料不足回傳空字串。
+    """
+    tags = []
+    ma20 = _sma(vals, 20) if vals else None
+    if ma20 and price:
+        pct = (price / ma20 - 1) * 100
+        if pct <= RISK_TAG_MA_PCT:
+            tags.append(f"🔻弱勢（距月線 {pct:+.1f}%）")
+    if amp is not None and amp >= RISK_TAG_AMP_PCT:
+        tags.append(f"🌪高波動（振幅 {amp:.1f}%）")
+    return "｜".join(tags)
+
+
+def _parse_pct_cell(v):
+    """把「⚡14.5%」「4.6%」「-3.2」之類儲存格轉成 float；空值或無法解析回傳 None。"""
+    m = re.search(r"-?\d+(?:\.\d+)?", str(v or "").replace(",", ""))
+    return float(m.group()) if m else None
+
+
+def calc_beta_stats(series, idx_closes, window=None, min_pairs=None, stress_pct=None):
+    """
+    ★ v11.75 個股近 window 筆日報酬對加權指數的 β、最大單日跌幅、壓力測試預估。
+    series：[(YYYY/MM/DD, close), ...]（舊→新）；idx_closes：{YYYY/MM/DD: 加權收盤}。
+    日報酬以「該股相鄰兩個有資料的交易日」計算；大盤取同兩個日期的收盤算同區間報酬（個股停牌跨日也對得齊）。
+    回傳 (beta, 最大單日跌幅%, 壓力測試預估%)；對不齊的筆數 < min_pairs 時 β 與壓力測試為 ""；
+    最大單日跌幅只需個股本身（至少 5 筆報酬）。完全不足回傳 ("", "", "")。
+    """
+    window = window or BETA_WINDOW
+    min_pairs = BETA_MIN_PAIRS if min_pairs is None else min_pairs
+    stress_pct = BETA_STRESS_PCT if stress_pct is None else stress_pct
+    pairs = []      # (個股報酬, 大盤報酬 or None)
+    for (d0, c0), (d1, c1) in zip(series, series[1:]):
+        if not c0 or not c1:
+            continue
+        r_s = c1 / c0 - 1
+        i0, i1 = (idx_closes or {}).get(d0), (idx_closes or {}).get(d1)
+        r_i = (i1 / i0 - 1) if (i0 and i1) else None
+        pairs.append((r_s, r_i))
+    pairs = pairs[-window:]
+    if len(pairs) < 5:
+        return "", "", ""
+    max_drop = round(min(p[0] for p in pairs) * 100, 2)
+    aligned = [(a, b) for a, b in pairs if b is not None]
+    if len(aligned) < min_pairs:
+        return "", max_drop, ""
+    n = len(aligned)
+    ma = sum(a for a, _ in aligned) / n
+    mb = sum(b for _, b in aligned) / n
+    var = sum((b - mb) ** 2 for _, b in aligned)
+    if var <= 0:
+        return "", max_drop, ""
+    beta = sum((a - ma) * (b - mb) for a, b in aligned) / var
+    return round(beta, 2), max_drop, round(beta * stress_pct, 2)
+
+
+def index_trend_text(date_str):
+    """
+    ★ v11.75 大盤趨勢文字（附加在「明日關注」警訊橫幅尾端，不進警訊等級、不影響降權）。
+    收盤在月線(20日)或年線(240日)之下才回傳文字，否則（或資料不足、抓不到）回傳空字串。
+    文字刻意不含 🔴🟡（_apply_alert_colors 以這兩個符號判斷警訊底色）。
+    """
+    if not TREND_BANNER_ENABLED:
+        return ""
+    closes = fetch_index_closes(date_str)
+    target = datetime.strptime(date_str, "%Y%m%d").strftime("%Y/%m/%d")
+    if not closes or target not in closes:
+        return ""
+    vals = [closes[k] for k in sorted(closes) if k <= target]
+    c = vals[-1]
+    mas = [("5日線", _sma(vals, 5)), ("月線", _sma(vals, 20)), ("季線", _sma(vals, 60)), ("年線", _sma(vals, 240))]
+    ma20, ma240 = mas[1][1], mas[3][1]
+    below_20 = bool(ma20) and c < ma20
+    below_240 = bool(ma240) and c < ma240
+    if not (below_20 or below_240):
+        return ""
+    below = [name for name, v in mas if v and c < v]
+    parts = []
+    if ma20:
+        parts.append(f"距月線 {(c / ma20 - 1) * 100:+.1f}%")
+    if ma240:
+        parts.append(f"距年線 {(c / ma240 - 1) * 100:+.1f}%")
+    head = "全面破位：收盤在 5日／月／季／年線之下" if len(below) == 4 else f"收盤在 {'／'.join(below)}之下"
+    return f"📉 大盤趨勢：{head}（{'、'.join(parts)}）"
+
+
 def stock_ma20_suffix(code, date_str, price):
     """
     個股月線說明文字，例：「｜月線 52.3（-4.1%）反彈未達月線」；資料不足 20 日或失敗回傳空字串。
@@ -1115,14 +1238,25 @@ def attach_ma20_suffix(rec_rows, date_str, labels=None):
     """
     _TECH_QUEUE.clear()
     ok = 0
+    risk_hits = []   # ★ v11.75 有風險提示的個股
     for n, r in enumerate(rec_rows):
         try:
             code = str(r[REC_IDX["代號"]])
             price = _to_pos_float(r[REC_IDX["現價"]])
-            vals = _stock_vals(code, date_str, price)
+            series = _stock_series(code, date_str, price)     # ★ v11.75 帶日期（β 對齊大盤用）
+            vals = [c for _, c in series]
             if vals:
                 _TECH_QUEUE.append({"date": date_str, "group": labels[n] if labels else "",
-                                    "code": code, "name": r[REC_IDX["股票名稱"]], "vals": vals})
+                                    "code": code, "name": r[REC_IDX["股票名稱"]], "vals": vals,
+                                    "dates": [d for d, _ in series]})
+            # ★ v11.75 風險提示（資料不足或沒符合條件就留空；任何錯誤都不影響後面的月線附加）
+            try:
+                _rt = risk_tag_text(price, vals, _parse_pct_cell(r[REC_IDX["振幅%"]]))
+                r[REC_IDX["風險提示"]] = _rt
+                if _rt:
+                    risk_hits.append(f"{r[REC_IDX['股票名稱']]}")
+            except Exception as _e:
+                print(f"  ⚠️ 風險提示計算失敗（{r[REC_IDX['代號']]}）：{_e}")
             label = r[REC_IDX["推薦買進價位"]]
             if label in ("", "-", None):
                 continue
@@ -1133,6 +1267,9 @@ def attach_ma20_suffix(rec_rows, date_str, labels=None):
         except Exception as e:
             print(f"  ⚠️ 月線計算失敗（{r[REC_IDX['代號']]}）：{e}")
     print(f"  📏 個股月線：{ok}/{len(rec_rows)} 檔已附加月線位置")
+    print(f"  🚩 風險提示：{len(risk_hits)}/{len(rec_rows)} 檔有標記"
+          f"（距月線 ≤ {RISK_TAG_MA_PCT:g}% 或 振幅 ≥ {RISK_TAG_AMP_PCT:g}%）"
+          + (f"：{'、'.join(risk_hits)}" if risk_hits else ""))
 
 
 # ═══════════════════════════════════════════════
@@ -1284,10 +1421,12 @@ TECH_HEADERS = ["日期", "組別", "代號", "名稱", "現價", "5日線", "�
                 "DIF", "MACD(訊號)", "柱狀體", "零軸", "交叉訊號", "柱狀體趨勢", "資料天數",
                 # ★ v11.70 新增（放最右側，不動既有欄位順序）
                 "10日線", "季線(60日)", "均線排列", "布林上軌", "布林下軌", "%b", "通道寬度%", "通道位置", "通道趨勢",
-                "RSI(14)", "RSI狀態"]
+                "RSI(14)", "RSI狀態",
+                # ★ v11.75 個股 β 與壓力測試（放最右側；β 取近 BETA_WINDOW 筆日報酬對加權指數，只記錄不進評分）
+                "Beta(60日)", "60日最大單日跌幅%", f"大盤{BETA_STRESS_PCT:g}%預估跌幅%"]
 
 
-def _tech_row(date_disp, group, code, name, vals):
+def _tech_row(date_disp, group, code, name, vals, beta_cells=None):
     price = vals[-1]
     ma5, ma20 = _sma(vals, 5), _sma(vals, 20)
     pct = round((price / ma20 - 1) * 100, 2) if ma20 else ""
@@ -1311,7 +1450,8 @@ def _tech_row(date_disp, group, code, name, vals):
     return ([date_disp, group, code, name, price, ma5 or "", ma20 or "", pct,
              ma_position_label(price, ma5, ma20)] + tail + [len(vals)]
             + [ma10 or "", ma60 or "", align] + bb_cells
-            + [round(rsi, 1) if rsi is not None else "", rsi_label(rsi)])
+            + [round(rsi, 1) if rsi is not None else "", rsi_label(rsi)]
+            + list(beta_cells if beta_cells is not None else ["", "", ""]))
 
 
 def update_technical_sheet(ss, date_str):
@@ -1333,9 +1473,27 @@ def update_technical_sheet(ss, date_str):
             closes = {}
     if closes and date_disp in closes:
         vals = [closes[k] for k in sorted(closes) if k <= date_disp]
-        rows.append(_tech_row(date_disp, "大盤", "TAIEX", "加權指數", vals))
+        # ★ v11.75 大盤列只填「最大單日跌幅」（β 對自己無意義，留空）
+        _mk_beta = ["", "", ""]
+        try:
+            _ks = sorted(k for k in closes if k <= date_disp)
+            _, _mk_drop, _ = calc_beta_stats([(k, closes[k]) for k in _ks], {})
+            _mk_beta = ["", _mk_drop, ""]
+        except Exception as e:
+            print(f"  ⚠️ 技術面：大盤最大單日跌幅計算失敗（{e}）")
+        rows.append(_tech_row(date_disp, "大盤", "TAIEX", "加權指數", vals, _mk_beta))
 
-    stock_rows = [_tech_row(date_disp, q["group"], q["code"], q["name"], q["vals"])
+    def _beta_cells(q):
+        try:
+            if q.get("dates"):
+                # 大盤取不到（closes 為空）時 β／壓力測試留空，最大單日跌幅只需個股本身，照算
+                b, d, st = calc_beta_stats(list(zip(q["dates"], q["vals"])), closes or {})
+                return [b, d, st]
+        except Exception as e:
+            print(f"  ⚠️ 技術面：β 計算失敗（{q.get('code')}）：{e}")
+        return ["", "", ""]
+
+    stock_rows = [_tech_row(date_disp, q["group"], q["code"], q["name"], q["vals"], _beta_cells(q))
                   for q in _TECH_QUEUE if q["date"] == date_str]
     rows += stock_rows
     if not rows:
@@ -1362,6 +1520,15 @@ def update_technical_sheet(ss, date_str):
           f"｜黃金交叉：{('、'.join(gold)) or '無'}｜死亡交叉：{('、'.join(dead)) or '無'}")
     print(f"     布林上軌附近：{('、'.join(up_names)) or '無'}｜下軌附近：{('、'.join(dn_names)) or '無'}"
           f"｜RSI 超買：{('、'.join(ob_names)) or '無'}｜超賣：{('、'.join(os_names)) or '無'}")
+    # ★ v11.75 β 摘要：β 由高到低前 3 檔，與近 BETA_WINDOW 日單日跌幅 ≤ -7% 的個股
+    try:
+        _ib, _id = TECH_HEADERS.index("Beta(60日)"), TECH_HEADERS.index("60日最大單日跌幅%")
+        _bs = sorted([r for r in stock_rows if isinstance(r[_ib], (int, float))], key=lambda r: -r[_ib])[:3]
+        _hd = [f"{r[3]}({r[_id]:+.1f}%)" for r in stock_rows if isinstance(r[_id], (int, float)) and r[_id] <= -7.0]
+        print(f"     β 最高：{('、'.join(f'{r[3]} {r[_ib]:.2f}' for r in _bs)) or '無資料'}"
+              f"｜近{BETA_WINDOW}日單日跌幅 ≤ -7%：{('、'.join(_hd)) or '無'}")
+    except Exception as e:
+        print(f"  ⚠️ 技術面：β 摘要失敗（不影響寫入）：{e}")
 
 
 # ═══════════════════════════════════════════════
@@ -4144,6 +4311,9 @@ RECOMMEND_HEADERS = [
     "目標價",
     "停損價",
     "風報比",
+    # ★ v11.75 風險提示（只顯示、不計分；規則見 risk_tag_text()）。同樣加在最右側，不動既有欄位順序；
+    #   「推薦成效／推薦歷史」不另存此欄——振幅%已在、月線距離在「建議買進價位」文字裡，backtest 可回算。
+    "風險提示",
 ]
 
 PERFORMANCE_HEADERS = [
@@ -5084,6 +5254,16 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
         all_rows, futures_line, index_pct=_alert_index_pct, inst_total=_alert_inst_total)
     print(f"  {alert_line}")
 
+    # ★ v11.75 大盤趨勢：只附加在「明日關注」警訊橫幅尾端（顯示用）；警訊等級、降權、「警訊」工作表都不受影響
+    banner_alert_line = alert_line
+    try:
+        _trend_txt = index_trend_text(date_str)
+        if _trend_txt:
+            banner_alert_line = f"{alert_line}　{_trend_txt}"
+            print(f"  {_trend_txt}")
+    except Exception as _e:
+        print(f"  ⚠️ 大盤趨勢文字取得失敗（不影響推薦與警訊）：{_e}")
+
     # ★ v11.35 依警訊等級決定評分降權係數（只影響籌碼集中度×連續天數矩陣分數）
     _score_dampen = ALERT_DAMPEN_FACTOR.get(alert_level, 1.0)
     if _score_dampen < 1.0:
@@ -5264,7 +5444,7 @@ def update_recommendation(ss, date_str, all_rows, cached_futures=""):
     block = [
         [f"資料日期：{disp} ｜ 明日關注推薦（綜合評分前5名）"] + [""] * (n_cols - 1),
         [futures_line] + [""] * (n_cols - 1),
-        [alert_line] + [""] * (n_cols - 1),   # ★ v11.34 大盤警訊摘要列
+        [banner_alert_line] + [""] * (n_cols - 1),   # ★ v11.34 大盤警訊摘要列（v11.75 尾端可附大盤趨勢）
         RECOMMEND_HEADERS,
     ] + rec_rows
 
@@ -6022,6 +6202,9 @@ def auto_update_sector_map(new_codes, all_buy_names, industry_map):
     if not new_codes:
         return {}
 
+    # ★ v11.75 T76：官方產業別整份查詢失敗（載入 0 支）時，本次先暫以「其他」計入讓當天流程照常，
+    #   但不寫入 sector_auto.json（否則一次網路失敗就會把真實產業永久誤存成「其他」）；下次再重查。
+    lookup_ok = bool(industry_map)
     added = {}
     _existing = {c for members in SECTOR_MAP.values() for c in members}   # 已在任一族群的代號不重複補入
     for code in sorted(new_codes):
@@ -6037,6 +6220,11 @@ def auto_update_sector_map(new_codes, all_buy_names, industry_map):
 
     if not added:
         return {}
+
+    if not lookup_ok:
+        print(f"  ⚠️ 官方產業別查詢失敗（0 支）：{len(added)} 支暫以「其他」計入本次執行，"
+              f"未存入 sector_auto.json，下次執行會重新查詢：{sorted(added)}")
+        return added
 
     data = _read_sector_auto()
     for code, sector in added.items():
