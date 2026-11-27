@@ -19,7 +19,7 @@ import subprocess, json, gspread, sys, os, time, re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-VERSION = "v11.75"  # ← 每次 commit 只改這裡
+VERSION = "v11.76"  # ← 每次 commit 只改這裡
 
 # ★ v10：從獨立設定檔載入所有參數
 try:
@@ -90,6 +90,10 @@ try:
     BETA_WINDOW              = getattr(_cfg, "BETA_WINDOW", 60)           # 個股 β／最大單日跌幅取最近幾筆日報酬
     BETA_MIN_PAIRS           = getattr(_cfg, "BETA_MIN_PAIRS", 30)        # 對齊後日報酬少於此數則不算 β
     BETA_STRESS_PCT          = getattr(_cfg, "BETA_STRESS_PCT", -3.0)     # 壓力測試：假設大盤單日漲跌幅（%）
+    # ★ v11.76 「技術面」事件註記（突發消息造成跳空時，標示「指標受事件扭曲」；只記錄、不進評分）
+    EVENT_WINDOW_DAYS        = getattr(_cfg, "EVENT_WINDOW_DAYS", 3)         # 事件日之後仍標註的交易日數（事件日＋後 N 個交易日）
+    EVENT_MARKET_MOVE_PCT    = getattr(_cfg, "EVENT_MARKET_MOVE_PCT", 3.0)    # 加權指數單日漲跌幅絕對值 ≥ 此值 → 自動事件日
+    EVENT_STOCK_MOVE_PCT     = getattr(_cfg, "EVENT_STOCK_MOVE_PCT", 7.0)     # 個股單日（收盤對收盤）漲跌幅絕對值 ≥ 此值 → 個股事件日
     print("✅ 已載入 config.py")
 except ImportError:
     print("⚠️ 找不到 config.py，使用主程式內建預設值")
@@ -142,6 +146,9 @@ except ImportError:
     BETA_WINDOW              = 60
     BETA_MIN_PAIRS           = 30
     BETA_STRESS_PCT          = -3.0
+    EVENT_WINDOW_DAYS        = 3
+    EVENT_MARKET_MOVE_PCT    = 3.0
+    EVENT_STOCK_MOVE_PCT     = 7.0
 
 # ═══════════════════════════════════════════════
 # ★ 固定系統設定
@@ -1423,10 +1430,108 @@ TECH_HEADERS = ["日期", "組別", "代號", "名稱", "現價", "5日線", "�
                 "10日線", "季線(60日)", "均線排列", "布林上軌", "布林下軌", "%b", "通道寬度%", "通道位置", "通道趨勢",
                 "RSI(14)", "RSI狀態",
                 # ★ v11.75 個股 β 與壓力測試（放最右側；β 取近 BETA_WINDOW 筆日報酬對加權指數，只記錄不進評分）
-                "Beta(60日)", "60日最大單日跌幅%", f"大盤{BETA_STRESS_PCT:g}%預估跌幅%"]
+                "Beta(60日)", "60日最大單日跌幅%", f"大盤{BETA_STRESS_PCT:g}%預估跌幅%",
+                # ★ v11.76 事件註記（放最右側；大盤／個股單日大漲跌或人工事件日曆，事件日＋後 EVENT_WINDOW_DAYS 個交易日標「指標受事件扭曲」，只記錄不進評分）
+                "事件註記"]
 
 
-def _tech_row(date_disp, group, code, name, vals, beta_cells=None):
+EVENT_FORCE_PREFIX = "⚡"      # MARKET_EVENTS 文字以此開頭 → 即使大盤漲跌未達門檻也開事件窗
+
+
+def event_window_triggers(series, move_pct, window=None):
+    """
+    ★ v11.76 在最近 window+1 個交易日（含今日）內，找「收盤對前一交易日收盤」漲跌幅絕對值 ≥ move_pct 的日子。
+    series：[(YYYY/MM/DD, close), ...]（舊→新，最後一筆為今日）。
+    回傳 [(offset, 日期, 漲跌幅%)]；offset＝今日距該日的交易日數（0＝事件日當天）。
+    """
+    window = EVENT_WINDOW_DAYS if window is None else window
+    out = []
+    n = len(series)
+    for off in range(window + 1):
+        i = n - 1 - off
+        if i < 1:
+            break
+        (_d0, c0), (d1, c1) = series[i - 1], series[i]
+        if not c0 or not c1:
+            continue
+        r = (c1 / c0 - 1) * 100
+        if abs(r) >= move_pct:
+            out.append((off, d1, round(r, 1)))
+    return out
+
+
+def event_manual_hits(market_dates, events=None, window=None):
+    """
+    ★ v11.76 人工事件日曆（MARKET_EVENTS）落在最近 window+1 個交易日內的事件。
+    market_dates：加權指數交易日（YYYY/MM/DD，舊→新，最後一筆為今日）。
+    事件日不是交易日（週末、假日）時順延到其後第一個交易日；今日之後的事件不算。
+    回傳 [(offset, 交易日, 是否強制開窗, 文字)]；強制＝文字以 ⚡ 開頭。
+    """
+    events = MARKET_EVENTS if events is None else events
+    window = EVENT_WINDOW_DAYS if window is None else window
+    n = len(market_dates)
+    if n < 2 or not events:
+        return []
+    lo = market_dates[max(n - window - 2, 0)]        # 窗口前一個交易日（事件日需晚於它）
+    out = []
+    for k, txt in events.items():
+        try:
+            e = datetime.strptime(str(k), "%Y%m%d").strftime("%Y/%m/%d")
+        except ValueError:
+            continue
+        if e <= lo:
+            continue
+        anchor = next((d for d in market_dates if d >= e), None)
+        if anchor is None:
+            continue
+        off = n - 1 - market_dates.index(anchor)
+        if off > window:
+            continue
+        txt = str(txt).strip()
+        out.append((off, anchor, txt.startswith(EVENT_FORCE_PREFIX), re.sub(r"^[⚡\ufe0f\s]+", "", txt)))
+    return out
+
+
+def build_event_note(mk_series, stock_series=None):
+    """
+    ★ v11.76 「技術面」事件註記欄文字；沒有事件回傳空字串。
+    觸發：①大盤單日漲跌 ≥ EVENT_MARKET_MOVE_PCT ②人工事件日曆文字以 ⚡ 開頭 ③個股單日漲跌 ≥ EVENT_STOCK_MOVE_PCT（僅該股那一列）。
+    事件日起算，至事件後第 EVENT_WINDOW_DAYS 個交易日止都標「⚠️指標受事件扭曲」。
+    人工事件日曆有寫、但未達門檻也沒加 ⚡ 的，只在事件日當天以「📢原因」註記，不標失真。
+    """
+    def _lab(off):
+        return "事件日" if off == 0 else f"事件後第{off}天"
+    mk_series = mk_series or []
+    mk_dates = [d for d, _ in mk_series]
+    auto = event_window_triggers(mk_series, EVENT_MARKET_MOVE_PCT) if len(mk_series) >= 2 else []
+    manual = event_manual_hits(mk_dates)
+    reasons = {}
+    for _off, d, _force, txt in manual:
+        if txt:
+            reasons.setdefault(d, []).append(txt)
+    flagged = {d: (off, r) for off, d, r in auto}
+    for off, d, force, _txt in manual:
+        if force and d not in flagged:
+            flagged[d] = (off, None)
+    details = []
+    for d in sorted(flagged, reverse=True):
+        off, r = flagged[d]
+        s_ = f"大盤 {d[5:]}" + (f" {r:+.1f}%" if r is not None else "") + f"（{_lab(off)}）"
+        if reasons.get(d):
+            s_ += "：" + "、".join(reasons[d])
+        details.append(s_)
+    plain = [f"📢{txt}" for off, d, _f, txt in manual if d not in flagged and off == 0 and txt]
+    if stock_series and len(stock_series) >= 2:
+        for off, d, r in event_window_triggers(stock_series, EVENT_STOCK_MOVE_PCT):
+            details.append(f"個股 {d[5:]} {r:+.1f}%（{_lab(off)}）")
+    parts = []
+    if details:
+        parts.append("⚠️指標受事件扭曲｜" + "｜".join(details))
+    parts += plain
+    return "｜".join(parts)
+
+
+def _tech_row(date_disp, group, code, name, vals, beta_cells=None, event_note=""):
     price = vals[-1]
     ma5, ma20 = _sma(vals, 5), _sma(vals, 20)
     pct = round((price / ma20 - 1) * 100, 2) if ma20 else ""
@@ -1451,7 +1556,8 @@ def _tech_row(date_disp, group, code, name, vals, beta_cells=None):
              ma_position_label(price, ma5, ma20)] + tail + [len(vals)]
             + [ma10 or "", ma60 or "", align] + bb_cells
             + [round(rsi, 1) if rsi is not None else "", rsi_label(rsi)]
-            + list(beta_cells if beta_cells is not None else ["", "", ""]))
+            + list(beta_cells if beta_cells is not None else ["", "", ""])
+            + [event_note or ""])
 
 
 def update_technical_sheet(ss, date_str):
@@ -1471,6 +1577,8 @@ def update_technical_sheet(ss, date_str):
         except Exception as e:
             print(f"  ⚠️ 技術面：加權指數取不到（{e}），略過大盤列")
             closes = {}
+    # ★ v11.76 大盤收盤序列（事件註記共用）；取不到則為空，事件註記只剩個股那一半
+    _mk_series = [(k, closes[k]) for k in sorted(closes) if k <= date_disp] if (closes and date_disp in closes) else []
     if closes and date_disp in closes:
         vals = [closes[k] for k in sorted(closes) if k <= date_disp]
         # ★ v11.75 大盤列只填「最大單日跌幅」（β 對自己無意義，留空）
@@ -1481,7 +1589,12 @@ def update_technical_sheet(ss, date_str):
             _mk_beta = ["", _mk_drop, ""]
         except Exception as e:
             print(f"  ⚠️ 技術面：大盤最大單日跌幅計算失敗（{e}）")
-        rows.append(_tech_row(date_disp, "大盤", "TAIEX", "加權指數", vals, _mk_beta))
+        try:
+            _mk_ev = build_event_note(_mk_series)
+        except Exception as e:
+            print(f"  ⚠️ 技術面：大盤事件註記失敗（不影響寫入）：{e}")
+            _mk_ev = ""
+        rows.append(_tech_row(date_disp, "大盤", "TAIEX", "加權指數", vals, _mk_beta, _mk_ev))
 
     def _beta_cells(q):
         try:
@@ -1493,7 +1606,14 @@ def update_technical_sheet(ss, date_str):
             print(f"  ⚠️ 技術面：β 計算失敗（{q.get('code')}）：{e}")
         return ["", "", ""]
 
-    stock_rows = [_tech_row(date_disp, q["group"], q["code"], q["name"], q["vals"], _beta_cells(q))
+    def _event_note(q):
+        try:
+            return build_event_note(_mk_series, list(zip(q["dates"], q["vals"])) if q.get("dates") else None)
+        except Exception as e:
+            print(f"  ⚠️ 技術面：事件註記失敗（{q.get('code')}）：{e}")
+            return ""
+
+    stock_rows = [_tech_row(date_disp, q["group"], q["code"], q["name"], q["vals"], _beta_cells(q), _event_note(q))
                   for q in _TECH_QUEUE if q["date"] == date_str]
     rows += stock_rows
     if not rows:
@@ -1529,6 +1649,14 @@ def update_technical_sheet(ss, date_str):
               f"｜近{BETA_WINDOW}日單日跌幅 ≤ -7%：{('、'.join(_hd)) or '無'}")
     except Exception as e:
         print(f"  ⚠️ 技術面：β 摘要失敗（不影響寫入）：{e}")
+    # ★ v11.76 事件註記摘要：大盤是否在事件窗內，與個股自身單日大漲跌的檔數
+    try:
+        _ie = TECH_HEADERS.index("事件註記")
+        _mk_note = rows[0][_ie] if rows[0][1] == "大盤" else ""
+        _own = [r[3] for r in stock_rows if "個股 " in str(r[_ie])]
+        print(f"     事件註記：大盤 {_mk_note or '無'}｜個股單日 ±{EVENT_STOCK_MOVE_PCT:g}% 以上：{('、'.join(_own)) or '無'}")
+    except Exception as e:
+        print(f"  ⚠️ 技術面：事件註記摘要失敗（不影響寫入）：{e}")
 
 
 # ═══════════════════════════════════════════════
